@@ -4,7 +4,9 @@
 	import type { Provider } from '#lib/api';
 	import { auth } from '#lib/auth.svelte';
 	import { chat } from '#lib/chat.svelte';
+	import BudgetCircle from '#lib/BudgetCircle.svelte';
 	import ConfirmDialog from '#lib/ConfirmDialog.svelte';
+	import Markdown from '#lib/Markdown.svelte';
 	import ThinkingOrb from '#lib/ThinkingOrb.svelte';
 
 	let input = $state('');
@@ -24,6 +26,13 @@
 	}
 
 	let userInitials = $derived(initials(auth.session?.user.name, auth.session?.user.email));
+
+	let tokensChat = $derived(
+		Math.round(chat.messages.reduce((n, m) => n + (m.content?.length ?? 0), 0) / 4)
+	);
+	let budgetTotal = 10;
+	let budgetRemaining = 6.4;
+	let tokensUser = 184_300;
 
 	// The agent's provider is authoritative; otherwise offer every provider.
 	let visibleProviders = $derived(
@@ -181,8 +190,10 @@
 							<ThinkingOrb state="reasoning" size={22} label="Thinking" />
 							<span class="thinking-label">Thinking…</span>
 						</span>
-					{:else}
+					{:else if msg.role === 'user'}
 						<div class="content">{msg.content}</div>
+					{:else}
+						<Markdown content={msg.content} />
 					{/if}
 				</div>
 			</div>
@@ -237,7 +248,9 @@
 						<path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
 					</svg>
 				</button>
+			</div>
 
+			<div class="controls-right">
 				<div class="model-menu" bind:this={modelMenuEl}>
 					<button
 						type="button"
@@ -357,9 +370,6 @@
 						</div>
 					{/if}
 				</div>
-			</div>
-
-			<div class="controls-right">
 				{#if chat.agents.length > 0}
 					<label class="field" title="Agent for this conversation">
 						<span>Agent</span>
@@ -381,6 +391,13 @@
 						{chat.effectiveProvider?.name ?? 'agent provider'}
 					</span>
 				{/if}
+				<BudgetCircle
+					remaining={budgetRemaining}
+					total={budgetTotal}
+					tokensChat={tokensChat}
+					tokensUser={tokensUser}
+					source={chat.effectiveProvider?.name ?? null}
+				/>
 				<button
 					class="primary"
 					type="button"
@@ -564,6 +581,9 @@
 		min-width: 0;
 	}
 	.controls-right {
+		flex-wrap: wrap;
+		justify-content: flex-end;
+		row-gap: 0.45rem;
 		margin-left: auto;
 	}
 	.field {
@@ -654,7 +674,7 @@
 		display: flex;
 		align-items: center;
 		gap: 0.45rem;
-		max-width: min(360px, 55vw);
+		max-width: min(280px, 42vw);
 		padding: 0.45rem 0.8rem;
 		border: 1px solid var(--border-strong);
 		border-radius: var(--radius-full);
@@ -692,7 +712,7 @@
 	}
 	.model-panel {
 		position: absolute;
-		left: 0;
+		right: 0;
 		bottom: calc(100% + 0.6rem);
 		z-index: 20;
 		width: min(360px, 85vw);
