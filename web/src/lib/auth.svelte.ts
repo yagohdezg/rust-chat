@@ -1,7 +1,7 @@
 import { browser } from '$app/env';
 
 export type User = { id: string; email?: string; name?: string; role: string };
-export type Session = { token: string; user: User };
+export type Session = { token: string; refresh_token?: string; user: User };
 
 const STORAGE_KEY = 'rust-chat.session';
 
@@ -29,6 +29,10 @@ class AuthStore {
 
 	get token(): string | null {
 		return this.session?.token ?? null;
+	}
+
+	get refreshToken(): string | null {
+		return this.session?.refresh_token ?? null;
 	}
 
 	set(session: Session) {

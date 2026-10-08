@@ -46,60 +46,68 @@
 	}
 </script>
 
-<h1>Code sandbox</h1>
-<p class="muted">
-	Runs untrusted code in an isolated backend. Network access is disabled by default.
-</p>
+<div class="page">
+	<h1>Code sandbox</h1>
+	<p class="muted">
+		Runs untrusted code in an isolated backend. Network access is disabled by default.
+	</p>
 
-<div class="toolbar">
-	<select bind:value={language} onchange={() => pick(language)} aria-label="language">
-		{#each languages as lang (lang)}
-			<option value={lang}>{lang}</option>
-		{/each}
-	</select>
-	<button class="primary" onclick={() => void run()} disabled={busy}>
-		{busy ? 'Running…' : 'Run'}
-	</button>
+	<div class="toolbar">
+		<select bind:value={language} onchange={() => pick(language)} aria-label="language">
+			{#each languages as lang (lang)}
+				<option value={lang}>{lang}</option>
+			{/each}
+		</select>
+		<button class="primary" onclick={() => void run()} disabled={busy}>
+			{busy ? 'Running…' : 'Run'}
+		</button>
+	</div>
+
+	<textarea
+		bind:value={code}
+		spellcheck="false"
+		rows="14"
+		aria-label="source code"
+	></textarea>
+
+	{#if error}
+		<p class="error">{error}</p>
+	{/if}
+
+	{#if result}
+		<div class="result">
+			<div class="status">
+				exit_code <strong>{result.exit_code}</strong>
+				{#if result.timed_out}<span class="badge">timed out</span>{/if}
+			</div>
+			<h2>stdout</h2>
+			<pre>{result.stdout || '(empty)'}</pre>
+			<h2>stderr</h2>
+			<pre class="stderr">{result.stderr || '(empty)'}</pre>
+		</div>
+	{/if}
 </div>
 
-<textarea
-	bind:value={code}
-	spellcheck="false"
-	rows="14"
-	aria-label="source code"
-></textarea>
-
-{#if error}
-	<p class="error">{error}</p>
-{/if}
-
-{#if result}
-	<div class="result">
-		<div class="status">
-			exit_code <strong>{result.exit_code}</strong>
-			{#if result.timed_out}<span class="badge">timed out</span>{/if}
-		</div>
-		<h2>stdout</h2>
-		<pre>{result.stdout || '(empty)'}</pre>
-		<h2>stderr</h2>
-		<pre class="stderr">{result.stderr || '(empty)'}</pre>
-	</div>
-{/if}
-
 <style>
+	.page {
+		max-width: 900px;
+		margin: 0 auto;
+		padding: 1.5rem 1.25rem;
+	}
 	h1 {
-		margin: 0 0 0.25rem;
-		font-size: 1.35rem;
+		margin: 0 0 0.35rem;
+		font-size: 1.5rem;
+		letter-spacing: -0.02em;
 	}
 	h2 {
-		font-size: 0.8rem;
+		font-size: 0.75rem;
 		text-transform: uppercase;
-		letter-spacing: 0.05em;
-		color: #7b8794;
-		margin: 0.75rem 0 0.3rem;
+		letter-spacing: 0.06em;
+		color: var(--text-faint);
+		margin: 0.85rem 0 0.35rem;
 	}
 	.muted {
-		color: #7b8794;
+		color: var(--text-muted);
 		font-size: 0.9rem;
 		margin-top: 0;
 	}
@@ -109,74 +117,77 @@
 		margin: 1rem 0 0.75rem;
 	}
 	select {
-		background: #0b0d12;
-		border: 1px solid #2a3345;
-		border-radius: 8px;
-		color: #e6e8ee;
-		padding: 0.45rem 0.7rem;
-		font: inherit;
+		background: var(--bg);
+		border: 1px solid var(--border-strong);
+		border-radius: var(--radius);
+		color: var(--text);
+		padding: 0.5rem 0.9rem;
 	}
 	textarea {
 		width: 100%;
 		resize: vertical;
-		background: #0b0d12;
-		border: 1px solid #2a3345;
-		border-radius: 10px;
-		color: #e6e8ee;
-		padding: 0.75rem;
+		background: var(--bg);
+		border: 1px solid var(--border-strong);
+		border-radius: var(--radius);
+		color: var(--text);
+		padding: 0.85rem;
 		font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 		font-size: 0.9rem;
-		line-height: 1.45;
-	}
-	textarea:focus {
-		outline: 2px solid #2563eb;
-		outline-offset: 1px;
+		line-height: 1.5;
 	}
 	.primary {
-		background: #2563eb;
+		background: linear-gradient(135deg, var(--primary-hover), var(--primary-active));
 		border: none;
-		border-radius: 8px;
-		color: #fff;
-		padding: 0.45rem 1.1rem;
+		border-radius: var(--radius);
+		color: var(--on-primary);
+		padding: 0.5rem 1.3rem;
 		font-weight: 600;
+		box-shadow: var(--shadow-sm);
+	}
+	.primary:hover:not(:disabled) {
+		box-shadow: var(--shadow-glow);
+		filter: brightness(1.06);
 	}
 	.primary:disabled {
 		opacity: 0.5;
 		cursor: default;
+		box-shadow: none;
 	}
 	.error {
-		color: #fca5a5;
+		color: var(--danger);
 	}
 	.result {
 		margin-top: 1rem;
-		border: 1px solid #1e2430;
-		border-radius: 10px;
-		background: #0e1118;
-		padding: 0.75rem 1rem 1rem;
+		border: 1px solid var(--border);
+		border-radius: var(--radius-lg);
+		background: var(--bg-elevated);
+		padding: 0.85rem 1.1rem 1.1rem;
+		animation: rise 220ms var(--ease) both;
 	}
 	.status {
-		color: #9aa4b2;
+		color: var(--text-muted);
 		font-size: 0.9rem;
 	}
 	.badge {
 		margin-left: 0.5rem;
-		background: #7f1d1d;
-		color: #fecaca;
-		border-radius: 999px;
-		padding: 0.05rem 0.5rem;
+		background: var(--danger-bg);
+		color: var(--danger);
+		border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent);
+		border-radius: var(--radius-full);
+		padding: 0.05rem 0.55rem;
 		font-size: 0.75rem;
 	}
 	pre {
 		margin: 0;
 		white-space: pre-wrap;
 		overflow-wrap: anywhere;
-		background: #0b0d12;
-		border: 1px solid #1e2430;
-		border-radius: 8px;
-		padding: 0.6rem 0.75rem;
+		background: var(--bg);
+		border: 1px solid var(--border);
+		border-radius: var(--radius);
+		padding: 0.65rem 0.8rem;
 		font-size: 0.85rem;
 	}
 	pre.stderr {
-		color: #fca5a5;
+		color: var(--danger);
 	}
 </style>

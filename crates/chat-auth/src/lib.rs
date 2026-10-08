@@ -1,11 +1,13 @@
 //! Authentication: Argon2 password hashing and JWT session tokens.
 
-use argon2::password_hash::{
-    rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString,
-};
+use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use argon2::Argon2;
+use base64::Engine as _;
 use chrono::{Duration, Utc};
 use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
+use rand::rngs::OsRng;
+use ring::digest::{digest, SHA256};
+use ring::rand::{SecureRandom, SystemRandom};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -60,4 +62,49 @@ pub fn verify_token(secret: &str, token: &str) -> Result<Claims> {
     )
     .map(|data| data.claims)
     .map_err(|_| ChatError::Unauthorized)
+}
+
+/// Generate an opaque 256-bit refresh token, URL-safe base64 without padding.
+/// The plaintext is returned to the client once and stored (hashed) server-side.
+pub fn generate_refresh_token() -> Result<String> {
+    let mut bytes = [0u8; 32];
+    SystemRandom::new()
+        .fill(&mut bytes)
+        .map_err(|_| ChatError::Internal(anyhow::anyhow!("failed to generate refresh token")))?;
+    Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes))
+}
+
+/// Hash a refresh token for storage: SHA-256, lowercase hex. Storing only the
+/// hash means a database leak does not yield usable tokens, and lookup stays a
+/// direct unique-index hit.
+pub fn hash_refresh_token(token: &str) -> String {
+    digest(&SHA256, token.as_bytes())
+        .as_ref()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn refresh_tokens_are_unique_and_hashed() {
+        let a = generate_refresh_token().unwrap();
+        let b = generate_refresh_token().unwrap();
+        assert_ne!(a, b);
+        assert_ne!(hash_refresh_token(&a), a);
+        assert_ne!(hash_refresh_token(&a), hash_refresh_token(&b));
+        // 32 bytes base64url => 43 chars; hash is 64 hex chars.
+        assert_eq!(a.len(), 43);
+        assert_eq!(hash_refresh_token(&a).len(), 64);
+    }
+
+    #[test]
+    fn password_hash_round_trip() {
+        let hash = hash_password("correct horse").unwrap();
+        assert!(verify_password("correct horse", &hash).unwrap());
+        assert!(!verify_password("wrong", &hash).unwrap());
+    }
 }

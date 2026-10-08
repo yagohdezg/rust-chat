@@ -13,18 +13,56 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
+use serde_json::Value;
 use tokio::sync::watch;
 use uuid::Uuid;
+
+/// A non-content SSE event (e.g. `tool_call`, `tool_result`) produced during a
+/// generation. Emitted in order alongside the `delta` stream.
+#[derive(Debug, Clone)]
+pub struct SseEvent {
+    pub name: String,
+    pub data: Value,
+}
+
+impl SseEvent {
+    pub fn new(name: impl Into<String>, data: Value) -> Self {
+        Self {
+            name: name.into(),
+            data,
+        }
+    }
+}
 
 /// Latest state of a generation, broadcast to subscribers.
 #[derive(Debug, Clone)]
 pub enum StreamState {
     /// Still generating; `content` is everything accumulated so far.
-    Streaming { content: String },
+    Streaming {
+        content: String,
+        events: Vec<SseEvent>,
+    },
     /// Finished successfully.
-    Completed { content: String },
+    Completed {
+        content: String,
+        events: Vec<SseEvent>,
+    },
     /// Failed after producing `content`; `error` is a human-readable message.
-    Failed { content: String, error: String },
+    Failed {
+        content: String,
+        error: String,
+        events: Vec<SseEvent>,
+    },
+}
+
+impl StreamState {
+    pub fn events(&self) -> &[SseEvent] {
+        match self {
+            StreamState::Streaming { events, .. }
+            | StreamState::Completed { events, .. }
+            | StreamState::Failed { events, .. } => events,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -42,6 +80,7 @@ impl StreamHub {
     pub fn open(&self, message_id: Uuid) -> watch::Sender<StreamState> {
         let (tx, _rx) = watch::channel(StreamState::Streaming {
             content: String::new(),
+            events: Vec::new(),
         });
         self.senders.lock().unwrap().insert(message_id, tx.clone());
         tx

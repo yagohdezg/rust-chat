@@ -330,6 +330,7 @@ name = "chat-agents"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "async-stream",
  "async-trait",
  "chat-core",
  "chat-providers",
@@ -348,9 +349,12 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "argon2",
+ "base64 0.22.1",
  "chat-core",
  "chrono",
  "jsonwebtoken",
+ "rand 0.8.8",
+ "ring",
  "serde",
  "thiserror",
  "uuid",
@@ -361,7 +365,9 @@ name = "chat-core"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "dotenvy",
+ "ring",
  "serde",
  "sqlx",
  "thiserror",

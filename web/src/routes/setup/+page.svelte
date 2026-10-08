@@ -1,28 +1,35 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
-	import * as api from '#lib/api';
 	import { auth } from '#lib/auth.svelte';
+	import { chat } from '#lib/chat.svelte';
 
-	let mode = $state<'login' | 'register'>('login');
-	let email = $state('');
-	let password = $state('');
-	let name = $state('');
-	let error = $state<string | null>(null);
+	let name = $state('OpenAI');
+	let kind = $state('openai');
+	let baseUrl = $state('https://api.openai.com/v1');
+	let apiKey = $state('');
+	let global = $state(true);
 	let busy = $state(false);
+	let error = $state<string | null>(null);
+
+	const isAdmin = $derived(auth.session?.user.role === 'admin');
 
 	async function submit(event: SubmitEvent) {
 		event.preventDefault();
 		busy = true;
 		error = null;
 		try {
-			const session =
-				mode === 'login'
-					? await api.login(email, password)
-					: await api.register(email, password, name || undefined);
-			auth.set(session);
-			goto('/chat');
-		} catch (err) {
-			error = err instanceof Error ? err.message : String(err);
+			const provider = await chat.createProvider({
+				name: name.trim(),
+				kind,
+				base_url: baseUrl.trim(),
+				api_key: apiKey.trim() || undefined,
+				global: isAdmin && global
+			});
+			if (provider) {
+				goto('/chat');
+			} else {
+				error = chat.error ?? 'Could not save the provider.';
+			}
 		} finally {
 			busy = false;
 		}
@@ -30,53 +37,49 @@
 </script>
 
 <div class="card">
-	<h1>{mode === 'login' ? 'Sign in' : 'Create account'}</h1>
+	<h1>Connect a model provider</h1>
+	<p class="lede">
+		This instance has no model provider yet. Add an OpenAI-compatible endpoint to start chatting.
+	</p>
 	<form onsubmit={submit}>
-		{#if mode === 'register'}
-			<label>
-				Name
-				<input bind:value={name} autocomplete="name" placeholder="Ada Lovelace" />
+		<label>
+			Label
+			<input bind:value={name} required placeholder="OpenAI" />
+		</label>
+		<label>
+			Kind
+			<select bind:value={kind}>
+				<option value="openai">OpenAI</option>
+				<option value="custom">OpenAI-compatible</option>
+			</select>
+		</label>
+		<label>
+			Base URL
+			<input bind:value={baseUrl} required placeholder="https://api.openai.com/v1" />
+		</label>
+		<label>
+			API key
+			<input type="password" bind:value={apiKey} placeholder="sk-…" autocomplete="off" />
+		</label>
+		{#if isAdmin}
+			<label class="check">
+				<input type="checkbox" bind:checked={global} />
+				Share with every user (instance default)
 			</label>
 		{/if}
-		<label>
-			Email
-			<input type="email" bind:value={email} autocomplete="email" required />
-		</label>
-		<label>
-			Password
-			<input
-				type="password"
-				bind:value={password}
-				autocomplete={mode === 'login' ? 'current-password' : 'new-password'}
-				required
-			/>
-		</label>
 
 		{#if error}<p class="error">{error}</p>{/if}
 
-		<button class="primary" type="submit" disabled={busy}>
-			{busy ? 'Please wait…' : mode === 'login' ? 'Sign in' : 'Register'}
+		<button class="primary" type="submit" disabled={busy || !name.trim() || !baseUrl.trim()}>
+			{busy ? 'Saving…' : 'Save provider'}
 		</button>
 	</form>
-
-	<p class="switch">
-		{mode === 'login' ? 'No account yet?' : 'Already registered?'}
-		<button
-			class="link"
-			onclick={() => {
-				mode = mode === 'login' ? 'register' : 'login';
-				error = null;
-			}}
-		>
-			{mode === 'login' ? 'Create one' : 'Sign in'}
-		</button>
-	</p>
 </div>
 
 <style>
 	.card {
 		position: relative;
-		max-width: 390px;
+		max-width: 430px;
 		margin: 4rem auto;
 		padding: 1.75rem;
 		border: 1px solid var(--border);
@@ -94,9 +97,14 @@
 		background: linear-gradient(90deg, var(--primary-active), var(--primary-hover), var(--accent));
 	}
 	h1 {
-		margin: 0 0 1.25rem;
+		margin: 0 0 0.4rem;
 		font-size: 1.35rem;
 		letter-spacing: -0.02em;
+	}
+	.lede {
+		margin: 0 0 1.25rem;
+		color: var(--text-muted);
+		font-size: 0.88rem;
 	}
 	form {
 		display: flex;
@@ -110,7 +118,13 @@
 		font-size: 0.85rem;
 		color: var(--text-muted);
 	}
-	input {
+	label.check {
+		flex-direction: row;
+		align-items: center;
+		gap: 0.5rem;
+	}
+	input,
+	select {
 		background: var(--bg);
 		border: 1px solid var(--border-strong);
 		border-radius: var(--radius);
@@ -146,20 +160,5 @@
 		margin: 0;
 		padding: 0.45rem 0.7rem;
 		font-size: 0.85rem;
-	}
-	.switch {
-		margin: 1.25rem 0 0;
-		font-size: 0.85rem;
-		color: var(--text-muted);
-	}
-	.link {
-		background: none;
-		border: none;
-		color: var(--accent);
-		padding: 0;
-		font-weight: 600;
-	}
-	.link:hover {
-		color: var(--primary-hover);
 	}
 </style>

@@ -1,26 +1,29 @@
 mod error;
 mod extract;
+mod rate_limit;
 mod routes;
 mod state;
 mod stream;
 
 use std::sync::Arc;
 
-use axum::routing::{get, post};
+use axum::http::{header, HeaderValue, Method};
+use axum::middleware;
+use axum::routing::{delete, get, patch, post, put};
 use axum::Router;
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::EnvFilter;
 
-use chat_core::{Config, DatabaseBackend, FileStorageKind, SandboxBackendKind};
+use chat_agents::{CodeInterpreterTool, ToolRegistry};
+use chat_core::{Config, DatabaseBackend, FileStorageKind, SandboxBackendKind, SecretCipher};
 use chat_db_postgres::{PgVectorStore, PostgresStore};
 use chat_db_sqlite::{SqliteStore, SqliteVectorStore};
 use chat_files_s3::S3FileStore;
-use chat_providers::OpenAiProvider;
 use chat_rag::{OpenAiEmbedder, RagPipeline};
-use chat_sandbox::{BoxliteBackend, PodmanBackend, SandboxBackend};
+use chat_sandbox::{BoxliteBackend, PodmanBackend, SandboxBackend, SandboxSpec};
 use chat_store::{FileStore, LocalFileStore, Store, VectorStore};
 
 use crate::state::AppState;
@@ -31,16 +34,26 @@ async fn main() -> anyhow::Result<()> {
     let cfg = Config::from_env()?;
     init_tracing(&cfg.log_level);
 
+    // At-rest encryption for provider API keys. A dedicated key is preferred;
+    // otherwise a stable key is derived from JWT_SECRET.
+    if cfg.secret_encryption_key.is_none() {
+        tracing::warn!(
+            "SECRET_ENCRYPTION_KEY is not set; deriving provider-key encryption from JWT_SECRET \
+             (set a dedicated key in production)"
+        );
+    }
+    let secrets: Arc<SecretCipher> = Arc::new(cfg.secret_cipher()?);
+
     // `chat-server migrate` applies migrations and exits — intended for a
     // one-shot Kubernetes Job / initContainer so booting replicas do not race.
     if std::env::args().nth(1).as_deref() == Some("migrate") {
-        let _ = connect_store(&cfg, true).await?;
+        let _ = connect_store(&cfg, secrets, true).await?;
         tracing::info!("migrations applied");
         return Ok(());
     }
 
     // Composition root: pick the relational + vector backend from config.
-    let (store, vectors) = connect_store(&cfg, cfg.migrate_on_boot).await?;
+    let (store, vectors) = connect_store(&cfg, secrets, cfg.migrate_on_boot).await?;
     if !cfg.migrate_on_boot {
         tracing::warn!("MIGRATE_ON_BOOT=false; expecting migrations to run out-of-band");
     }
@@ -85,11 +98,6 @@ async fn main() -> anyhow::Result<()> {
         tracing::warn!("OPENAI_API_KEY not set; RAG/file indexing disabled");
     }
 
-    let provider = Arc::new(OpenAiProvider::new(
-        &cfg.openai_base_url,
-        cfg.openai_api_key.clone().unwrap_or_default(),
-    ));
-
     let sandbox: Arc<dyn SandboxBackend> = match cfg.sandbox_backend {
         SandboxBackendKind::Podman => Arc::new(PodmanBackend::new()),
         SandboxBackendKind::Boxlite => Arc::new(BoxliteBackend::new(&cfg.boxlite_url)),
@@ -100,26 +108,100 @@ async fn main() -> anyhow::Result<()> {
         "sandbox backend ready"
     );
 
+    // Tool registry for the agent runtime. The sandbox-backed code interpreter
+    // is opt-in so a plain deployment never grants model-driven execution.
+    let mut tools = ToolRegistry::new();
+    if cfg.sandbox_tool_enabled {
+        let spec = SandboxSpec {
+            image: cfg.sandbox_image.clone(),
+            timeout_seconds: cfg.sandbox_timeout_seconds,
+            memory_mb: cfg.sandbox_memory_mb,
+            cpus: cfg.sandbox_cpus,
+            network: false,
+        };
+        tools.register(Arc::new(CodeInterpreterTool::new(sandbox.clone(), spec)));
+        tracing::info!(tool = "execute_code", "sandbox tool registered");
+    }
+    if !tools.is_empty() {
+        tracing::info!("agent runtime enabled (tools registered)");
+    }
+
     let bind_addr = cfg.bind_addr.clone();
     let state = Arc::new(AppState {
         cfg: Arc::new(cfg),
         store,
         vectors,
         files,
-        provider,
         sandbox,
+        tools,
         rag,
         hub: Arc::new(StreamHub::new()),
+        rate_limit: Arc::new(rate_limit::RateLimiter::new()),
     });
+
+    // Auth and chat get their own per-IP rate limiters; everything else is
+    // unlimited at this layer.
+    let auth_routes = Router::new()
+        .route("/api/auth/register", post(routes::register))
+        .route("/api/auth/login", post(routes::login))
+        .route("/api/auth/refresh", post(routes::refresh))
+        .route("/api/auth/logout", post(routes::logout))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            rate_limit::limit_auth,
+        ));
+    let chat_routes = Router::new()
+        .route("/api/chat", post(routes::chat))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            rate_limit::limit_chat,
+        ));
 
     let app = Router::new()
         .route("/health", get(routes::health))
-        .route("/api/auth/register", post(routes::register))
-        .route("/api/auth/login", post(routes::login))
         .route("/api/me", get(routes::me))
+        .route(
+            "/api/admin/users",
+            get(routes::admin_list_users).post(routes::admin_create_user),
+        )
+        .route(
+            "/api/admin/users/{id}",
+            patch(routes::admin_update_user).delete(routes::admin_delete_user),
+        )
+        .route("/api/admin/audit", get(routes::admin_list_audit))
+        .route(
+            "/api/admin/providers",
+            post(routes::admin_bulk_create_providers),
+        )
+        .route("/api/models", get(routes::list_models))
         .route(
             "/api/conversations",
             get(routes::list_conversations).post(routes::create_conversation),
+        )
+        .route(
+            "/api/conversations/{id}",
+            delete(routes::delete_conversation).patch(routes::update_conversation),
+        )
+        .route(
+            "/api/agents",
+            get(routes::list_agents).post(routes::create_agent),
+        )
+        .route("/api/agents/{id}", delete(routes::delete_agent))
+        .route(
+            "/api/providers",
+            get(routes::list_providers).post(routes::create_provider),
+        )
+        .route(
+            "/api/providers/{id}",
+            delete(routes::delete_provider).patch(routes::update_provider),
+        )
+        .route(
+            "/api/providers/{id}/models",
+            get(routes::list_provider_models),
+        )
+        .route(
+            "/api/providers/{id}/credential",
+            put(routes::set_provider_credential),
         )
         .route(
             "/api/conversations/{id}/messages",
@@ -132,37 +214,76 @@ async fn main() -> anyhow::Result<()> {
             get(routes::download_file).delete(routes::delete_file),
         )
         .route("/api/messages/{id}/stream", get(routes::resume_stream))
-        .route("/api/chat", post(routes::chat))
         .route("/api/sandbox/run", post(routes::sandbox_run))
+        .merge(auth_routes)
+        .merge(chat_routes)
         .layer(TraceLayer::new_for_http())
-        .layer(CorsLayer::permissive())
+        .layer(build_cors(&state.cfg))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
     tracing::info!(addr = %bind_addr, "chat-server listening");
-    axum::serve(listener, app).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await?;
     Ok(())
+}
+
+/// Build the CORS policy from `CORS_ALLOWED_ORIGINS`. `*` restores a permissive
+/// policy; otherwise only the listed origins may call the API cross-origin.
+fn build_cors(cfg: &Config) -> CorsLayer {
+    let layer = CorsLayer::new()
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PATCH,
+            Method::PUT,
+            Method::DELETE,
+            Method::OPTIONS,
+        ])
+        .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE]);
+    if cfg.cors_allowed_origins.iter().any(|origin| origin == "*") {
+        layer.allow_origin(AllowOrigin::any())
+    } else {
+        let origins: Vec<HeaderValue> = cfg
+            .cors_allowed_origins
+            .iter()
+            .filter_map(|origin| origin.parse::<HeaderValue>().ok())
+            .collect();
+        layer.allow_origin(AllowOrigin::list(origins))
+    }
 }
 
 /// Connect to the configured relational + vector backend, optionally applying
 /// migrations. Shared by the server boot path and the `migrate` subcommand.
 async fn connect_store(
     cfg: &Config,
+    secrets: Arc<SecretCipher>,
     migrate: bool,
 ) -> anyhow::Result<(Arc<dyn Store>, Arc<dyn VectorStore>)> {
     match cfg.database_backend {
         DatabaseBackend::Postgres => {
-            let db = PostgresStore::connect(&cfg.database_url).await?;
+            let db = PostgresStore::connect(&cfg.database_url, secrets).await?;
             if migrate {
                 db.migrate().await?;
+                let rewritten = db.encrypt_plaintext_provider_keys().await?;
+                if rewritten > 0 {
+                    tracing::info!(rows = rewritten, "encrypted provider API keys at rest");
+                }
             }
             let vectors = Arc::new(PgVectorStore::new(db.pool()));
             Ok((Arc::new(db), vectors))
         }
         DatabaseBackend::Sqlite => {
-            let db = SqliteStore::connect(&cfg.database_url).await?;
+            let db = SqliteStore::connect(&cfg.database_url, secrets).await?;
             if migrate {
                 db.migrate().await?;
+                let rewritten = db.encrypt_plaintext_provider_keys().await?;
+                if rewritten > 0 {
+                    tracing::info!(rows = rewritten, "encrypted provider API keys at rest");
+                }
             }
             let vectors = Arc::new(SqliteVectorStore::new(db.pool()));
             Ok((Arc::new(db), vectors))

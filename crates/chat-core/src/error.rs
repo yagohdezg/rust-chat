@@ -22,6 +22,14 @@ pub enum ChatError {
     #[error("conflict: {0}")]
     Conflict(String),
 
+    /// No model provider has been configured for this instance/user yet.
+    #[error("no model provider configured")]
+    ProviderNotConfigured,
+
+    /// The upstream model provider returned an error.
+    #[error("upstream provider error: {0}")]
+    Upstream(String),
+
     #[error("database error: {0}")]
     Database(#[from] sqlx::Error),
 
@@ -38,6 +46,8 @@ impl ChatError {
             ChatError::Forbidden => 403,
             ChatError::BadRequest(_) => 400,
             ChatError::Conflict(_) => 409,
+            ChatError::ProviderNotConfigured => 428,
+            ChatError::Upstream(_) => 502,
             ChatError::Config(_) | ChatError::Database(_) | ChatError::Internal(_) => 500,
         }
     }

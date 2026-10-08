@@ -14,12 +14,13 @@ Legend: `[ ]` todo, `[~]` partially done, `[x]` done.
 Working end-to-end: register/login (JWT + Argon2), conversations, message
 history, file upload + UTF-8 RAG indexing, OpenAI-compatible SSE chat,
 Podman sandbox exec (direct, in the API process), Postgres + SQLite stores,
-`pgvector` and brute-force vector search, chunker.
+`pgvector` and brute-force vector search, chunker. Providers are configured at
+runtime (first-run setup, admin global + per-user), agents can be created and
+attached to conversations, and `/api/chat` runs the agent/tool loop.
 
-Scaffolded but **not reachable from the server**: agents/tools runtime,
-MCP client, BoxLite backend, standalone `sandboxd` (the API never calls it),
-`providers`/`agents`/`mcp_servers` tables, `users`/agent config, custom
-providers.
+Still scaffolded (not reachable from the server): the MCP client, BoxLite
+backend, the standalone `sandboxd` (the API never calls it), and the
+`mcp_servers` table.
 
 ---
 
@@ -29,20 +30,32 @@ providers.
 `chat-server`, and `/api/chat` (`routes.rs:240`) calls the provider directly
 instead of `run_agent`.
 
-- [ ] P1 Add `chat-agents` / `chat-mcp` to `chat-server` deps and build a
-      `ToolRegistry` + `AgentConfig` in `state.rs` / `main.rs`.
-- [ ] P1 Route `/api/chat` through `run_agent` when the conversation has an
-      agent (or tools) attached; keep the plain path otherwise.
-- [ ] P1 Stream the agent loop to the client. `run_agent`
-      (`chat-agents/src/runtime.rs:67`) currently buffers the whole turn and
-      returns `Vec<ChatMessage>`; it needs a streaming interface that emits
-      `delta`, `tool_call`, `tool_result` SSE events as they happen.
-- [ ] P1 Persist tool calls/results. `/api/chat` inserts messages with
-      `tool_calls=None, tool_call_id=None` (`routes.rs:252,328`); tool turns
-      would be lost. Add `ChatMessage` -> `insert_message` mapping.
-- [ ] P2 Register `CodeInterpreterTool` against the sandbox backend.
-- [ ] P2 Per-conversation agent selection (`conversations.agent_id` exists but
-      is unused by the chat path).
+- [~] P1 Add `chat-agents` / `chat-mcp` to `chat-server` deps and build a
+      `ToolRegistry` + `AgentConfig` in `state.rs` / `main.rs`. `chat-agents` is
+      wired (`ToolRegistry` in `AppState`, `AgentConfig` built per request);
+      `chat-mcp` is still deferred to §2.
+- [x] P1 Route `/api/chat` through `run_agent` when the conversation has an
+      agent (or tools) attached; keep the plain path otherwise. Agent path
+      triggers on `conversations.agent_id` or a non-empty `ToolRegistry`.
+- [x] P1 Stream the agent loop to the client. `run_agent_stream`
+      (`chat-agents/src/runtime.rs`) emits `Delta`, `ToolCalls` and `ToolResult`
+      events; `/api/chat` forwards them as `delta`, `tool_call`, `tool_result`
+      SSE events (the event list rides along on `StreamState` for replay).
+- [x] P1 Persist tool calls/results. Tool turns are inserted as separate
+      assistant (`tool_calls` JSON) and `tool` messages; history mapping now
+      forwards `tool_calls` / `tool_call_id` back to the model. The final answer
+      placeholder is moved to the end of the conversation after a tool run.
+- [x] P2 Register `CodeInterpreterTool` against the sandbox backend. Opt-in via
+      `SANDBOX_TOOL_ENABLED=true` (off by default).
+- [x] P2 Per-conversation agent selection: `conversations.agent_id` loads the
+      `agents` row (`Store::get_agent`, ownership-checked) to build
+      `AgentConfig` — instructions become the system prompt, the agent model
+      overrides the request default, and its `tools`/`sandbox_enabled` select
+      the tool subset (`ToolRegistry::restricted`). A set `provider_id` is
+      resolved via `Store::get_provider` (user or global) into an
+      `OpenAiProvider`, falling back to the deployment provider. Agents are
+      validated on conversation creation; `Provider` row encryption is handled
+      by §3 (`SecretCipher`).
 
 ## 2. MCP integration
 
@@ -61,16 +74,46 @@ instead of `run_agent`.
 
 ## 3. Pluggable providers (beyond OpenAI)
 
-`providers` table and `kind` column exist; runtime only ever uses
-`OpenAiProvider` (`main.rs:73`).
+Chat providers are now configured at runtime via the database (`providers`),
+not the environment; the runtime builds an `OpenAiProvider` per provider row.
 
-- [ ] P1 Provider registry + per-user provider config API (CRUD over
-      `providers`).
-- [ ] P1 Encrypt `providers.api_key` at rest (currently plaintext; schema
-      comment says "encrypted at rest later").
-- [ ] P2 Anthropic-native provider (not just OpenAI-compatible gateways).
-- [ ] P2 Per-request model/provider selection resolved from conversation ->
-      agent -> provider.
+- [x] P1 Model discovery: `LlmProvider::list_models()` (OpenAI `/models`) and
+      `GET /api/models`; the model is resolved per request (requested/agent
+      model, else the provider's first advertised model).
+
+- [x] P1 Provider registry + provider config API: `GET/POST /api/providers`,
+      `DELETE /api/providers/{id}`, backed by `Store::{list,create,get,delete}
+      _provider`. Chat resolves the provider per turn: agent `provider_id`, else
+      the user's first provider, else a global one.
+- [x] P1 Admin-provided providers: the first registrant becomes admin; an admin
+      creates a global provider (`user_id IS NULL`) that every user inherits,
+      and users may add their own on top. A global provider may ship without a
+      key: each user stores their own via `PUT /api/providers/{id}/credential`
+      (`provider_credentials`, encrypted), and resolution prefers the user's
+      credential over the provider key. `GET /api/providers` reports `has_key`
+      so the UI prompts for a missing key. Non-admins with no provider are sent
+      to the first-run `/setup` page; admins are not forced through it.
+- [~] P1 Per-provider model catalog: models are cached in a `models` table keyed
+      by `provider_id` (`ProviderModel`, `Store::{list,replace}_provider_models`)
+      and served from `GET /api/models` and `GET /api/providers/{id}/models`,
+      refreshed lazily after a 1h TTL (falling back to the stale cache if the
+      provider errors). Per-scope model allowances are still not tracked and the
+      model remains free text.
+- [x] P1 Encrypt `providers.api_key` at rest. `SecretCipher`
+      (`chat-core/src/crypto.rs`) seals keys with ChaCha20-Poly1305 under a key
+      from `SECRET_ENCRYPTION_KEY` (else derived from `JWT_SECRET`); the DB
+      backends encrypt on write and decrypt on read, legacy plaintext rows are
+      handled transparently and encrypted by a boot/`migrate` backfill.
+- [ ] P2 Anthropic-native provider (not just OpenAI-compatible gateways;
+      `create_provider` rejects non-`openai`/`custom` kinds).
+- [x] P2 Per-request model/provider selection resolved from conversation ->
+      agent -> provider (`resolve_agent` in `routes.rs`).
+- [~] P2 Admin provider/key management: `PUT /api/providers/{id}` rotates a
+      provider's name/base_url/kind/api_key (own providers, or any global one
+      for admins; the model cache is invalidated), and
+      `POST /api/admin/providers` bulk-creates instance-wide (global) providers
+      from a list. A LiteLLM importer (parse `config.yaml` `model_list` or call
+      a proxy's `/model/info`) is still pending.
 - [ ] P3 Provider failover / retries with backoff on 429/5xx.
 - [ ] P3 Token accounting and usage reporting per user.
 
@@ -167,6 +210,11 @@ per-user computer is a different control plane.
       (`chat-db-sqlite/src/vector.rs`) for larger corpora.
 - [ ] P3 Postgres vector index tuning: HNSW vs ivfflat, reindex/`ANALYZE`
       strategy, tune `lists` (`migrations/postgres/0002_pgvector.sql:21`).
+- [ ] P3 Collapse the backends: the SQL lives in two sibling crates
+      (`chat-db-postgres`, `chat-db-sqlite`) that each re-implement the same
+      `Store`/`VectorStore` surface. Prefer a single `chat-db` crate with
+      `postgres` / `sqlite` modules (feature-gated), so a new `Store` method is
+      one trait + two impls in one place rather than two crates.
 
 ## 7. RAG
 
@@ -188,17 +236,32 @@ per-user computer is a different control plane.
 
 ## 8. Auth & security
 
-- [ ] P1 Refresh tokens / token rotation (access token only today,
-      `chat-auth/src/lib.rs:39`).
-- [ ] P1 Rate limiting on `/api/auth/*` and `/api/chat` (no throttling today).
-- [ ] P1 Validate `JWT_SECRET` strength at boot (accepts `change-me` literally,
-      `config.rs:114`).
-- [ ] P1 Restrict CORS: `CorsLayer::permissive()` (`main.rs:115`) allows any
-      origin even though auth is bearer-token based.
-- [ ] P2 RBAC / admin routes (`role` is stored and in JWT but never enforced).
+- [x] P1 Refresh tokens / token rotation. `POST /api/auth/refresh` rotates an
+      opaque refresh token (stored SHA-256-hashed in `refresh_tokens`), mints a
+      new access + refresh pair, and revokes the presented token; replaying a
+      revoked token revokes the user's whole session family. `POST
+      /api/auth/logout` revokes one. Register/login return both tokens; the web
+      client auto-refreshes once on a 401.
+- [x] P1 Rate limiting on `/api/auth/*` and `/api/chat`. A process-local
+      per-IP fixed-window limiter (`rate_limit.rs`, `RATE_LIMIT_*`) returns 429
+      with `Retry-After`; honours `X-Forwarded-For` / `X-Real-IP`.
+- [x] P1 Validate `JWT_SECRET` strength at boot: rejects <32 chars and known
+      placeholders (`config.rs::validate_jwt_secret`).
+- [x] P1 Restrict CORS: `CORS_ALLOWED_ORIGINS` allowlist (localhost dev defaults,
+      `*` to opt back into permissive) replaces `CorsLayer::permissive()`.
+- [~] P2 RBAC / admin routes: `AdminUser` extractor gates `/api/admin/*`;
+      `GET /api/admin/users` lists every account with role, enabled state,
+      `last_seen_at` and resource counts; `PATCH /api/admin/users/{id}` changes
+      role or enables/disables an account (self-modification is blocked).
+      `AuthUser` re-reads the row so a disable or role change takes effect
+      immediately, and stale `last_seen_at` is refreshed in the background.
+      Still missing: fine-grained per-scope permissions (who may view/use what).
 - [ ] P2 API-key auth for programmatic clients.
 - [ ] P2 Email verification + password reset flows.
-- [ ] P2 Audit log for auth and sandbox events.
+- [x] P2 Audit log for auth and sandbox events. Append-only `audit_logs` table;
+      login success/failure, registration, admin user changes and sandbox execs
+      are recorded (actor, target, metadata, IP) and surfaced at
+      `GET /api/admin/audit` + the `/admin` console.
 - [ ] P3 Account lockout / breach-password checks.
 - [ ] P3 Upload hardening: max size, MIME sniffing, antivirus, path-traversal
       review (`sanitize_filename` at `routes.rs:375` is a good start).
@@ -229,9 +292,33 @@ per-user computer is a different control plane.
 
 ## 11. Frontend (`web/`)
 
+- [x] P2 Admin console: an `/admin` page (visible only to `role=admin`, linked
+      from the sidebar) listing users from `GET /api/admin/users` (role, enabled,
+      last seen, resource counts) with role toggle / enable-disable controls,
+      global-provider add/delete/key-rotation and bulk import, plus the audit
+      log (`GET /api/admin/audit`).
 - [ ] P2 Surface agent/tool-call events and `sources` citations in the UI.
+- [x] P1 First-run provider setup (`/setup`) and provider list in the sidebar;
+      redirect from `/chat` when no provider is configured.
+- [x] P1 Agent picker + management: a sidebar "Agents" section (create/list/
+      delete), an agent `<select>` in the composer, and an agent chip in the
+      header. New chats and existing conversations can be bound to an agent.
+- [ ] P2 Move provider management off the left sidebar: the provider list/add/
+      delete should live at the bottom-right of the chat (a panel/popover
+      anchored near the composer), not as a sidebar section.
+- [~] P2 Model picker fed by `GET /api/models`: models populate a `<select>`
+      from the default provider (text input only as fallback), but it is not
+      grouped by provider and ignores per-agent provider differences.
+- [ ] P2 "Thinking" waiting animation: a fun animated inline SVG shown while an
+      assistant reply is pending (before the first token / during tool calls).
 - [ ] P2 File management (list/download/delete) and upload progress.
-- [ ] P2 Conversation rename/delete UI.
+- [~] P2 Conversation management UI: delete exists; rename/archive and a proper
+      agent-rebind control are still pending (the PATCH endpoint is in place).
+- [ ] P2 Per-conversation three-dot menu: add an overflow (⋮) opener beside each
+      conversation entry in the sidebar with **rename**, **delete**, and
+      **duplicate**. Rename reuses the PATCH endpoint; duplicate needs a new
+      `POST /api/conversations/{id}/duplicate` (copy the conversation, its
+      messages, and its `agent_id`, with fresh ids).
 - [ ] P2 Streaming reconnect/resume handling.
 - [ ] P3 Sandbox "computer" view (persistent workspace, file browser).
 

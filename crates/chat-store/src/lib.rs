@@ -13,6 +13,9 @@ pub mod traits;
 pub mod types;
 
 pub use files::{FileStore, LocalFileStore};
-pub use models::{Conversation, FileRecord, Message, User};
+pub use models::{
+    AdminUserSummary, Agent, AgentDraft, AuditEntry, AuditLog, Conversation, FileRecord, Message,
+    Provider, ProviderModel, RefreshToken, User,
+};
 pub use traits::{Embedder, Store, VectorStore};
 pub use types::{EmbeddingChunk, RetrievedChunk, Scope};

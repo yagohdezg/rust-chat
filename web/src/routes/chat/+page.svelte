@@ -1,146 +1,31 @@
 <script lang="ts">
 	import { onMount, tick } from 'svelte';
 	import { goto } from '$app/navigation';
-	import * as api from '#lib/api';
+	import type { Provider } from '#lib/api';
 	import { auth } from '#lib/auth.svelte';
+	import { chat } from '#lib/chat.svelte';
 
-	let conversations = $state<api.Conversation[]>([]);
-	let selected = $state<string | null>(null);
-	let messages = $state<api.Message[]>([]);
 	let input = $state('');
-	let model = $state('gpt-4o-mini');
-	let streaming = $state(false);
-	let loading = $state(true);
-	let error = $state<string | null>(null);
-	let uploading = $state(false);
-	let files = $state<api.FileRecord[]>([]);
-	let notice = $state<string | null>(null);
-	let sourcesCount = $state(0);
+	let uploading = $derived(chat.uploading);
 	let scroller: HTMLDivElement;
 	let fileInput: HTMLInputElement;
 
-	onMount(async () => {
-		if (!auth.session) {
-			goto('/login');
-			return;
-		}
-		try {
-			conversations = await api.listConversations();
-			if (conversations.length > 0) await select(conversations[0].id);
-		} catch (err) {
-			error = message(err);
-		} finally {
-			loading = false;
-		}
+	onMount(() => {
+		if (!auth.session) goto('/login');
 	});
 
-	async function select(id: string) {
-		selected = id;
-		error = null;
-		notice = null;
-		try {
-			messages = await api.listMessages(id);
-			files = await api.listFiles(id);
-			await scrollToBottom();
-		} catch (err) {
-			error = message(err);
-		}
-	}
-
-	async function upload(event: Event) {
-		const input = event.target as HTMLInputElement;
-		const file = input.files?.[0];
-		input.value = '';
-		if (!file || !selected) return;
-
-		uploading = true;
-		error = null;
-		notice = null;
-		try {
-			const response = await api.uploadFile({
-				filename: file.name,
-				mime: file.type || undefined,
-				content_b64: await fileToBase64(file),
-				conversation_id: selected
-			});
-			files = [...files, response.file];
-			if (response.indexing_error) {
-				notice = `Attached ${file.name}, but indexing failed: ${response.indexing_error}`;
-			} else if (response.rag_enabled) {
-				notice = `Attached ${file.name} — indexed ${response.chunks_indexed} chunk(s).`;
-			} else {
-				notice = `Attached ${file.name} (RAG disabled, not indexed).`;
-			}
-		} catch (err) {
-			error = message(err);
-		} finally {
-			uploading = false;
-		}
-	}
-
-	async function fileToBase64(file: File): Promise<string> {
-		const bytes = new Uint8Array(await file.arrayBuffer());
-		let binary = '';
-		const chunk = 0x8000;
-		for (let i = 0; i < bytes.length; i += chunk) {
-			binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
-		}
-		return btoa(binary);
-	}
-
-	async function newConversation(): Promise<api.Conversation> {
-		const conversation = await api.createConversation('New chat');
-		conversations = [conversation, ...conversations];
-		selected = conversation.id;
-		messages = [];
-		return conversation;
-	}
+	$effect(() => {
+		// Re-run on any message mutation so the view stays pinned to the bottom.
+		chat.revision;
+		chat.selectedId;
+		for (const msg of chat.messages) void msg.content;
+		void scrollToBottom();
+	});
 
 	async function send() {
-		const content = input.trim();
-		if (!content || streaming || !auth.session) return;
-
-		let conversationId = selected;
-		if (!conversationId) {
-			try {
-				conversationId = (await newConversation()).id;
-			} catch (err) {
-				error = message(err);
-				return;
-			}
-		}
-
+		const content = input;
 		input = '';
-		error = null;
-		messages = [
-			...messages,
-			localMessage('user', content, conversationId),
-			localMessage('assistant', '', conversationId)
-		];
-		const assistant = messages[messages.length - 1];
-		streaming = true;
-		sourcesCount = 0;
-		await scrollToBottom();
-
-		await api.streamChat(
-			{ conversation_id: conversationId, content, model },
-			{
-				onSources: (sources) => {
-					sourcesCount = sources.length;
-				},
-				onDelta: (text) => {
-					assistant.content = (assistant.content ?? '') + text;
-					void scrollToBottom();
-				},
-				onError: (err) => {
-					error = message(err);
-				},
-				onDone: () => {
-					streaming = false;
-				}
-			}
-		);
-		streaming = false;
+		await chat.send(content);
 	}
 
 	function onKeydown(event: KeyboardEvent) {
@@ -155,289 +40,392 @@
 		scroller?.scrollTo({ top: scroller.scrollHeight });
 	}
 
-	function localMessage(role: string, content: string, conversationId: string): api.Message {
-		return {
-			id: crypto.randomUUID(),
-			conversation_id: conversationId,
-			role,
-			content,
-			created_at: new Date().toISOString()
-		};
+	async function onFile(event: Event) {
+		const target = event.target as HTMLInputElement;
+		const file = target.files?.[0];
+		target.value = '';
+		if (file) await chat.upload(file);
 	}
 
-	function message(err: unknown): string {
-		return err instanceof Error ? err.message : String(err);
+	function setProviderKey(provider: Provider) {
+		const key = prompt(`API key for "${provider.name}":`);
+		if (key === null) return;
+		void chat.setProviderKey(provider.id, key.trim());
+	}
+
+	function deleteCurrent() {
+		const conversation = chat.selected;
+		if (!conversation) return;
+		if (confirm(`Delete "${conversation.title}"? This cannot be undone.`)) {
+			void chat.remove(conversation.id);
+		}
 	}
 </script>
 
-<div class="layout">
-	<aside>
-		<button class="new" onclick={() => void newConversation()}>+ New chat</button>
-		{#if loading}
-			<p class="muted">Loading…</p>
-		{:else if conversations.length === 0}
-			<p class="muted">No conversations yet.</p>
-		{:else}
-			<ul>
-				{#each conversations as conversation (conversation.id)}
-					<li>
-						<button
-							class:active={conversation.id === selected}
-							onclick={() => void select(conversation.id)}
-						>
-							{conversation.title}
-						</button>
-					</li>
-				{/each}
-			</ul>
+<section class="chat">
+	<header class="chat-head">
+		<h1>{chat.selected?.title ?? 'New chat'}</h1>
+		{#if chat.selectedAgent}
+			<span class="agent-tag" title="Agent">{chat.selectedAgent.name}</span>
 		{/if}
-	</aside>
+		{#if chat.sourcesCount > 0}
+			<span class="sources">{chat.sourcesCount} source{chat.sourcesCount === 1 ? '' : 's'}</span>
+		{/if}
+		{#if chat.selected}
+			<button class="icon-btn danger" onclick={deleteCurrent} title="Delete chat" aria-label="Delete chat">
+				<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+					<polyline points="3 6 5 6 21 6" />
+					<path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+				</svg>
+			</button>
+		{/if}
+	</header>
 
-	<section class="chat">
-		<div class="messages" bind:this={scroller}>
-			{#if messages.length === 0 && !loading}
-				<p class="muted center">Send a message to start the conversation.</p>
-			{/if}
-			{#each messages as msg (msg.id)}
-				<div class="msg {msg.role}">
-					<div class="role">{msg.role}</div>
-					<div class="content">{msg.content || (streaming ? '…' : '')}</div>
+	<div class="messages" bind:this={scroller}>
+		{#if chat.messages.length === 0 && !chat.loading}
+			<div class="empty">
+				<span class="mark"></span>
+				<p>Send a message to start the conversation.</p>
+			</div>
+		{/if}
+		{#each chat.messages as msg (msg.id)}
+			<div class="msg {msg.role}">
+				<div class="avatar" aria-hidden="true">{msg.role === 'user' ? 'You' : 'AI'}</div>
+				<div class="bubble">
+					<div class="content">{msg.content || (chat.streaming ? '…' : '')}</div>
 				</div>
-			{/each}
-		</div>
-
-		{#if error}
-			<p class="error">{error}</p>
-		{/if}
-		{#if notice}
-			<p class="notice">{notice}</p>
-		{/if}
-		{#if files.length}
-			<div class="attachments">
-				{#each files as file (file.id)}
-					<span class="chip" title={file.id}>{file.filename}</span>
-				{/each}
 			</div>
-		{/if}
+		{/each}
+	</div>
 
-		<form class="composer" onsubmit={(e) => (e.preventDefault(), void send())}>
-			<textarea
-				bind:value={input}
-				onkeydown={onKeydown}
-				placeholder="Message…  (Enter to send, Shift+Enter for newline)"
-				rows="2"
-			></textarea>
-			<div class="controls">
-				{#if sourcesCount > 0}
-					<span class="sources">{sourcesCount} source{sourcesCount === 1 ? '' : 's'}</span>
+	{#if chat.error}
+		<p class="error">{chat.error}</p>
+	{/if}
+	{#if chat.providers.length === 0}
+		<p class="notice">
+			No model provider configured. <a href="/setup">Set one up</a> to start chatting.
+		</p>
+	{:else if !chat.hasUsableProvider}
+		<p class="notice">
+			No provider key is configured for your account.
+			{#if chat.providersNeedingKey.length > 0}
+				<button class="link" onclick={() => setProviderKey(chat.providersNeedingKey[0])}>
+					Add your {chat.providersNeedingKey[0].name} key
+				</button>
+			{/if}
+		</p>
+	{/if}
+	{#if chat.modelsError && chat.hasUsableProvider}
+		<p class="error">
+			Could not load models from your provider: {chat.modelsError}
+		</p>
+	{/if}
+	{#if chat.notice}
+		<p class="notice">{chat.notice}</p>
+	{/if}
+
+	<form class="composer" onsubmit={(e) => (e.preventDefault(), void send())}>
+		<textarea
+			bind:value={input}
+			onkeydown={onKeydown}
+			placeholder="Message…  (Enter to send, Shift+Enter for newline)"
+			rows="2"
+		></textarea>
+		<div class="controls">
+			<input bind:this={fileInput} type="file" hidden onchange={onFile} />
+			<button
+				type="button"
+				class="ghost"
+				onclick={() => fileInput?.click()}
+				disabled={uploading || !chat.selectedId}
+			>
+				{uploading ? 'Uploading…' : 'Attach'}
+			</button>
+			{#if chat.agents.length > 0}
+				<label class="field" title="Agent for this conversation">
+					<span>Agent</span>
+					<select
+						class="agent"
+						value={chat.selected?.agent_id ?? chat.pendingAgentId ?? ''}
+						onchange={(e) =>
+							void chat.setAgent((e.currentTarget as HTMLSelectElement).value || null)}
+					>
+						<option value="">No agent</option>
+						{#each chat.agents as agent (agent.id)}
+							<option value={agent.id}>{agent.name}</option>
+						{/each}
+					</select>
+				</label>
+			{/if}
+			<label class="field" title="Model served by your provider">
+				<span>Model</span>
+				{#if chat.models.length > 0}
+					<select class="model" bind:value={chat.model}>
+						{#each chat.models as model (model.id)}
+							<option value={model.id}>{model.id}</option>
+						{/each}
+					</select>
+				{:else}
+					<input class="model" bind:value={chat.model} placeholder="model id" />
 				{/if}
-				<input bind:this={fileInput} type="file" hidden onchange={upload} />
-				<button
-					type="button"
-					class="ghost"
-					onclick={() => fileInput?.click()}
-					disabled={uploading || !selected}
-				>
-					{uploading ? 'Uploading…' : 'Attach'}
-				</button>
-				<input class="model" bind:value={model} aria-label="model" placeholder="model" />
-				<button class="primary" type="submit" disabled={streaming || !input.trim()}>
-					{streaming ? 'Streaming…' : 'Send'}
-				</button>
-			</div>
-		</form>
-	</section>
-</div>
+			</label>
+			<button class="primary" type="submit" disabled={chat.streaming || !input.trim()}>
+				{chat.streaming ? 'Streaming…' : 'Send'}
+			</button>
+		</div>
+	</form>
+</section>
 
 <style>
-	.layout {
-		display: grid;
-		grid-template-columns: 240px 1fr;
-		gap: 1rem;
-		height: calc(100vh - 120px);
-	}
-	aside {
-		border: 1px solid #1e2430;
-		border-radius: 12px;
-		background: #0e1118;
-		padding: 0.75rem;
-		overflow-y: auto;
-	}
-	.new {
-		width: 100%;
-		background: #1a2130;
-		border: 1px solid #2a3345;
-		color: #e6e8ee;
-		border-radius: 8px;
-		padding: 0.5rem;
-		margin-bottom: 0.75rem;
-	}
-	.new:hover {
-		background: #222c3d;
-	}
-	ul {
-		list-style: none;
-		margin: 0;
-		padding: 0;
+	.chat {
 		display: flex;
 		flex-direction: column;
-		gap: 0.25rem;
+		height: 100%;
+		min-height: 0;
+		background: var(--bg);
 	}
-	li button {
-		width: 100%;
-		text-align: left;
-		background: transparent;
-		border: none;
-		color: #cfd6e4;
-		padding: 0.45rem 0.55rem;
-		border-radius: 6px;
+	.chat-head {
+		display: flex;
+		align-items: center;
+		gap: 0.6rem;
+		padding: 0.75rem 1.1rem;
+		border-bottom: 1px solid var(--border);
+		background: color-mix(in srgb, var(--bg-elevated) 70%, transparent);
+		backdrop-filter: blur(10px);
+	}
+	.chat-head h1 {
+		margin: 0;
+		font-size: 0.98rem;
+		font-weight: 600;
+		letter-spacing: -0.01em;
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
 	}
-	li button:hover {
-		background: #1a2130;
+	.sources {
+		margin-left: auto;
+		color: var(--text-muted);
+		font-size: 0.75rem;
 	}
-	li button.active {
-		background: #22304a;
-		color: #fff;
+	.agent-tag {
+		flex: 0 0 auto;
+		padding: 0.15rem 0.55rem;
+		border-radius: var(--radius-full);
+		background: var(--primary-soft);
+		border: 1px solid color-mix(in srgb, var(--primary) 45%, var(--border));
+		color: var(--text);
+		font-size: 0.72rem;
 	}
-	.chat {
-		display: flex;
-		flex-direction: column;
-		min-height: 0;
-		border: 1px solid #1e2430;
-		border-radius: 12px;
-		background: #0e1118;
+	.icon-btn {
+		display: grid;
+		place-items: center;
+		width: 34px;
+		height: 34px;
+		margin-left: auto;
+		border: none;
+		border-radius: var(--radius-sm);
+		background: transparent;
+		color: var(--text-muted);
 	}
+	.sources + .icon-btn {
+		margin-left: 0.25rem;
+	}
+	.icon-btn:hover {
+		background: var(--surface-hover);
+		color: var(--text);
+	}
+	.icon-btn.danger:hover {
+		color: var(--danger);
+		background: var(--danger-bg);
+	}
+	.icon-btn svg {
+		width: 17px;
+		height: 17px;
+	}
+
 	.messages {
 		flex: 1;
+		min-height: 0;
 		overflow-y: auto;
-		padding: 1rem;
+		padding: 1.5rem clamp(1rem, 6vw, 4rem);
 		display: flex;
 		flex-direction: column;
-		gap: 0.9rem;
+		gap: 1.1rem;
 	}
 	.msg {
-		display: grid;
-		grid-template-columns: 72px 1fr;
+		display: flex;
 		gap: 0.75rem;
+		max-width: 80%;
+		animation: rise 220ms var(--ease) both;
 	}
-	.role {
-		color: #7b8794;
-		font-size: 0.75rem;
-		text-transform: uppercase;
-		letter-spacing: 0.05em;
-		padding-top: 0.15rem;
+	.msg.user {
+		flex-direction: row-reverse;
+		align-self: flex-end;
+	}
+	.avatar {
+		flex: 0 0 auto;
+		width: 34px;
+		height: 34px;
+		border-radius: var(--radius-full);
+		display: grid;
+		place-items: center;
+		font-size: 0.7rem;
+		font-weight: 700;
+		background: var(--surface-active);
+		color: var(--text-muted);
+		border: 1px solid var(--border);
+	}
+	.msg.user .avatar {
+		background: linear-gradient(135deg, var(--primary-hover), var(--primary-active));
+		color: var(--on-primary);
+		border-color: transparent;
+	}
+	.bubble {
+		background: var(--surface);
+		border: 1px solid var(--border);
+		border-radius: var(--radius);
+		padding: 0.7rem 0.95rem;
+		box-shadow: var(--shadow-sm);
+	}
+	.msg.user .bubble {
+		background: var(--primary-soft);
+		border-color: color-mix(in srgb, var(--primary) 45%, var(--border));
 	}
 	.content {
 		white-space: pre-wrap;
 		overflow-wrap: anywhere;
 	}
-	.msg.user .content {
-		color: #e6e8ee;
-	}
-	.msg.assistant .content {
-		color: #b8e0ff;
-	}
+
 	.composer {
-		border-top: 1px solid #1e2430;
-		padding: 0.75rem;
+		border-top: 1px solid var(--border);
+		padding: 0.85rem clamp(1rem, 6vw, 4rem);
 		display: flex;
 		flex-direction: column;
-		gap: 0.5rem;
+		gap: 0.6rem;
+		background: color-mix(in srgb, var(--surface) 45%, transparent);
 	}
 	textarea {
 		resize: vertical;
-		background: #0b0d12;
-		border: 1px solid #2a3345;
-		border-radius: 8px;
-		color: #e6e8ee;
-		padding: 0.6rem 0.7rem;
-		font: inherit;
+		background: var(--bg);
+		border: 1px solid var(--border-strong);
+		border-radius: var(--radius);
+		color: var(--text);
+		padding: 0.7rem 0.85rem;
+		min-height: 52px;
 	}
-	textarea:focus {
-		outline: 2px solid #2563eb;
-		outline-offset: 1px;
+	textarea::placeholder {
+		color: var(--text-faint);
 	}
 	.controls {
 		display: flex;
 		gap: 0.5rem;
+		align-items: center;
 		justify-content: flex-end;
 	}
-	.model {
+	.field {
+		display: flex;
+		flex-direction: column;
+		gap: 0.15rem;
+		min-width: 0;
+		font-size: 0.66rem;
+		text-transform: uppercase;
+		letter-spacing: 0.05em;
+		color: var(--text-faint);
+	}
+	.field:has(.model) {
 		flex: 1;
-		background: #0b0d12;
-		border: 1px solid #2a3345;
-		border-radius: 8px;
-		color: #e6e8ee;
-		padding: 0.4rem 0.6rem;
-		font: inherit;
+	}
+	.agent {
+		background: var(--bg);
+		border: 1px solid var(--border-strong);
+		border-radius: var(--radius-full);
+		color: var(--text);
+		padding: 0.45rem 0.7rem;
+	}
+	.model {
+		width: 100%;
+		background: var(--bg);
+		border: 1px solid var(--border-strong);
+		border-radius: var(--radius-full);
+		color: var(--text);
+		padding: 0.45rem 0.9rem;
 	}
 	.primary {
-		background: #2563eb;
+		background: linear-gradient(135deg, var(--primary-hover), var(--primary-active));
 		border: none;
-		border-radius: 8px;
-		color: #fff;
-		padding: 0.45rem 1rem;
+		border-radius: var(--radius-full);
+		color: var(--on-primary);
+		padding: 0.5rem 1.4rem;
 		font-weight: 600;
+		box-shadow: var(--shadow-sm);
+	}
+	.primary:hover:not(:disabled) {
+		box-shadow: var(--shadow-glow);
+		filter: brightness(1.06);
 	}
 	.primary:disabled {
-		opacity: 0.5;
+		opacity: 0.45;
 		cursor: default;
-	}
-	.muted {
-		color: #7b8794;
-		font-size: 0.85rem;
-	}
-	.center {
-		text-align: center;
-		margin: auto;
-	}
-	.error {
-		color: #fca5a5;
-		margin: 0;
-		padding: 0 0.75rem;
-		font-size: 0.85rem;
-	}
-	.notice {
-		color: #9aa4b2;
-		margin: 0;
-		padding: 0 0.75rem;
-		font-size: 0.8rem;
-	}
-	.attachments {
-		display: flex;
-		flex-wrap: wrap;
-		gap: 0.35rem;
-		padding: 0.4rem 0.75rem 0;
-	}
-	.chip {
-		background: #1a2130;
-		border: 1px solid #2a3345;
-		border-radius: 999px;
-		padding: 0.1rem 0.6rem;
-		font-size: 0.75rem;
-		color: #cfd6e4;
-	}
-	.sources {
-		align-self: center;
-		margin-right: auto;
-		color: #7b8794;
-		font-size: 0.75rem;
+		box-shadow: none;
 	}
 	.ghost {
 		background: transparent;
-		border: 1px solid #2a3345;
-		color: #cfd6e4;
-		border-radius: 8px;
-		padding: 0.4rem 0.8rem;
+		border: 1px solid var(--border-strong);
+		color: var(--text);
+		border-radius: var(--radius-full);
+		padding: 0.45rem 0.95rem;
 	}
 	.ghost:hover:not(:disabled) {
-		background: #1a2130;
+		background: var(--surface-hover);
+		border-color: var(--primary);
 	}
 	.ghost:disabled {
-		opacity: 0.5;
+		opacity: 0.45;
 		cursor: default;
+	}
+	.error {
+		color: var(--danger);
+		background: var(--danger-bg);
+		border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent);
+		border-radius: var(--radius-sm);
+		margin: 0 clamp(1rem, 6vw, 4rem);
+		padding: 0.45rem 0.7rem;
+		font-size: 0.85rem;
+	}
+	.notice {
+		color: var(--text-muted);
+		margin: 0;
+		padding: 0 clamp(1rem, 6vw, 4rem);
+		font-size: 0.8rem;
+	}
+	.link {
+		background: none;
+		border: none;
+		color: var(--accent);
+		padding: 0;
+		font: inherit;
+		font-weight: 600;
+		text-decoration: underline;
+	}
+	.link:hover {
+		color: var(--primary-hover);
+	}
+	.empty {
+		margin: auto;
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		gap: 0.75rem;
+		color: var(--text-muted);
+	}
+	.empty .mark {
+		width: 44px;
+		height: 44px;
+		border-radius: var(--radius);
+		background: linear-gradient(135deg, var(--primary-hover), var(--primary-active));
+		box-shadow: var(--shadow-glow);
+	}
+	.empty p {
+		margin: 0;
 	}
 </style>

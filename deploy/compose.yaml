@@ -46,9 +46,17 @@ services:
       DB_BACKEND: postgres
       DATABASE_URL: postgres://rustchat:rustchat@postgres:5432/rustchat
       BIND_ADDR: 0.0.0.0:3080
-      JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
+      # Required (>= 32 chars). Compose fails fast with a clear message if unset.
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in deploy/.env (openssl rand -base64 48)}
       JWT_TTL_SECONDS: ${JWT_TTL_SECONDS:-3600}
+      REFRESH_TTL_SECONDS: ${REFRESH_TTL_SECONDS:-2592000}
+      SECRET_ENCRYPTION_KEY: ${SECRET_ENCRYPTION_KEY:-}
       LOG_LEVEL: ${LOG_LEVEL:-info}
+      # Browser origin of the web service; keep in sync with WEB_ORIGIN.
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:5173}
+      RATE_LIMIT_ENABLED: ${RATE_LIMIT_ENABLED:-true}
+      RATE_LIMIT_AUTH_PER_MINUTE: ${RATE_LIMIT_AUTH_PER_MINUTE:-30}
+      RATE_LIMIT_CHAT_PER_MINUTE: ${RATE_LIMIT_CHAT_PER_MINUTE:-60}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
       EMBEDDING_MODEL: ${EMBEDDING_MODEL:-text-embedding-3-small}

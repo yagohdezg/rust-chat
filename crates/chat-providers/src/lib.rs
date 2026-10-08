@@ -72,6 +72,14 @@ pub struct ChatRequest {
     pub tools: Option<Vec<Value>>,
 }
 
+/// A model advertised by a provider (OpenAI-compatible `/models` entry).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelInfo {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owned_by: Option<String>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ChatChunk {
     /// Incremental text delta (may be empty on tool-call-only chunks).
@@ -107,4 +115,8 @@ pub trait LlmProvider: Send + Sync {
 
     /// Stream a completion. Providers must not buffer the whole response.
     async fn stream(&self, request: ChatRequest) -> std::result::Result<ChatStream, ProviderError>;
+
+    /// List the models this provider (or its key) can serve. Used to populate
+    /// model pickers and to validate a requested model before a completion.
+    async fn list_models(&self) -> std::result::Result<Vec<ModelInfo>, ProviderError>;
 }

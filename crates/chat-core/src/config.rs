@@ -84,9 +84,30 @@ pub struct Config {
     pub database_url: String,
     pub bind_addr: String,
     pub jwt_secret: String,
+    /// Lifetime of an access token (short-lived; refreshed via `/api/auth/refresh`).
     pub jwt_ttl_seconds: i64,
+    /// Lifetime of a refresh token. Rotated on every use.
+    pub refresh_ttl_seconds: i64,
     pub log_level: String,
 
+    /// Origins allowed to call the API cross-origin. `*` opts back into a
+    /// permissive policy; an empty list denies all cross-origin requests (the
+    /// API is bearer-token based and normally same-origin behind a proxy).
+    pub cors_allowed_origins: Vec<String>,
+    /// Whether the in-memory per-IP rate limiter is active.
+    pub rate_limit_enabled: bool,
+    /// Max `/api/auth/*` requests per IP per minute.
+    pub rate_limit_auth_per_minute: u32,
+    /// Max `/api/chat` requests per IP per minute.
+    pub rate_limit_chat_per_minute: u32,
+
+    /// Base64-encoded 256-bit key used to encrypt provider API keys at rest.
+    /// When unset, a key is derived from `jwt_secret` (with a warning); set this
+    /// explicitly in production so rotating `JWT_SECRET` does not strand data.
+    pub secret_encryption_key: Option<String>,
+
+    /// OpenAI-compatible endpoint used for RAG embeddings. Chat providers are
+    /// configured in the database, not from the environment.
     pub openai_api_key: Option<String>,
     pub openai_base_url: String,
 
@@ -122,6 +143,13 @@ pub struct Config {
     pub sandbox_memory_mb: u64,
     pub sandbox_cpus: f64,
     pub boxlite_url: String,
+
+    /// Expose the sandbox as the `execute_code` tool to the agent runtime.
+    /// Off by default so a plain deployment never grants model-driven code
+    /// execution.
+    pub sandbox_tool_enabled: bool,
+    /// Maximum tool iterations the agent loop may run per chat turn.
+    pub agent_max_iterations: usize,
 }
 
 use crate::error::ChatError;
@@ -139,6 +167,52 @@ fn var_bool(name: &str, default: bool) -> bool {
         ),
         None => default,
     }
+}
+
+/// Parse a comma-separated env var into a trimmed, non-empty list.
+fn var_list(name: &str) -> Vec<String> {
+    var(name)
+        .map(|v| {
+            v.split(',')
+                .map(str::trim)
+                .filter(|item| !item.is_empty())
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Reject obviously weak `JWT_SECRET` values at boot. A short or guessable
+/// signing key lets anyone mint tokens, so this fails closed with a clear
+/// message instead of silently accepting `change-me`.
+fn validate_jwt_secret(secret: &str) -> Result<(), ChatError> {
+    const MIN_LEN: usize = 32;
+    const WEAK: &[&str] = &[
+        "change-me",
+        "change-me-in-production",
+        "changeme",
+        "secret",
+        "password",
+        "jwt-secret",
+        "test",
+        "dev",
+    ];
+    if secret.len() < MIN_LEN {
+        return Err(ChatError::Config(format!(
+            "JWT_SECRET must be at least {MIN_LEN} characters (got {}); \
+             generate one with `openssl rand -base64 48`",
+            secret.len()
+        )));
+    }
+    let lowered = secret.to_ascii_lowercase();
+    if WEAK.contains(&lowered.as_str()) {
+        return Err(ChatError::Config(
+            "JWT_SECRET is a well-known placeholder; generate one with \
+             `openssl rand -base64 48`"
+                .into(),
+        ));
+    }
+    Ok(())
 }
 
 impl Config {
@@ -171,16 +245,43 @@ impl Config {
             ));
         }
 
+        let jwt_secret =
+            var("JWT_SECRET").ok_or_else(|| ChatError::Config("JWT_SECRET is required".into()))?;
+        validate_jwt_secret(&jwt_secret)?;
+
         Ok(Self {
             database_backend,
             database_url,
             bind_addr: var("BIND_ADDR").unwrap_or_else(|| "0.0.0.0:3080".into()),
-            jwt_secret: var("JWT_SECRET")
-                .ok_or_else(|| ChatError::Config("JWT_SECRET is required".into()))?,
+            jwt_secret,
             jwt_ttl_seconds: var("JWT_TTL_SECONDS")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(3600),
+            refresh_ttl_seconds: var("REFRESH_TTL_SECONDS")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(2_592_000),
             log_level: var("LOG_LEVEL").unwrap_or_else(|| "info".into()),
+
+            cors_allowed_origins: match env::var("CORS_ALLOWED_ORIGINS") {
+                // Explicitly set (including to empty, which denies cross-origin).
+                Ok(_) => var_list("CORS_ALLOWED_ORIGINS"),
+                // Sensible dev defaults: the SvelteKit dev/preview ports and the
+                // API itself. Set CORS_ALLOWED_ORIGINS (or `*`) in production.
+                Err(_) => vec![
+                    "http://localhost:5173".into(),
+                    "http://localhost:4173".into(),
+                    "http://localhost:3080".into(),
+                ],
+            },
+            rate_limit_enabled: var_bool("RATE_LIMIT_ENABLED", true),
+            rate_limit_auth_per_minute: var("RATE_LIMIT_AUTH_PER_MINUTE")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(30),
+            rate_limit_chat_per_minute: var("RATE_LIMIT_CHAT_PER_MINUTE")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(60),
+
+            secret_encryption_key: var("SECRET_ENCRYPTION_KEY"),
 
             openai_api_key: var("OPENAI_API_KEY"),
             openai_base_url: var("OPENAI_BASE_URL")
@@ -215,6 +316,20 @@ impl Config {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(1.0),
             boxlite_url: var("BOXLITE_URL").unwrap_or_else(|| "http://localhost:8100".into()),
+
+            sandbox_tool_enabled: var_bool("SANDBOX_TOOL_ENABLED", false),
+            agent_max_iterations: var("AGENT_MAX_ITERATIONS")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(6),
         })
+    }
+
+    /// Build the at-rest secret cipher from `SECRET_ENCRYPTION_KEY`, falling
+    /// back to a key derived from `JWT_SECRET` when unset.
+    pub fn secret_cipher(&self) -> crate::Result<crate::crypto::SecretCipher> {
+        match self.secret_encryption_key.as_deref() {
+            Some(key) => crate::crypto::SecretCipher::from_base64(key),
+            None => crate::crypto::SecretCipher::derive_from_secret(&self.jwt_secret),
+        }
     }
 }

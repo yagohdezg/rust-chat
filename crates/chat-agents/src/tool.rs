@@ -32,6 +32,19 @@ impl ToolRegistry {
         self.tools.get(name).cloned()
     }
 
+    /// A new registry containing only the named tools that are registered,
+    /// preserving nothing else. Used to give an agent the exact tools its
+    /// config enables.
+    pub fn restricted(&self, names: &[String]) -> ToolRegistry {
+        let mut subset = ToolRegistry::new();
+        for name in names {
+            if let Some(tool) = self.tools.get(name) {
+                subset.tools.insert(name.clone(), tool.clone());
+            }
+        }
+        subset
+    }
+
     pub fn is_empty(&self) -> bool {
         self.tools.is_empty()
     }

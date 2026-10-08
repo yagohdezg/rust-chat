@@ -224,8 +224,14 @@ See [`.env.example`](.env.example).
 | `DATABASE_URL`            | — (required)                                         | Postgres URL or `sqlite://...`     |
 | `MIGRATE_ON_BOOT`         | `true`                                               | Set `false` in prod and run `chat-server migrate` as a Job |
 | `BIND_ADDR`               | `0.0.0.0:3080`                                       | API listen address                 |
-| `JWT_SECRET`              | — (required)                                         | HMAC secret for session tokens     |
-| `JWT_TTL_SECONDS`         | `3600`                                               | Token lifetime                     |
+| `JWT_SECRET`              | — (required)                                         | HMAC secret; **≥32 chars**, weak values rejected at boot (`openssl rand -base64 48`) |
+| `JWT_TTL_SECONDS`         | `3600`                                               | Access-token lifetime              |
+| `REFRESH_TTL_SECONDS`     | `2592000`                                            | Refresh-token lifetime (30 days); rotated on every use |
+| `SECRET_ENCRYPTION_KEY`   | derived from `JWT_SECRET`                            | Base64 32-byte key encrypting provider API keys at rest (`openssl rand -base64 32`) |
+| `CORS_ALLOWED_ORIGINS`    | localhost dev ports                                  | Comma-separated origins; `*` allows any, empty denies cross-origin |
+| `RATE_LIMIT_ENABLED`      | `true`                                               | Per-IP fixed-window limiter        |
+| `RATE_LIMIT_AUTH_PER_MINUTE` | `30`                                              | `/api/auth/*` requests per IP/min  |
+| `RATE_LIMIT_CHAT_PER_MINUTE` | `60`                                              | `/api/chat` requests per IP/min    |
 | `LOG_LEVEL`               | `info`                                               | `tracing` filter                   |
 | `OPENAI_API_KEY`          | —                                                    | Empty disables provider + RAG      |
 | `OPENAI_BASE_URL`         | `https://api.openai.com/v1`                          | Any OpenAI-compatible endpoint     |
@@ -251,11 +257,24 @@ See [`.env.example`](.env.example).
 | Method | Path                                | Auth | Description                          |
 | ------ | ----------------------------------- | ---- | ------------------------------------ |
 | `GET`  | `/health`                           | —    | Liveness probe                       |
-| `POST` | `/api/auth/register`                | —    | Create a user, returns a JWT         |
-| `POST` | `/api/auth/login`                   | —    | Exchange credentials for a JWT       |
+| `POST` | `/api/auth/register`                | —    | Create a user, returns an access + refresh token |
+| `POST` | `/api/auth/login`                   | —    | Exchange credentials for tokens      |
+| `POST` | `/api/auth/refresh`                 | —    | Rotate a refresh token for a new pair |
+| `POST` | `/api/auth/logout`                  | —    | Revoke a refresh token               |
 | `GET`  | `/api/me`                           | JWT  | Current user                         |
+| `GET`  | `/api/admin/users`                  | admin | List accounts with role/state/counts |
+| `POST` | `/api/admin/users`                  | admin | Create an account (explicit role)    |
+| `PATCH`| `/api/admin/users/{id}`             | admin | Change role / enable-disable an account |
+| `DELETE`| `/api/admin/users/{id}`            | admin | Delete an account (not self/last admin) |
+| `GET`  | `/api/admin/audit`                  | admin | Recent security audit events         |
+| `POST` | `/api/admin/providers`              | admin | Bulk-create instance-wide providers  |
+| `GET`  | `/api/providers`                    | JWT  | List providers visible to the caller, with `has_key` |
+| `POST` | `/api/providers`                    | JWT  | Create a personal provider (admin: `global`) |
+| `PATCH`| `/api/providers/{id}`               | JWT  | Update / rotate a provider's fields  |
+| `PUT`  | `/api/providers/{id}/credential`    | JWT  | Store the caller's own key for a provider |
 | `GET`  | `/api/conversations`                | JWT  | List the caller's conversations      |
 | `POST` | `/api/conversations`                | JWT  | Create a conversation                |
+| `DELETE`| `/api/conversations/{id}`          | JWT  | Delete a conversation (+ its files)  |
 | `GET`  | `/api/conversations/{id}/messages`  | JWT  | List messages in a conversation      |
 | `GET`  | `/api/conversations/{id}/files`     | JWT  | List files attached to a conversation |
 | `POST` | `/api/files`                        | JWT  | Upload a file (base64) and index it  |
@@ -278,11 +297,25 @@ stopped. Live rejoin works within a single replica; reconnecting to a different
 replica replays the persisted content and reports an interruption if generation
 was still in flight.
 
+Providers are configured at runtime, not from the environment. An admin can
+create an **instance-wide** provider (`global: true`, `providers.user_id IS
+NULL`) with or without an API key. When it has no shared key, each user supplies
+their own via `PUT /api/providers/{id}/credential` (personal, encrypted at
+rest); key resolution prefers the caller's credential over the provider's own
+key. `GET /api/providers` returns `has_key` per provider so the UI can prompt
+for the missing key, and admins are never forced through provider setup.
+
 `POST /api/files` takes JSON: `{ filename, mime?, content_b64, conversation_id? }`.
 Uploads are written under `FILE_STORAGE_DIR` and, when RAG is enabled, indexed
 for retrieval. The response reports `chunks_indexed` and any `indexing_error`.
 
-Authenticated routes expect `Authorization: Bearer <jwt>`.
+Authenticated routes expect `Authorization: Bearer <jwt>`. Registering and
+logging in return a short-lived access token plus a rotating `refresh_token`;
+call `POST /api/auth/refresh` with the latter to mint a new pair. Refresh tokens
+are stored hashed, rotate on every use, and replaying a revoked token revokes
+the whole user's session family. `/api/auth/*` and `/api/chat` are per-IP rate
+limited; admin actions and auth/sandbox events are written to an audit trail
+shown in the `/admin` console.
 
 ### Example: register + chat
 

@@ -6,10 +6,14 @@
 mod vector;
 
 use std::str::FromStr;
+use std::sync::Arc;
 
-use chat_core::{ChatError, Result};
-use chat_store::{Conversation, FileRecord, Message, Store, User};
-use chrono::Utc;
+use chat_core::{ChatError, Result, SecretCipher};
+use chat_store::{
+    AdminUserSummary, Agent, AgentDraft, AuditEntry, AuditLog, Conversation, FileRecord, Message,
+    Provider, ProviderModel, RefreshToken, Store, User,
+};
+use chrono::{DateTime, Utc};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::types::Json;
 use sqlx::SqlitePool;
@@ -21,16 +25,18 @@ pub use vector::SqliteVectorStore;
 #[derive(Clone)]
 pub struct SqliteStore {
     pool: SqlitePool,
+    /// Encrypts/decrypts provider API keys at rest.
+    secrets: Arc<SecretCipher>,
 }
 
 impl SqliteStore {
-    pub fn new(pool: SqlitePool) -> Self {
-        Self { pool }
+    pub fn new(pool: SqlitePool, secrets: Arc<SecretCipher>) -> Self {
+        Self { pool, secrets }
     }
 
     /// Open (creating if needed) a SQLite database at `database_url`, e.g.
     /// `sqlite://.data/rustchat.db` or `sqlite::memory:`.
-    pub async fn connect(database_url: &str) -> Result<Self> {
+    pub async fn connect(database_url: &str, secrets: Arc<SecretCipher>) -> Result<Self> {
         let options = SqliteConnectOptions::from_str(database_url)
             .map_err(|e| ChatError::Config(format!("invalid SQLite URL: {e}")))?
             .create_if_missing(true)
@@ -40,12 +46,57 @@ impl SqliteStore {
             .acquire_timeout(std::time::Duration::from_secs(10))
             .connect_with(options)
             .await?;
-        Ok(Self { pool })
+        Ok(Self { pool, secrets })
     }
 
     /// Handle to the pool, for sharing with the vector store.
     pub fn pool(&self) -> SqlitePool {
         self.pool.clone()
+    }
+
+    fn encrypt_opt(&self, plaintext: Option<&str>) -> Result<Option<String>> {
+        plaintext.map(|v| self.secrets.encrypt(v)).transpose()
+    }
+
+    fn decrypt_provider(&self, mut provider: Provider) -> Result<Provider> {
+        match self.secrets.decrypt_opt(provider.api_key.as_deref()) {
+            Ok(key) => provider.api_key = key,
+            Err(err) => {
+                // A key sealed under a previous SECRET_ENCRYPTION_KEY/JWT_SECRET
+                // cannot be recovered. Degrade to "no key" so one stranded row
+                // does not 500 the whole provider list; rotate it to fix.
+                tracing::warn!(
+                    provider = %provider.id,
+                    error = %err,
+                    "provider API key could not be decrypted; treating it as unset"
+                );
+                provider.api_key = None;
+            }
+        }
+        Ok(provider)
+    }
+
+    /// Encrypt provider API keys still stored as legacy plaintext. Idempotent;
+    /// returns the number of rows rewritten.
+    pub async fn encrypt_plaintext_provider_keys(&self) -> Result<u64> {
+        let rows: Vec<(Uuid, String)> =
+            sqlx::query_as("select id, api_key from providers where api_key is not null")
+                .fetch_all(&self.pool)
+                .await?;
+        let mut rewritten = 0;
+        for (id, key) in rows {
+            if SecretCipher::is_encrypted(&key) {
+                continue;
+            }
+            let encrypted = self.secrets.encrypt(&key)?;
+            sqlx::query("update providers set api_key = ? where id = ?")
+                .bind(encrypted)
+                .bind(id)
+                .execute(&self.pool)
+                .await?;
+            rewritten += 1;
+        }
+        Ok(rewritten)
     }
 
     /// Run embedded migrations from `migrations/sqlite/`.
@@ -101,6 +152,143 @@ impl Store for SqliteStore {
         Ok(user)
     }
 
+    async fn count_users(&self) -> Result<i64> {
+        let count = sqlx::query_scalar::<_, i64>("select count(*) from users")
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(count)
+    }
+
+    async fn list_user_summaries(&self) -> Result<Vec<AdminUserSummary>> {
+        let rows = sqlx::query_as::<_, AdminUserSummary>(
+            "select u.id, u.email, u.name, u.role, u.disabled, u.created_at, u.last_seen_at,
+                    (select count(*) from conversations c where c.user_id = u.id) as conversation_count,
+                    (select count(*) from providers p where p.user_id = u.id) as provider_count,
+                    (select count(*) from agents a where a.user_id = u.id) as agent_count
+             from users u
+             order by u.created_at asc",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    async fn delete_user(&self, id: Uuid) -> Result<()> {
+        sqlx::query("delete from users where id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn set_user_role(&self, id: Uuid, role: &str) -> Result<()> {
+        sqlx::query("update users set role = ?, updated_at = ? where id = ?")
+            .bind(role)
+            .bind(Utc::now())
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn set_user_disabled(&self, id: Uuid, disabled: bool) -> Result<()> {
+        sqlx::query("update users set disabled = ?, updated_at = ? where id = ?")
+            .bind(disabled)
+            .bind(Utc::now())
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn touch_user_last_seen(&self, id: Uuid) -> Result<()> {
+        sqlx::query("update users set last_seen_at = ? where id = ?")
+            .bind(Utc::now())
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn create_refresh_token(
+        &self,
+        user_id: Uuid,
+        token_hash: &str,
+        expires_at: DateTime<Utc>,
+    ) -> Result<()> {
+        sqlx::query(
+            "insert into refresh_tokens (id, user_id, token_hash, expires_at, created_at)
+             values (?, ?, ?, ?, ?)",
+        )
+        .bind(Uuid::new_v4())
+        .bind(user_id)
+        .bind(token_hash)
+        .bind(expires_at)
+        .bind(Utc::now())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn get_refresh_token(&self, token_hash: &str) -> Result<Option<RefreshToken>> {
+        let row =
+            sqlx::query_as::<_, RefreshToken>("select * from refresh_tokens where token_hash = ?")
+                .bind(token_hash)
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(row)
+    }
+
+    async fn revoke_refresh_token(&self, token_hash: &str) -> Result<()> {
+        sqlx::query(
+            "update refresh_tokens set revoked_at = ? where token_hash = ? and revoked_at is null",
+        )
+        .bind(Utc::now())
+        .bind(token_hash)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn revoke_user_refresh_tokens(&self, user_id: Uuid) -> Result<()> {
+        sqlx::query(
+            "update refresh_tokens set revoked_at = ? where user_id = ? and revoked_at is null",
+        )
+        .bind(Utc::now())
+        .bind(user_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn record_audit(&self, entry: &AuditEntry) -> Result<()> {
+        sqlx::query(
+            "insert into audit_logs (id, actor_id, action, target_type, target_id, metadata, ip, created_at)
+             values (?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(Uuid::new_v4())
+        .bind(entry.actor_id)
+        .bind(&entry.action)
+        .bind(&entry.target_type)
+        .bind(&entry.target_id)
+        .bind(entry.metadata.clone().map(Json))
+        .bind(&entry.ip)
+        .bind(Utc::now())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn list_audit_logs(&self, limit: i64) -> Result<Vec<AuditLog>> {
+        let rows = sqlx::query_as::<_, AuditLog>(
+            "select * from audit_logs order by created_at desc limit ?",
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
     async fn create_conversation(
         &self,
         user_id: Uuid,
@@ -144,6 +332,270 @@ impl Store for SqliteStore {
         .await?
         .ok_or(ChatError::NotFound)?;
         Ok(row)
+    }
+
+    async fn delete_conversation(&self, id: Uuid, user_id: Uuid) -> Result<()> {
+        sqlx::query("delete from conversations where id = ? and user_id = ?")
+            .bind(id)
+            .bind(user_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn set_conversation_agent(
+        &self,
+        id: Uuid,
+        user_id: Uuid,
+        agent_id: Option<Uuid>,
+    ) -> Result<Conversation> {
+        let row = sqlx::query_as::<_, Conversation>(
+            "update conversations set agent_id = ?, updated_at = ?
+             where id = ? and user_id = ?
+             returning *",
+        )
+        .bind(agent_id)
+        .bind(Utc::now())
+        .bind(id)
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(ChatError::NotFound)?;
+        Ok(row)
+    }
+
+    async fn get_agent(&self, id: Uuid, user_id: Uuid) -> Result<Option<Agent>> {
+        let row = sqlx::query_as::<_, Agent>("select * from agents where id = ? and user_id = ?")
+            .bind(id)
+            .bind(user_id)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row)
+    }
+
+    async fn list_agents(&self, user_id: Uuid) -> Result<Vec<Agent>> {
+        let rows = sqlx::query_as::<_, Agent>(
+            "select * from agents where user_id = ? order by created_at asc limit 200",
+        )
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    async fn create_agent(&self, user_id: Uuid, draft: AgentDraft) -> Result<Agent> {
+        let now = Utc::now();
+        let row = sqlx::query_as::<_, Agent>(
+            "insert into agents
+             (id, user_id, name, instructions, provider_id, model, tools, sandbox_enabled, created_at, updated_at)
+             values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             returning *",
+        )
+        .bind(Uuid::new_v4())
+        .bind(user_id)
+        .bind(draft.name)
+        .bind(draft.instructions)
+        .bind(draft.provider_id)
+        .bind(draft.model)
+        .bind(Json(draft.tools))
+        .bind(draft.sandbox_enabled)
+        .bind(now)
+        .bind(now)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row)
+    }
+
+    async fn delete_agent(&self, id: Uuid, user_id: Uuid) -> Result<()> {
+        sqlx::query("delete from agents where id = ? and user_id = ?")
+            .bind(id)
+            .bind(user_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn get_provider(&self, id: Uuid, user_id: Uuid) -> Result<Option<Provider>> {
+        let row = sqlx::query_as::<_, Provider>(
+            "select * from providers where id = ? and (user_id = ? or user_id is null)",
+        )
+        .bind(id)
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|provider| self.decrypt_provider(provider))
+            .transpose()
+    }
+
+    async fn list_providers(&self, user_id: Uuid) -> Result<Vec<Provider>> {
+        let rows = sqlx::query_as::<_, Provider>(
+            "select * from providers
+             where user_id = ? or user_id is null
+             order by (user_id = ?) desc, created_at asc",
+        )
+        .bind(user_id)
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|provider| self.decrypt_provider(provider))
+            .collect()
+    }
+
+    async fn create_provider(
+        &self,
+        owner_id: Option<Uuid>,
+        name: &str,
+        kind: &str,
+        base_url: &str,
+        api_key: Option<&str>,
+    ) -> Result<Provider> {
+        let encrypted_key = self.encrypt_opt(api_key)?;
+        let row = sqlx::query_as::<_, Provider>(
+            "insert into providers (id, user_id, name, kind, base_url, api_key, created_at)
+             values (?, ?, ?, ?, ?, ?, ?)
+             returning *",
+        )
+        .bind(Uuid::new_v4())
+        .bind(owner_id)
+        .bind(name)
+        .bind(kind)
+        .bind(base_url)
+        .bind(encrypted_key)
+        .bind(Utc::now())
+        .fetch_one(&self.pool)
+        .await?;
+        self.decrypt_provider(row)
+    }
+
+    async fn delete_provider(&self, id: Uuid, owner_id: Option<Uuid>) -> Result<()> {
+        sqlx::query("delete from providers where id = ? and user_id is ?")
+            .bind(id)
+            .bind(owner_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn update_provider(
+        &self,
+        id: Uuid,
+        name: &str,
+        kind: &str,
+        base_url: &str,
+        api_key: Option<&str>,
+    ) -> Result<Provider> {
+        let encrypted_key = self.encrypt_opt(api_key)?;
+        let row = sqlx::query_as::<_, Provider>(
+            "update providers
+             set name = ?, kind = ?, base_url = ?, api_key = ?
+             where id = ?
+             returning *",
+        )
+        .bind(name)
+        .bind(kind)
+        .bind(base_url)
+        .bind(encrypted_key)
+        .bind(id)
+        .fetch_one(&self.pool)
+        .await?;
+        self.decrypt_provider(row)
+    }
+
+    async fn set_provider_credential(
+        &self,
+        user_id: Uuid,
+        provider_id: Uuid,
+        api_key: Option<&str>,
+    ) -> Result<()> {
+        match api_key {
+            Some(key) => {
+                let encrypted = self.secrets.encrypt(key)?;
+                sqlx::query(
+                    "insert into provider_credentials (user_id, provider_id, api_key, created_at)
+                     values (?, ?, ?, ?)
+                     on conflict (user_id, provider_id)
+                     do update set api_key = excluded.api_key",
+                )
+                .bind(user_id)
+                .bind(provider_id)
+                .bind(encrypted)
+                .bind(Utc::now())
+                .execute(&self.pool)
+                .await?;
+            }
+            None => {
+                sqlx::query(
+                    "delete from provider_credentials where user_id = ? and provider_id = ?",
+                )
+                .bind(user_id)
+                .bind(provider_id)
+                .execute(&self.pool)
+                .await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn get_provider_credential(
+        &self,
+        user_id: Uuid,
+        provider_id: Uuid,
+    ) -> Result<Option<String>> {
+        let row: Option<(String,)> = sqlx::query_as(
+            "select api_key from provider_credentials where user_id = ? and provider_id = ?",
+        )
+        .bind(user_id)
+        .bind(provider_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|(key,)| self.secrets.decrypt(&key)).transpose()
+    }
+
+    async fn list_provider_credential_ids(&self, user_id: Uuid) -> Result<Vec<Uuid>> {
+        let rows: Vec<(Uuid,)> =
+            sqlx::query_as("select provider_id from provider_credentials where user_id = ?")
+                .bind(user_id)
+                .fetch_all(&self.pool)
+                .await?;
+        Ok(rows.into_iter().map(|(id,)| id).collect())
+    }
+
+    async fn list_provider_models(&self, provider_id: Uuid) -> Result<Vec<ProviderModel>> {
+        let rows = sqlx::query_as::<_, ProviderModel>(
+            "select provider_id, id, owned_by, fetched_at
+             from models where provider_id = ? order by id asc",
+        )
+        .bind(provider_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    async fn replace_provider_models(
+        &self,
+        provider_id: Uuid,
+        models: &[ProviderModel],
+    ) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("delete from models where provider_id = ?")
+            .bind(provider_id)
+            .execute(&mut *tx)
+            .await?;
+        for model in models {
+            sqlx::query(
+                "insert into models (provider_id, id, owned_by, fetched_at)
+                 values (?, ?, ?, ?)",
+            )
+            .bind(provider_id)
+            .bind(&model.id)
+            .bind(&model.owned_by)
+            .bind(model.fetched_at)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
     }
 
     async fn insert_message(
@@ -196,6 +648,17 @@ impl Store for SqliteStore {
         sqlx::query("update messages set content = ?, status = ? where id = ?")
             .bind(content)
             .bind(status)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn finalize_message(&self, id: Uuid, content: &str, status: &str) -> Result<()> {
+        sqlx::query("update messages set content = ?, status = ?, created_at = ? where id = ?")
+            .bind(content)
+            .bind(status)
+            .bind(Utc::now())
             .bind(id)
             .execute(&self.pool)
             .await?;

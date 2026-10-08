@@ -1,7 +1,11 @@
 use chat_core::Result;
+use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
-use crate::models::{Conversation, FileRecord, Message, User};
+use crate::models::{
+    AdminUserSummary, Agent, AgentDraft, AuditEntry, AuditLog, Conversation, FileRecord, Message,
+    Provider, ProviderModel, RefreshToken, User,
+};
 use crate::types::{EmbeddingChunk, RetrievedChunk, Scope};
 
 /// Relational persistence, independent of the database engine.
@@ -23,6 +27,52 @@ pub trait Store: Send + Sync {
 
     async fn get_user(&self, id: Uuid) -> Result<Option<User>>;
 
+    /// Number of accounts, used to make the very first registrant an admin.
+    async fn count_users(&self) -> Result<i64>;
+
+    /// Every account with access state and owned-resource counts (admin only).
+    async fn list_user_summaries(&self) -> Result<Vec<AdminUserSummary>>;
+
+    /// Delete an account. Cascades to its conversations, agents, providers,
+    /// files and refresh tokens.
+    async fn delete_user(&self, id: Uuid) -> Result<()>;
+
+    /// Change an account's role (`user` | `admin`).
+    async fn set_user_role(&self, id: Uuid, role: &str) -> Result<()>;
+
+    /// Enable or disable an account. Disabled accounts are rejected on any
+    /// authenticated request.
+    async fn set_user_disabled(&self, id: Uuid, disabled: bool) -> Result<()>;
+
+    /// Record best-effort activity for an account.
+    async fn touch_user_last_seen(&self, id: Uuid) -> Result<()>;
+
+    // ---- refresh tokens / audit ----------------------------------------
+    /// Persist a refresh token by its hash (the plaintext never reaches the DB).
+    async fn create_refresh_token(
+        &self,
+        user_id: Uuid,
+        token_hash: &str,
+        expires_at: DateTime<Utc>,
+    ) -> Result<()>;
+
+    /// Look up a refresh token by hash, revoked or not, so the caller can
+    /// distinguish expiry from reuse of a already-rotated token.
+    async fn get_refresh_token(&self, token_hash: &str) -> Result<Option<RefreshToken>>;
+
+    /// Revoke a single refresh token (idempotent).
+    async fn revoke_refresh_token(&self, token_hash: &str) -> Result<()>;
+
+    /// Revoke every outstanding refresh token for a user (sign-out everywhere,
+    /// or a precaution when a revoked token is replayed).
+    async fn revoke_user_refresh_tokens(&self, user_id: Uuid) -> Result<()>;
+
+    /// Append an entry to the security audit trail.
+    async fn record_audit(&self, entry: &AuditEntry) -> Result<()>;
+
+    /// The most recent audit entries, newest first.
+    async fn list_audit_logs(&self, limit: i64) -> Result<Vec<AuditLog>>;
+
     // ---- conversations -------------------------------------------------
     async fn create_conversation(
         &self,
@@ -34,6 +84,93 @@ pub trait Store: Send + Sync {
     async fn list_conversations(&self, user_id: Uuid) -> Result<Vec<Conversation>>;
 
     async fn get_conversation(&self, id: Uuid, user_id: Uuid) -> Result<Conversation>;
+
+    /// Delete a conversation owned by `user_id` and, via cascade, its messages
+    /// and file rows. Blob cleanup is the caller's responsibility.
+    async fn delete_conversation(&self, id: Uuid, user_id: Uuid) -> Result<()>;
+
+    /// Rebind a conversation to `agent_id` (or clear it with `None`).
+    async fn set_conversation_agent(
+        &self,
+        id: Uuid,
+        user_id: Uuid,
+        agent_id: Option<Uuid>,
+    ) -> Result<Conversation>;
+
+    // ---- agents / providers --------------------------------------------
+    /// Fetch an agent owned by `user_id` (used to build its runtime config).
+    async fn get_agent(&self, id: Uuid, user_id: Uuid) -> Result<Option<Agent>>;
+
+    /// List the calling user's agents, oldest first.
+    async fn list_agents(&self, user_id: Uuid) -> Result<Vec<Agent>>;
+
+    /// Create an agent owned by `user_id`.
+    async fn create_agent(&self, user_id: Uuid, draft: AgentDraft) -> Result<Agent>;
+
+    /// Delete an agent owned by `user_id`.
+    async fn delete_agent(&self, id: Uuid, user_id: Uuid) -> Result<()>;
+
+    /// Fetch a provider visible to `user_id`: their own or a global
+    /// (admin-provided) one. Returns `None` when the id is unknown to them.
+    async fn get_provider(&self, id: Uuid, user_id: Uuid) -> Result<Option<Provider>>;
+
+    /// List providers visible to `user_id` — their own first, then globals.
+    async fn list_providers(&self, user_id: Uuid) -> Result<Vec<Provider>>;
+
+    /// Create a provider. `owner_id` is `None` for an admin-provided global
+    /// provider, `Some(user)` for a personal one.
+    async fn create_provider(
+        &self,
+        owner_id: Option<Uuid>,
+        name: &str,
+        kind: &str,
+        base_url: &str,
+        api_key: Option<&str>,
+    ) -> Result<Provider>;
+
+    /// Delete a provider matching `owner_id` exactly (`None` = global).
+    async fn delete_provider(&self, id: Uuid, owner_id: Option<Uuid>) -> Result<()>;
+
+    /// Overwrite a provider's mutable fields (including its API key, encrypted
+    /// at rest). Ownership is authorized by the caller.
+    async fn update_provider(
+        &self,
+        id: Uuid,
+        name: &str,
+        kind: &str,
+        base_url: &str,
+        api_key: Option<&str>,
+    ) -> Result<Provider>;
+
+    /// Store (or clear, with `None`) the caller's own API key for a provider.
+    /// Used for admin-provisioned shared providers that ship without a key.
+    async fn set_provider_credential(
+        &self,
+        user_id: Uuid,
+        provider_id: Uuid,
+        api_key: Option<&str>,
+    ) -> Result<()>;
+
+    /// The caller's decrypted API key for a provider, if any.
+    async fn get_provider_credential(
+        &self,
+        user_id: Uuid,
+        provider_id: Uuid,
+    ) -> Result<Option<String>>;
+
+    /// The ids of providers the caller has stored a key for.
+    async fn list_provider_credential_ids(&self, user_id: Uuid) -> Result<Vec<Uuid>>;
+
+    /// The cached model catalog for a provider, oldest fetch first. Empty when
+    /// the provider has never been queried.
+    async fn list_provider_models(&self, provider_id: Uuid) -> Result<Vec<ProviderModel>>;
+
+    /// Replace a provider's cached catalog (delete-then-insert, atomically).
+    async fn replace_provider_models(
+        &self,
+        provider_id: Uuid,
+        models: &[ProviderModel],
+    ) -> Result<()>;
 
     // ---- messages ------------------------------------------------------
     async fn insert_message(
@@ -59,6 +196,11 @@ pub trait Store: Send + Sync {
 
     /// Replace a message's content and status (used to checkpoint a stream).
     async fn update_message_content(&self, id: Uuid, content: &str, status: &str) -> Result<()>;
+
+    /// Replace a message's content and status and move it to the end of its
+    /// conversation. Used to finalize an agent answer whose placeholder was
+    /// created before the tool turns that logically precede it.
+    async fn finalize_message(&self, id: Uuid, content: &str, status: &str) -> Result<()>;
 
     /// Fetch a single message by id (used to authorize and resume streams).
     async fn get_message(&self, id: Uuid) -> Result<Option<Message>>;
