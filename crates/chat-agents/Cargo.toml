@@ -1,0 +1,19 @@
+[package]
+name = "chat-agents"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+chat-core.workspace = true
+chat-providers.workspace = true
+chat-sandbox.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+tracing.workspace = true

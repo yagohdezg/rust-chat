@@ -1,0 +1,12 @@
+/target
+/.dev
+/.data
+.env
+.env.local
+*.sqlite
+.DS_Store
+node_modules
+/web/build
+/web/.svelte-kit
+result
+result-*

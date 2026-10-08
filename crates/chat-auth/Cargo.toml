@@ -1,0 +1,16 @@
+[package]
+name = "chat-auth"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+chat-core.workspace = true
+argon2.workspace = true
+jsonwebtoken.workspace = true
+serde.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true

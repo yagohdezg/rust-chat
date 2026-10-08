@@ -1,0 +1,14 @@
+# Keep the Docker build context small and reproducible.
+.git
+.gitignore
+target
+**/target
+.data
+.env
+.env.*
+result
+result-*
+web/node_modules
+web/.svelte-kit
+web/build
+deploy/.env

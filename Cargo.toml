@@ -1,0 +1,75 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/chat-core",
+  "crates/chat-store",
+  "crates/chat-db-postgres",
+  "crates/chat-db-sqlite",
+  "crates/chat-files-s3",
+  "crates/chat-providers",
+  "crates/chat-rag",
+  "crates/chat-mcp",
+  "crates/chat-agents",
+  "crates/chat-sandbox",
+  "crates/chat-auth",
+  "crates/chat-server",
+  "services/sandboxd",
+]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+license = "MIT"
+rust-version = "1.82"
+
+[workspace.dependencies]
+# async / web
+tokio = { version = "1", features = ["full"] }
+axum = { version = "0.8", features = ["macros"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+# serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+bytes = "1"
+# db — the driver feature is enabled per backend crate (`postgres` / `sqlite`)
+sqlx = { version = "0.8", default-features = false, features = [
+  "runtime-tokio", "tls-rustls", "uuid", "chrono", "migrate", "json", "macros", "derive",
+] }
+# http client / streaming
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+futures = "0.3"
+async-stream = "0.3"
+eventsource-stream = "0.2"
+async-trait = "0.1"
+# errors / logging
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# misc
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+jsonwebtoken = "9"
+argon2 = "0.5"
+rand = "0.8"
+dotenvy = "0.15"
+base64 = "0.22"
+
+# internal crates
+chat-core = { path = "crates/chat-core" }
+chat-store = { path = "crates/chat-store" }
+chat-db-postgres = { path = "crates/chat-db-postgres" }
+chat-db-sqlite = { path = "crates/chat-db-sqlite" }
+chat-files-s3 = { path = "crates/chat-files-s3" }
+chat-providers = { path = "crates/chat-providers" }
+chat-rag = { path = "crates/chat-rag" }
+chat-mcp = { path = "crates/chat-mcp" }
+chat-agents = { path = "crates/chat-agents" }
+chat-sandbox = { path = "crates/chat-sandbox" }
+chat-auth = { path = "crates/chat-auth" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

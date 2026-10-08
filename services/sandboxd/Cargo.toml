@@ -1,0 +1,23 @@
+[package]
+name = "sandboxd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "sandboxd"
+path = "src/main.rs"
+
+[dependencies]
+chat-core.workspace = true
+chat-sandbox.workspace = true
+
+axum.workspace = true
+tokio.workspace = true
+tower-http.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true
