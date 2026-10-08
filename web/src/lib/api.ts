@@ -9,6 +9,7 @@ export type Conversation = {
 	user_id: string;
 	agent_id?: string | null;
 	title: string;
+	pinned: boolean;
 	created_at: string;
 	updated_at: string;
 };
@@ -272,6 +273,29 @@ export function setConversationAgent(
 	});
 }
 
+export function renameConversation(conversationId: string, title: string): Promise<Conversation> {
+	return request<Conversation>(`/api/conversations/${conversationId}`, {
+		method: 'PATCH',
+		body: JSON.stringify({ title })
+	});
+}
+
+export function setConversationPinned(
+	conversationId: string,
+	pinned: boolean
+): Promise<Conversation> {
+	return request<Conversation>(`/api/conversations/${conversationId}`, {
+		method: 'PATCH',
+		body: JSON.stringify({ pinned })
+	});
+}
+
+export function duplicateConversation(conversationId: string): Promise<Conversation> {
+	return request<Conversation>(`/api/conversations/${conversationId}/duplicate`, {
+		method: 'POST'
+	});
+}
+
 export function listAgents(): Promise<Agent[]> {
 	return request<Agent[]>('/api/agents');
 }
@@ -325,6 +349,11 @@ export function setProviderCredential(providerId: string, apiKey: string): Promi
 
 export function listModels(): Promise<ModelInfo[]> {
 	return request<ModelInfo[]>('/api/models');
+}
+
+/** The cached model catalog for one provider (own or global). */
+export function listProviderModels(providerId: string): Promise<ModelInfo[]> {
+	return request<ModelInfo[]>(`/api/providers/${providerId}/models`);
 }
 
 // ---- admin ----------------------------------------------------------------
@@ -398,6 +427,7 @@ export type ChatRequest = {
 	conversation_id: string;
 	content: string;
 	model?: string;
+	provider_id?: string;
 };
 
 /**

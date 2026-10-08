@@ -183,6 +183,10 @@ async fn main() -> anyhow::Result<()> {
             delete(routes::delete_conversation).patch(routes::update_conversation),
         )
         .route(
+            "/api/conversations/{id}/duplicate",
+            post(routes::duplicate_conversation),
+        )
+        .route(
             "/api/agents",
             get(routes::list_agents).post(routes::create_agent),
         )

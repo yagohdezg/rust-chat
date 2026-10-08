@@ -104,8 +104,8 @@ select:focus {
 }
 
 ::selection {
-	background: var(--primary-soft);
-	color: var(--text);
+	background: var(--primary);
+	color: var(--on-primary);
 }
 
 * {

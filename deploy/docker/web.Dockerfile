@@ -5,17 +5,16 @@
 # Build context must be the repository root (the Dockerfile copies from `web/`):
 #   docker build -f deploy/docker/web.Dockerfile --build-arg VITE_API_BASE=http://localhost:3080 .
 
-FROM docker.io/library/node:22-bookworm-slim AS build
-RUN corepack enable
+FROM docker.io/oven/bun:1 AS build
 WORKDIR /app
 
-COPY web/package.json web/pnpm-lock.yaml web/pnpm-workspace.yaml web/.npmrc ./
-RUN pnpm install --no-frozen-lockfile
+COPY web/package.json web/bun.lock ./
+RUN bun install --frozen-lockfile
 
 COPY web/ ./
 ARG VITE_API_BASE=http://localhost:3080
 ENV VITE_API_BASE=${VITE_API_BASE}
-RUN pnpm build
+RUN bun run build
 
 FROM docker.io/library/node:22-bookworm-slim AS runtime
 WORKDIR /app

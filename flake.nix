@@ -25,7 +25,7 @@
             postgresql_16
             # Frontend
             nodejs_22
-            pnpm
+            bun
             # Sandbox backend (dev/fallback; production backend is BoxLite)
             podman
             # Misc

@@ -97,6 +97,26 @@ pub trait Store: Send + Sync {
         agent_id: Option<Uuid>,
     ) -> Result<Conversation>;
 
+    /// Set a conversation's title.
+    async fn rename_conversation(
+        &self,
+        id: Uuid,
+        user_id: Uuid,
+        title: &str,
+    ) -> Result<Conversation>;
+
+    /// Pin or unpin a conversation.
+    async fn set_conversation_pinned(
+        &self,
+        id: Uuid,
+        user_id: Uuid,
+        pinned: bool,
+    ) -> Result<Conversation>;
+
+    /// Deep-copy a conversation — its metadata and all messages — under a new
+    /// id, returning the copy.
+    async fn duplicate_conversation(&self, id: Uuid, user_id: Uuid) -> Result<Conversation>;
+
     // ---- agents / providers --------------------------------------------
     /// Fetch an agent owned by `user_id` (used to build its runtime config).
     async fn get_agent(&self, id: Uuid, user_id: Uuid) -> Result<Option<Agent>>;

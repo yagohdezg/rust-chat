@@ -641,9 +641,26 @@ pub async fn delete_conversation(
 
 #[derive(Deserialize)]
 pub struct UpdateConversationBody {
-    /// New agent binding; `null` clears it.
+    /// New title; omitted to leave it unchanged.
     #[serde(default)]
-    pub agent_id: Option<Uuid>,
+    pub title: Option<String>,
+    /// New agent binding: omitted leaves it unchanged, `null` clears it.
+    #[serde(default, deserialize_with = "deserialize_optional_field")]
+    pub agent_id: Option<Option<Uuid>>,
+    /// Pin/unpin; omitted leaves it unchanged.
+    #[serde(default)]
+    pub pinned: Option<bool>,
+}
+
+/// Deserialize a present field into `Some(_)` even when its JSON value is
+/// `null`, so a missing key (`None`) can be told apart from an explicit clear
+/// (`Some(None)`).
+fn deserialize_optional_field<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Some)
 }
 
 pub async fn update_conversation(
@@ -653,20 +670,57 @@ pub async fn update_conversation(
     Json(body): Json<UpdateConversationBody>,
 ) -> Result<Json<Conversation>, ApiError> {
     // The conversation must belong to the caller and, if set, the agent too.
-    state
+    let mut conversation = state
         .store
         .get_conversation(conversation_id, user.id)
         .await?;
-    if let Some(agent_id) = body.agent_id {
+
+    if let Some(Some(agent_id)) = body.agent_id {
         state
             .store
             .get_agent(agent_id, user.id)
             .await?
             .ok_or(ChatError::NotFound)?;
     }
+
+    if let Some(title) = body.title {
+        let title = title.trim();
+        if title.is_empty() {
+            return Err(ChatError::BadRequest("conversation title is required".into()).into());
+        }
+        conversation = state
+            .store
+            .rename_conversation(conversation_id, user.id, title)
+            .await?;
+    }
+
+    if let Some(agent_id) = body.agent_id {
+        conversation = state
+            .store
+            .set_conversation_agent(conversation_id, user.id, agent_id)
+            .await?;
+    }
+
+    if let Some(pinned) = body.pinned {
+        conversation = state
+            .store
+            .set_conversation_pinned(conversation_id, user.id, pinned)
+            .await?;
+    }
+
+    Ok(Json(conversation))
+}
+
+/// `POST /api/conversations/{id}/duplicate` — copy a conversation and all of
+/// its messages under a new id. The copy is created unpinned.
+pub async fn duplicate_conversation(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path(conversation_id): Path<Uuid>,
+) -> Result<Json<Conversation>, ApiError> {
     let conversation = state
         .store
-        .set_conversation_agent(conversation_id, user.id, body.agent_id)
+        .duplicate_conversation(conversation_id, user.id)
         .await?;
     Ok(Json(conversation))
 }
@@ -1211,6 +1265,8 @@ pub struct ChatBody {
     pub content: String,
     #[serde(default)]
     pub model: Option<String>,
+    #[serde(default)]
+    pub provider_id: Option<Uuid>,
 }
 
 pub async fn chat(
@@ -1265,6 +1321,7 @@ pub async fn chat(
     }
 
     let requested_model = body.model;
+    let requested_provider = body.provider_id;
 
     // Route through the agent loop when the conversation has an agent attached
     // or any tools are registered; otherwise keep the lean single-shot path.
@@ -1272,7 +1329,16 @@ pub async fn chat(
     // foreign agent fails the request without leaving a dangling stream.
     let use_agent = !state.tools.is_empty() || conversation.agent_id.is_some();
     let resolved = if use_agent {
-        Some(resolve_agent(&state, user.id, &conversation, requested_model.as_deref()).await?)
+        Some(
+            resolve_agent(
+                &state,
+                user.id,
+                &conversation,
+                requested_model.as_deref(),
+                requested_provider,
+            )
+            .await?,
+        )
     } else {
         None
     };
@@ -1305,7 +1371,10 @@ pub async fn chat(
             tx,
         ),
         None => {
-            let provider = default_provider(&state, user.id).await?;
+            let provider = match requested_provider {
+                Some(provider_id) => resolve_provider(&state, provider_id, user.id).await?,
+                None => default_provider(&state, user.id).await?,
+            };
             let model = pick_model(provider.as_ref(), requested_model).await?;
             let request = ChatRequest {
                 model,
@@ -1482,6 +1551,7 @@ async fn resolve_agent(
     user_id: Uuid,
     conversation: &Conversation,
     requested_model: Option<&str>,
+    requested_provider: Option<Uuid>,
 ) -> Result<ResolvedAgent, ApiError> {
     let agent = match conversation.agent_id {
         Some(agent_id) => Some(
@@ -1494,10 +1564,14 @@ async fn resolve_agent(
         None => None,
     };
 
-    // Provider: the agent's own, else the user's default (own, then global).
-    let provider = match agent.as_ref().and_then(|agent| agent.provider_id) {
+    // Provider: the explicitly requested one, else the agent's own, else the
+    // user's default (own, then global).
+    let provider = match requested_provider {
         Some(provider_id) => resolve_provider(state, provider_id, user_id).await?,
-        None => default_provider(state, user_id).await?,
+        None => match agent.as_ref().and_then(|agent| agent.provider_id) {
+            Some(provider_id) => resolve_provider(state, provider_id, user_id).await?,
+            None => default_provider(state, user_id).await?,
+        },
     };
 
     let mut system = None;

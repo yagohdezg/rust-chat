@@ -306,7 +306,8 @@ impl Store for PostgresStore {
 
     async fn list_conversations(&self, user_id: Uuid) -> Result<Vec<Conversation>> {
         let rows = sqlx::query_as::<_, Conversation>(
-            "select * from conversations where user_id = $1 order by updated_at desc limit 200",
+            "select * from conversations where user_id = $1
+             order by pinned desc, updated_at desc limit 200",
         )
         .bind(user_id)
         .fetch_all(&self.pool)
@@ -352,6 +353,87 @@ impl Store for PostgresStore {
         .fetch_optional(&self.pool)
         .await?
         .ok_or(ChatError::NotFound)?;
+        Ok(row)
+    }
+
+    async fn rename_conversation(
+        &self,
+        id: Uuid,
+        user_id: Uuid,
+        title: &str,
+    ) -> Result<Conversation> {
+        let row = sqlx::query_as::<_, Conversation>(
+            "update conversations set title = $3, updated_at = now()
+             where id = $1 and user_id = $2
+             returning *",
+        )
+        .bind(id)
+        .bind(user_id)
+        .bind(title)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(ChatError::NotFound)?;
+        Ok(row)
+    }
+
+    async fn set_conversation_pinned(
+        &self,
+        id: Uuid,
+        user_id: Uuid,
+        pinned: bool,
+    ) -> Result<Conversation> {
+        let row = sqlx::query_as::<_, Conversation>(
+            "update conversations set pinned = $3
+             where id = $1 and user_id = $2
+             returning *",
+        )
+        .bind(id)
+        .bind(user_id)
+        .bind(pinned)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(ChatError::NotFound)?;
+        Ok(row)
+    }
+
+    async fn duplicate_conversation(&self, id: Uuid, user_id: Uuid) -> Result<Conversation> {
+        let mut tx = self.pool.begin().await?;
+        let source = sqlx::query_as::<_, Conversation>(
+            "select * from conversations where id = $1 and user_id = $2",
+        )
+        .bind(id)
+        .bind(user_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or(ChatError::NotFound)?;
+
+        let new_id = Uuid::new_v4();
+        let now = Utc::now();
+        let row = sqlx::query_as::<_, Conversation>(
+            "insert into conversations (id, user_id, agent_id, title, created_at, updated_at, pinned)
+             values ($1, $2, $3, $4, $5, $6, false)
+             returning *",
+        )
+        .bind(new_id)
+        .bind(user_id)
+        .bind(source.agent_id)
+        .bind(format!("{} (copy)", source.title))
+        .bind(now)
+        .bind(now)
+        .fetch_one(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            "insert into messages (id, conversation_id, role, content, tool_calls, tool_call_id, status, created_at)
+             select gen_random_uuid(), $1, role, content, tool_calls, tool_call_id, status, created_at
+             from messages where conversation_id = $2 order by created_at",
+        )
+        .bind(new_id)
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
         Ok(row)
     }
 

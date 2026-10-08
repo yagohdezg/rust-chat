@@ -68,6 +68,68 @@ async fn relational_crud_roundtrip() {
 }
 
 #[tokio::test]
+async fn conversations_pin_and_duplicate() {
+    let (store, path) = temp_store().await;
+
+    let user = store
+        .create_user("pin@example.com", None, "hash", "user")
+        .await
+        .unwrap();
+    let older = store
+        .create_conversation(user.id, None, "older")
+        .await
+        .unwrap();
+    let newer = store
+        .create_conversation(user.id, None, "newer")
+        .await
+        .unwrap();
+
+    // Pinning surfaces the older chat ahead of the more recently updated one.
+    store
+        .set_conversation_pinned(older.id, user.id, true)
+        .await
+        .expect("pin");
+    let listed = store.list_conversations(user.id).await.unwrap();
+    assert_eq!(listed[0].id, older.id);
+    assert!(listed[0].pinned);
+    assert_eq!(listed[1].id, newer.id);
+
+    // Duplicating copies the title (suffixed) and every message under a fresh id.
+    store
+        .insert_message(older.id, "user", Some("hi"), None, None)
+        .await
+        .unwrap();
+    store
+        .insert_message(older.id, "assistant", Some("hello"), None, None)
+        .await
+        .unwrap();
+    let copy = store
+        .duplicate_conversation(older.id, user.id)
+        .await
+        .expect("duplicate");
+    assert_ne!(copy.id, older.id);
+    assert_eq!(copy.title, "older (copy)");
+    assert!(!copy.pinned, "copies start unpinned");
+    let copied = store.list_messages(copy.id).await.unwrap();
+    assert_eq!(copied.len(), 2);
+    assert_eq!(copied[0].content.as_deref(), Some("hi"));
+    assert_eq!(copied[1].content.as_deref(), Some("hello"));
+
+    // A foreign user cannot duplicate someone else's conversation.
+    let other = store
+        .create_user("nosy@example.com", None, "hash", "user")
+        .await
+        .unwrap();
+    assert!(store
+        .duplicate_conversation(older.id, other.id)
+        .await
+        .is_err());
+
+    drop(store);
+    let _ = std::fs::remove_file(path);
+}
+
+#[tokio::test]
 async fn agent_and_provider_loading() {
     let (store, path) = temp_store().await;
 

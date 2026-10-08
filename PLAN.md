@@ -303,22 +303,33 @@ per-user computer is a different control plane.
 - [x] P1 Agent picker + management: a sidebar "Agents" section (create/list/
       delete), an agent `<select>` in the composer, and an agent chip in the
       header. New chats and existing conversations can be bound to an agent.
-- [ ] P2 Move provider management off the left sidebar: the provider list/add/
-      delete should live at the bottom-right of the chat (a panel/popover
-      anchored near the composer), not as a sidebar section.
-- [~] P2 Model picker fed by `GET /api/models`: models populate a `<select>`
-      from the default provider (text input only as fallback), but it is not
-      grouped by provider and ignores per-agent provider differences.
-- [ ] P2 "Thinking" waiting animation: a fun animated inline SVG shown while an
-      assistant reply is pending (before the first token / during tool calls).
+- [x] P2 Provider management moved off the left sidebar into a popover anchored
+      near the composer: list providers (global/key tags, choose one), add
+      (with admin-only global toggle), rotate/clear keys, and delete.
+- [x] P2 Model picker merged into the composer (Gemini-style): a single chip
+      inside the message box opens a panel where providers are listed with
+      their models nested underneath; an agent-pinned provider narrows the
+      panel to that provider. Catalogs come from the per-provider endpoint
+      (`GET /api/providers/{id}/models`). The selected provider rides along on
+      the chat request (`provider_id`), which the server resolves
+      request -> agent -> default. Provider add/key/delete live in the same
+      panel.
+- [x] P2 "Thinking" waiting animation: a [thinking orb](https://thinkingorbs.com)
+      (`@yogesharc/thinking-orbs`, `reasoning` state via its vanilla `mountOrb`,
+      wrapped in `web/src/lib/ThinkingOrb.svelte`) shown with a "Thinking…"
+      label in the assistant bubble while a reply is pending (before the first
+      token).
 - [ ] P2 File management (list/download/delete) and upload progress.
 - [~] P2 Conversation management UI: delete exists; rename/archive and a proper
       agent-rebind control are still pending (the PATCH endpoint is in place).
-- [ ] P2 Per-conversation three-dot menu: add an overflow (⋮) opener beside each
-      conversation entry in the sidebar with **rename**, **delete**, and
-      **duplicate**. Rename reuses the PATCH endpoint; duplicate needs a new
-      `POST /api/conversations/{id}/duplicate` (copy the conversation, its
-      messages, and its `agent_id`, with fresh ids).
+- [x] P2 Per-conversation three-dot menu: an overflow (⋮) opener beside each
+      conversation entry with **pin/unpin**, **rename** (inline edit),
+      **duplicate**, and **delete**. Rename and pin use the PATCH endpoint
+      (extended to accept `title`/`pinned`); duplicate calls
+      `POST /api/conversations/{id}/duplicate` (copies the conversation, its
+      messages, and its `agent_id` under fresh ids); delete uses a themed
+      confirmation dialog instead of the browser `confirm`. Pinned chats sort
+      first in the sidebar.
 - [ ] P2 Streaming reconnect/resume handling.
 - [ ] P3 Sandbox "computer" view (persistent workspace, file browser).
 

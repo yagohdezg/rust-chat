@@ -7,6 +7,7 @@
 	import * as api from '#lib/api';
 	import { auth } from '#lib/auth.svelte';
 	import { chat } from '#lib/chat.svelte';
+	import ConfirmDialog from '#lib/ConfirmDialog.svelte';
 	import type { LayoutProps } from './$types';
 
 	let { children }: LayoutProps = $props();
@@ -80,9 +81,92 @@
 		goto('/login');
 	}
 
-	function confirmRemove(id: string, title: string) {
-		if (confirm(`Delete "${title}"? This cannot be undone.`)) void chat.remove(id);
+	/** Per-conversation overflow menu (pin / rename / duplicate / delete). */
+	let menuOpenId = $state<string | null>(null);
+
+	function toggleMenu(id: string) {
+		menuOpenId = menuOpenId === id ? null : id;
 	}
+
+	// Inline rename: the row swaps its title for an input.
+	let renamingId = $state<string | null>(null);
+	let renameValue = $state('');
+
+	function autofocus(node: HTMLInputElement) {
+		node.focus();
+		node.select();
+	}
+
+	function beginRename(conversation: { id: string; title: string }) {
+		menuOpenId = null;
+		renamingId = conversation.id;
+		renameValue = conversation.title;
+	}
+
+	function cancelRename() {
+		renamingId = null;
+	}
+
+	async function commitRename() {
+		const id = renamingId;
+		if (!id) return;
+		renamingId = null;
+		await chat.rename(id, renameValue);
+	}
+
+	function onRenameKeydown(event: KeyboardEvent) {
+		if (event.key === 'Enter') {
+			event.preventDefault();
+			void commitRename();
+		} else if (event.key === 'Escape') {
+			event.preventDefault();
+			cancelRename();
+		}
+	}
+
+	function duplicateConversation(id: string) {
+		menuOpenId = null;
+		openChat();
+		void chat.duplicate(id);
+	}
+
+	function togglePin(conversation: { id: string; pinned: boolean }) {
+		menuOpenId = null;
+		void chat.setPinned(conversation.id, !conversation.pinned);
+	}
+
+	// Delete goes through a themed dialog instead of the browser `confirm`.
+	let pendingDelete = $state<{ id: string; title: string } | null>(null);
+
+	function requestRemove(id: string, title: string) {
+		menuOpenId = null;
+		pendingDelete = { id, title };
+	}
+
+	function confirmDelete() {
+		const target = pendingDelete;
+		pendingDelete = null;
+		if (target) void chat.remove(target.id);
+	}
+
+	// Dismiss the overflow menu on an outside click or Escape.
+	$effect(() => {
+		if (!menuOpenId) return;
+		const onPointerDown = (event: MouseEvent) => {
+			const target = event.target as Element | null;
+			if (target?.closest('.conv-menu')) return;
+			menuOpenId = null;
+		};
+		const onKeydown = (event: KeyboardEvent) => {
+			if (event.key === 'Escape') menuOpenId = null;
+		};
+		window.addEventListener('mousedown', onPointerDown);
+		window.addEventListener('keydown', onKeydown);
+		return () => {
+			window.removeEventListener('mousedown', onPointerDown);
+			window.removeEventListener('keydown', onKeydown);
+		};
+	});
 
 	let showAgentForm = $state(false);
 	let agentName = $state('');
@@ -114,16 +198,6 @@
 
 	function confirmRemoveAgent(id: string, name: string) {
 		if (confirm(`Delete agent "${name}"?`)) void chat.removeAgent(id);
-	}
-
-	function confirmRemoveProvider(id: string, name: string) {
-		if (confirm(`Delete provider "${name}"?`)) void chat.removeProvider(id);
-	}
-
-	function setProviderKey(id: string, name: string) {
-		const key = prompt(`API key for "${name}" (leave blank to clear):`);
-		if (key === null) return;
-		void chat.setProviderKey(id, key.trim());
 	}
 
 	function initial(email: string | undefined): string {
@@ -216,24 +290,60 @@
 							<ul class="conv-list">
 								{#each chat.conversations as conversation (conversation.id)}
 									<li class:active={conversation.id === chat.selectedId}>
+										{#if renamingId === conversation.id}
+											<input
+												class="conv-rename"
+												bind:value={renameValue}
+												use:autofocus
+												onkeydown={onRenameKeydown}
+												onblur={commitRename}
+											/>
+										{:else}
 											<button
 												class="conv"
 												onclick={() => selectConversation(conversation.id)}
 												title={conversation.title}
 											>
-											{conversation.title}
-										</button>
-										<button
-											class="conv-del"
-											onclick={() => confirmRemove(conversation.id, conversation.title)}
-											title="Delete chat"
-											aria-label="Delete chat"
-										>
-											<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-												<polyline points="3 6 5 6 21 6" />
-												<path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-											</svg>
-										</button>
+												{#if conversation.pinned}
+													<svg class="pin" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+														<path d="M14 2l8 8-4 1-3 3-1 5-7-7 5-1 3-3z" />
+													</svg>
+												{/if}
+												{conversation.title}
+											</button>
+											<div class="conv-menu">
+												<button
+													class="conv-menu-btn"
+													class:open={menuOpenId === conversation.id}
+													onclick={() => toggleMenu(conversation.id)}
+													title="Chat options"
+													aria-label="Chat options"
+												>
+													<svg viewBox="0 0 24 24" fill="currentColor">
+														<circle cx="12" cy="5" r="1.6" />
+														<circle cx="12" cy="12" r="1.6" />
+														<circle cx="12" cy="19" r="1.6" />
+													</svg>
+												</button>
+												{#if menuOpenId === conversation.id}
+													<div class="menu-pop">
+														<button onclick={() => togglePin(conversation)}>
+															{conversation.pinned ? 'Unpin' : 'Pin'}
+														</button>
+														<button onclick={() => beginRename(conversation)}>Rename</button>
+														<button onclick={() => duplicateConversation(conversation.id)}>
+															Duplicate
+														</button>
+														<button
+															class="danger"
+															onclick={() => requestRemove(conversation.id, conversation.title)}
+														>
+															Delete
+														</button>
+													</div>
+												{/if}
+											</div>
+										{/if}
 									</li>
 								{/each}
 							</ul>
@@ -295,51 +405,6 @@
 									{creatingAgent ? 'Creating…' : 'Create agent'}
 								</button>
 							</form>
-						{/if}
-					</section>
-
-					<section class="section">
-						<div class="section-head">
-							<h2>Providers</h2>
-							<a class="mini" href="/setup" title="Add provider">+</a>
-						</div>
-						{#if chat.providers.length === 0}
-							<p class="empty-hint">No providers configured.</p>
-						{:else}
-							<ul class="agent-list">
-								{#each chat.providers as provider (provider.id)}
-									<li>
-										<span class="conv provider" title={provider.base_url}>
-											{provider.name}
-											{#if !provider.user_id}<span class="tag">global</span>{/if}
-											{#if provider.has_key === false}<span class="tag needs">key</span>{/if}
-										</span>
-										<button
-											class="conv-del key"
-											onclick={() => setProviderKey(provider.id, provider.name)}
-											title={provider.user_id === auth.session.user.id
-												? 'Rotate API key'
-												: 'Set your API key'}
-											aria-label="Set API key"
-										>
-											<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-												<path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4" />
-											</svg>
-										</button>
-										<button
-											class="conv-del"
-											onclick={() => confirmRemoveProvider(provider.id, provider.name)}
-											title="Delete provider"
-											aria-label="Delete provider"
-										>
-											<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-												<polyline points="3 6 5 6 21 6" />
-												<path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-											</svg>
-										</button>
-									</li>
-								{/each}
-							</ul>
 						{/if}
 					</section>
 
@@ -406,6 +471,16 @@
 
 		<main>{@render children()}</main>
 	</div>
+
+	<ConfirmDialog
+		open={!!pendingDelete}
+		title="Delete chat?"
+		message={pendingDelete ? `"${pendingDelete.title}" and its messages will be removed. This cannot be undone.` : ''}
+		confirmLabel="Delete"
+		danger
+		onconfirm={confirmDelete}
+		oncancel={() => (pendingDelete = null)}
+	/>
 {:else}
 	<main class="bare">{@render children()}</main>
 {/if}
@@ -610,28 +685,6 @@
 		color: var(--text);
 		box-shadow: inset 2px 0 0 var(--primary);
 	}
-	.provider {
-		display: flex;
-		align-items: center;
-		gap: 0.4rem;
-		cursor: default;
-	}
-	.tag {
-		padding: 0 0.35rem;
-		border-radius: var(--radius-full);
-		background: var(--surface-active);
-		color: var(--text-faint);
-		font-size: 0.62rem;
-		text-transform: uppercase;
-		letter-spacing: 0.05em;
-	}
-	.tag.needs {
-		background: var(--danger-bg);
-		color: var(--danger);
-	}
-	a.mini {
-		text-decoration: none;
-	}
 
 	.agent-form {
 		display: flex;
@@ -698,6 +751,23 @@
 		background: var(--surface-hover);
 		color: var(--text);
 	}
+	.conv .pin {
+		width: 12px;
+		height: 12px;
+		margin-right: 0.35rem;
+		color: var(--accent);
+		vertical-align: -1px;
+	}
+	.conv-rename {
+		width: calc(100% - 0.6rem);
+		margin: 0 0.3rem;
+		background: var(--bg);
+		border: 1px solid var(--primary);
+		border-radius: var(--radius-sm);
+		color: var(--text);
+		padding: 0.45rem 0.55rem;
+		font: inherit;
+	}
 	.conv-list li.active .conv {
 		background: var(--primary-soft);
 		color: var(--text);
@@ -722,7 +792,6 @@
 			color var(--transition),
 			background-color var(--transition);
 	}
-	.conv-list li:hover .conv-del,
 	.agent-list li:hover .conv-del,
 	.conv-del:focus-visible {
 		opacity: 1;
@@ -743,13 +812,75 @@
 		width: 15px;
 		height: 15px;
 	}
-	/* The rotate-key button sits just left of the delete button. */
-	.conv-del.key {
-		right: 2.35rem;
+
+	/* per-conversation overflow menu (rename / delete) */
+	.conv-menu {
+		position: absolute;
+		top: 50%;
+		right: 0.3rem;
+		transform: translateY(-50%);
 	}
-	.conv-del.key:hover {
-		color: var(--accent);
-		background: var(--primary-soft);
+	.conv-menu-btn {
+		display: grid;
+		place-items: center;
+		width: 28px;
+		height: 28px;
+		border: none;
+		border-radius: var(--radius-sm);
+		background: transparent;
+		color: var(--text-faint);
+		opacity: 0;
+		transition:
+			opacity var(--transition),
+			color var(--transition),
+			background-color var(--transition);
+	}
+	.conv-list li:hover .conv-menu-btn,
+	.conv-menu-btn:focus-visible,
+	.conv-menu-btn.open {
+		opacity: 1;
+	}
+	.conv-menu-btn:hover,
+	.conv-menu-btn.open {
+		color: var(--text);
+		background: var(--surface-hover);
+	}
+	.conv-menu-btn svg {
+		width: 15px;
+		height: 15px;
+	}
+	.menu-pop {
+		position: absolute;
+		top: calc(100% + 0.2rem);
+		right: 0;
+		z-index: 30;
+		min-width: 140px;
+		padding: 0.3rem;
+		display: flex;
+		flex-direction: column;
+		gap: 0.1rem;
+		border: 1px solid var(--border-strong);
+		border-radius: var(--radius-sm);
+		background: var(--bg-elevated);
+		box-shadow: var(--shadow);
+		animation: rise 140ms var(--ease) both;
+	}
+	.menu-pop button {
+		text-align: left;
+		border: none;
+		background: transparent;
+		color: var(--text-muted);
+		padding: 0.45rem 0.55rem;
+		border-radius: var(--radius-sm);
+		font-size: 0.85rem;
+	}
+	.menu-pop button:hover {
+		background: var(--surface-hover);
+		color: var(--text);
+	}
+	.menu-pop button.danger:hover {
+		background: var(--danger-bg);
+		color: var(--danger);
 	}
 
 	.file-item {

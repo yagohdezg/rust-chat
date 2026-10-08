@@ -1,6 +1,6 @@
 # rust-chat — common developer tasks.
 # Run `just` to list recipes. Assumes the Nix dev shell (`nix develop`),
-# which provides rustc/cargo, sqlx-cli, postgresql, node/pnpm and podman.
+# which provides rustc/cargo, sqlx-cli, postgresql, node/bun and podman.
 
 set shell := ["bash", "-eu", "-o", "pipefail", "-c"]
 
@@ -92,12 +92,16 @@ stack-sandboxd:
 
 # Install frontend dependencies.
 web-install:
-    pnpm --dir web install
+    bun install --cwd web
 
 # Run the SvelteKit dev server.
 web-dev:
-    pnpm --dir web dev
+    bun run --cwd web dev
+
+# Type-check the frontend.
+web-check:
+    bun run --cwd web check
 
 # Build the SvelteKit app for production.
 web-build:
-    pnpm --dir web build
+    bun run --cwd web build

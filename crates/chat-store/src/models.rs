@@ -47,6 +47,8 @@ pub struct Conversation {
     pub user_id: Uuid,
     pub agent_id: Option<Uuid>,
     pub title: String,
+    /// Pinned chats sort ahead of the rest in listings.
+    pub pinned: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
