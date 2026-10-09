@@ -11,11 +11,18 @@ use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::{
-    program, ExecRequest, ExecResult, IsolationLevel, SandboxBackend, SandboxError, SandboxSpec,
+    program, ExecRequest, ExecResult, IsolationLevel, SandboxBackend, SandboxError, SandboxFile,
+    SandboxSpec, OUTPUT_DIR,
 };
 
 /// Maximum bytes captured per stream (stdout / stderr) before clipping.
 const MAX_OUTPUT_BYTES: usize = 1024 * 1024;
+
+/// Maximum number of output files collected from a run.
+const MAX_OUTPUT_FILES: usize = 64;
+
+/// Maximum size of a single collected output file.
+const MAX_OUTPUT_FILE_BYTES: u64 = 8 * 1024 * 1024;
 
 /// Destination directory inside the box where the source and inputs land.
 const WORK_DIR: &str = "/app";
@@ -148,6 +155,91 @@ impl BoxliteBackend {
             .map_err(|e| transport("upload files", e))?;
         ensure_success(resp, "upload files").await?;
         Ok(())
+    }
+
+    /// Download a path from the box as a tar archive and decode its regular
+    /// files. A missing path (`404`) yields an empty list rather than an error,
+    /// so collection is safe when the code produced nothing.
+    async fn download_path(&self, prefix: &str, box_id: &str, path: &str) -> Vec<SandboxFile> {
+        let url = self.endpoint(prefix, &format!("boxes/{box_id}/files"));
+        let resp = match self
+            .auth(self.http.get(url))
+            .query(&[("path", path)])
+            .send()
+            .await
+        {
+            Ok(resp) => resp,
+            Err(e) => {
+                tracing::warn!(error = %e, path, "output download request failed");
+                return Vec::new();
+            }
+        };
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Vec::new();
+        }
+        if !resp.status().is_success() {
+            tracing::warn!(status = %resp.status(), path, "output download failed");
+            return Vec::new();
+        }
+        let bytes = match resp.bytes().await {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                tracing::warn!(error = %e, path, "failed to read output archive");
+                return Vec::new();
+            }
+        };
+        match decode_tar(&bytes) {
+            Ok(files) => files,
+            Err(e) => {
+                tracing::warn!(error = %e, path, "failed to decode output archive");
+                Vec::new()
+            }
+        }
+    }
+
+    /// Collect output files produced by a run: the conventional output
+    /// directory plus any explicit [`ExecRequest::outputs`] paths. Best-effort;
+    /// collection failures never fail the run.
+    async fn collect_outputs(
+        &self,
+        prefix: &str,
+        box_id: &str,
+        request: &ExecRequest,
+    ) -> Vec<SandboxFile> {
+        let mut paths = vec![format!("{OUTPUT_DIR}/.")];
+        paths.extend(request.outputs.iter().cloned());
+
+        let mut files: Vec<SandboxFile> = Vec::new();
+        for path in paths {
+            if files.len() >= MAX_OUTPUT_FILES {
+                break;
+            }
+            for file in self.download_path(prefix, box_id, &path).await {
+                if files.len() >= MAX_OUTPUT_FILES {
+                    break;
+                }
+                if !files.iter().any(|existing| existing.name == file.name) {
+                    files.push(file);
+                }
+            }
+        }
+        files
+    }
+
+    /// Remove the output directory after its contents have been collected, so a
+    /// persistent box does not re-report the same outputs on the next call.
+    async fn clear_output_dir(&self, prefix: &str, box_id: &str) {
+        let command = format!("rm -rf {OUTPUT_DIR}");
+        let args = vec!["-c".to_string(), command];
+        match self
+            .start_exec(prefix, box_id, "sh".to_string(), args)
+            .await
+        {
+            Ok(exec_id) => {
+                let _ = self.stream_exec(prefix, box_id, &exec_id).await;
+            }
+            Err(e) => tracing::warn!(error = %e, "failed to clear output directory"),
+        }
     }
 
     async fn start_exec(
@@ -298,6 +390,7 @@ impl BoxliteBackend {
             stderr: String::from_utf8_lossy(&stderr).into_owned(),
             timed_out: false,
             truncated,
+            files: Vec::new(),
         })
     }
 
@@ -313,7 +406,9 @@ impl BoxliteBackend {
         self.upload_files(prefix, box_id, ext, request).await?;
         let exec_id = self.start_exec(prefix, box_id, command, args).await?;
         *exec_id_cell.lock().unwrap() = Some(exec_id.clone());
-        self.stream_exec(prefix, box_id, &exec_id).await
+        let mut result = self.stream_exec(prefix, box_id, &exec_id).await?;
+        result.files = self.collect_outputs(prefix, box_id, request).await;
+        Ok(result)
     }
 
     /// Provision a persistent box and return its id.
@@ -343,8 +438,8 @@ impl BoxliteBackend {
         let exec_id: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         let deadline = Duration::from_secs(self.spec.timeout_seconds.max(1));
         let inner = self.run_in_box(&prefix, box_id, program, request, exec_id.clone());
-        match tokio::time::timeout(deadline, inner).await {
-            Ok(result) => result,
+        let result = match tokio::time::timeout(deadline, inner).await {
+            Ok(result) => result?,
             Err(_elapsed) => {
                 tracing::warn!(box_id, "persistent BoxLite exec exceeded local timeout");
                 // Bind before the `if let` so the guard is not held across await.
@@ -354,15 +449,20 @@ impl BoxliteBackend {
                         tracing::warn!(error = %e, "failed to kill timed-out execution");
                     }
                 }
-                Ok(ExecResult {
+                return Ok(ExecResult {
                     exit_code: -1,
                     stdout: String::new(),
                     stderr: String::new(),
                     timed_out: true,
                     truncated: false,
-                })
+                    files: Vec::new(),
+                });
             }
-        }
+        };
+        // Outputs were collected inside `run_in_box`; clear them so the next
+        // call on this persistent box reports only its own production.
+        self.clear_output_dir(&prefix, box_id).await;
+        Ok(result)
     }
 
     /// Destroy a persistent box, releasing its resources. Idempotent.
@@ -411,6 +511,7 @@ impl SandboxBackend for BoxliteBackend {
                     stderr: String::new(),
                     timed_out: true,
                     truncated: false,
+                    files: Vec::new(),
                 })
             }
         };
@@ -492,6 +593,61 @@ fn append_entry<W: std::io::Write>(
     builder
         .append_data(&mut header, path, data)
         .map_err(|e| SandboxError::Other(format!("tar error: {e}")))
+}
+
+/// Decode a tar archive of collected outputs into base64 [`SandboxFile`]s.
+///
+/// Entry names are normalized to a workspace-relative path (stripping the
+/// archive's leading `./`, the absolute root and the output directory prefix)
+/// and rejected if they try to escape the workspace. Oversized files are
+/// skipped.
+fn decode_tar(bytes: &[u8]) -> Result<Vec<SandboxFile>, SandboxError> {
+    use base64::Engine as _;
+
+    let mut archive = tar::Archive::new(std::io::Cursor::new(bytes));
+    let entries = archive
+        .entries()
+        .map_err(|e| SandboxError::Other(format!("tar read error: {e}")))?;
+
+    let mut files = Vec::new();
+    for entry in entries {
+        let mut entry = entry.map_err(|e| SandboxError::Other(format!("tar entry error: {e}")))?;
+        if !entry.header().entry_type().is_file() {
+            continue;
+        }
+        if entry.size() > MAX_OUTPUT_FILE_BYTES {
+            tracing::warn!(size = entry.size(), "skipping oversized output file");
+            continue;
+        }
+        let path = entry
+            .path()
+            .map_err(|e| SandboxError::Other(format!("tar path error: {e}")))?
+            .to_string_lossy()
+            .into_owned();
+        let Some(name) = normalize_entry_name(&path) else {
+            continue;
+        };
+        let mut data = Vec::new();
+        std::io::Read::read_to_end(&mut entry, &mut data)
+            .map_err(|e| SandboxError::Other(format!("tar entry read error: {e}")))?;
+        files.push(SandboxFile {
+            name,
+            content_b64: base64::engine::general_purpose::STANDARD.encode(&data),
+        });
+    }
+    Ok(files)
+}
+
+/// Normalize a tar entry name into a safe workspace-relative path.
+fn normalize_entry_name(raw: &str) -> Option<String> {
+    let trimmed = raw.trim_start_matches("./").trim_start_matches('/');
+    let without_root = trimmed.strip_prefix("app/").unwrap_or(trimmed);
+    let without_dir = without_root.strip_prefix("output/").unwrap_or(without_root);
+    let cleaned = without_dir.trim_start_matches('/');
+    if cleaned.is_empty() || cleaned.contains("..") || std::path::Path::new(cleaned).is_absolute() {
+        return None;
+    }
+    Some(cleaned.to_string())
 }
 
 fn transport(action: &str, error: reqwest::Error) -> SandboxError {
@@ -582,6 +738,32 @@ mod tests {
             }
         };
 
+        let download = {
+            let recording = recording.clone();
+            move |Path(params): Path<Params>, uri: axum::http::Uri| {
+                let recording = recording.clone();
+                async move {
+                    recording.record("GET", uri.path());
+                    assert_eq!(params.get("box_id").map(String::as_str), Some("box-1"));
+                    let mut builder = tar::Builder::new(Vec::new());
+                    let data = b"out";
+                    let mut header = tar::Header::new_gnu();
+                    header.set_size(data.len() as u64);
+                    header.set_mode(0o644);
+                    header.set_cksum();
+                    builder
+                        .append_data(&mut header, "result.txt", &data[..])
+                        .unwrap();
+                    let bytes = builder.into_inner().unwrap();
+                    (
+                        axum::http::StatusCode::OK,
+                        [(axum::http::header::CONTENT_TYPE, "application/x-tar")],
+                        bytes,
+                    )
+                }
+            }
+        };
+
         let exec = {
             let recording = recording.clone();
             move |Path(params): Path<Params>, uri: axum::http::Uri| {
@@ -653,7 +835,7 @@ mod tests {
             Router::new()
                 .route("/v1/me", get(me))
                 .route("/v1/boxes", post(create))
-                .route("/v1/boxes/{box_id}/files", put(files))
+                .route("/v1/boxes/{box_id}/files", put(files).get(download))
                 .route("/v1/boxes/{box_id}/exec", post(exec))
                 .route(
                     "/v1/boxes/{box_id}/executions/{exec_id}/attach",
@@ -665,7 +847,10 @@ mod tests {
             Router::new()
                 .route("/v1/me", get(me))
                 .route("/v1/{prefix}/boxes", post(create))
-                .route("/v1/{prefix}/boxes/{box_id}/files", put(files))
+                .route(
+                    "/v1/{prefix}/boxes/{box_id}/files",
+                    put(files).get(download),
+                )
                 .route("/v1/{prefix}/boxes/{box_id}/exec", post(exec))
                 .route(
                     "/v1/{prefix}/boxes/{box_id}/executions/{exec_id}/attach",
@@ -694,6 +879,7 @@ mod tests {
                 name: "data.txt".into(),
                 content_b64: base64::engine::general_purpose::STANDARD.encode(b"payload"),
             }],
+            outputs: Vec::new(),
         }
     }
 
@@ -732,6 +918,15 @@ mod tests {
         assert_eq!(result.stdout, "hi");
         assert_eq!(result.stderr, "err");
         assert!(!result.timed_out);
+        // Outputs are collected from the box before it is deleted.
+        assert_eq!(result.files.len(), 1, "{:?}", result.files);
+        assert_eq!(result.files[0].name, "result.txt");
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(&result.files[0].content_b64)
+                .unwrap(),
+            b"out"
+        );
 
         let calls = recording.calls();
         assert!(calls.iter().any(|c| c == "GET /v1/me"), "{calls:?}");
@@ -805,5 +1000,25 @@ mod tests {
             calls.iter().any(|c| c == "DELETE /v1/org/boxes/box-1"),
             "{calls:?}"
         );
+    }
+
+    #[test]
+    fn output_entry_names_are_normalized() {
+        assert_eq!(normalize_entry_name("foo.txt").as_deref(), Some("foo.txt"));
+        assert_eq!(
+            normalize_entry_name("./foo.txt").as_deref(),
+            Some("foo.txt")
+        );
+        assert_eq!(
+            normalize_entry_name("app/output/foo.txt").as_deref(),
+            Some("foo.txt")
+        );
+        assert_eq!(
+            normalize_entry_name("/app/output/sub/foo.txt").as_deref(),
+            Some("sub/foo.txt")
+        );
+        // Paths that try to escape the workspace are rejected.
+        assert_eq!(normalize_entry_name("../etc/passwd"), None);
+        assert_eq!(normalize_entry_name(""), None);
     }
 }

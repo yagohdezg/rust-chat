@@ -5,6 +5,7 @@ mod routes;
 mod state;
 mod stream;
 mod tools;
+mod workspace;
 
 use std::sync::Arc;
 
@@ -158,11 +159,16 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let bind_addr = cfg.bind_addr.clone();
+    let workspace = Arc::new(workspace::FileWorkspace::new(
+        files.clone(),
+        store.clone(),
+        vectors.clone(),
+    ));
     let state = Arc::new(AppState {
         cfg: Arc::new(cfg),
         store,
-        vectors,
         files,
+        workspace,
         sandbox,
         computers,
         tools,
@@ -243,8 +249,18 @@ async fn main() -> anyhow::Result<()> {
             "/api/conversations/{id}/messages",
             get(routes::list_messages),
         )
-        .route("/api/conversations/{id}/files", get(routes::list_files))
-        .route("/api/files", post(routes::upload_file))
+        .route(
+            "/api/conversations/{id}/files",
+            get(routes::list_files).post(routes::attach_conversation_file),
+        )
+        .route(
+            "/api/conversations/{id}/files/{file_id}",
+            delete(routes::detach_conversation_file),
+        )
+        .route(
+            "/api/files",
+            get(routes::list_user_files).post(routes::upload_file),
+        )
         .route(
             "/api/files/{id}",
             get(routes::download_file).delete(routes::delete_file),

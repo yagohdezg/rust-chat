@@ -58,16 +58,21 @@ pub struct SandboxFile {
     pub content_b64: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ExecRequest {
     /// Language identifier, e.g. `python`, `javascript`, `bash`, `go`, `rust`.
     pub language: String,
     pub code: String,
+    /// Input files materialized into the workspace before the run.
     #[serde(default)]
     pub files: Vec<SandboxFile>,
+    /// Extra workspace paths to collect as output files after the run, on top of
+    /// the conventional output directory (see [`OUTPUT_DIR`]).
+    #[serde(default)]
+    pub outputs: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ExecResult {
     pub exit_code: i32,
     pub stdout: String,
@@ -76,6 +81,10 @@ pub struct ExecResult {
     /// Set when captured stdout or stderr hit the size cap and was clipped.
     #[serde(default)]
     pub truncated: bool,
+    /// Files collected from the workspace after the run (e.g. from
+    /// [`OUTPUT_DIR`]). Base64-encoded, ready to persist or hand back.
+    #[serde(default)]
+    pub files: Vec<SandboxFile>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -125,6 +134,11 @@ pub(crate) fn language_command(language: &str) -> Option<(Vec<&'static str>, &'s
 
 /// In-box directory the upload lands in and exec runs from.
 const WORK_DIR: &str = "/app";
+
+/// In-box directory whose contents are collected back as output files after a
+/// run. Callers can also request additional paths per request via
+/// [`ExecRequest::outputs`].
+pub const OUTPUT_DIR: &str = "/app/output";
 
 /// BoxLite's `boxlite serve` unpacks a `PUT /files` archive into a temp
 /// `extracted/` directory and then copies that directory *into* `path`, so

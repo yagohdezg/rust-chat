@@ -5,20 +5,21 @@ use chat_computers::ComputerOrchestrator;
 use chat_core::Config;
 use chat_rag::RagPipeline;
 use chat_sandbox::SandboxBackend;
-use chat_store::{FileStore, Store, VectorStore};
+use chat_store::{FileStore, Store};
 
 use crate::rate_limit::RateLimiter;
 use crate::stream::StreamHub;
+use crate::workspace::FileWorkspace;
 
 #[derive(Clone)]
 pub struct AppState {
     pub cfg: Arc<Config>,
     /// Relational persistence — one of the `chat-store` backends.
     pub store: Arc<dyn Store>,
-    /// Vector storage, shared by RAG and file-deletion cleanup.
-    pub vectors: Arc<dyn VectorStore>,
     /// Uploaded file blob storage (local or S3-compatible).
     pub files: Arc<dyn FileStore>,
+    /// Bridges the user's file library to the sandbox (in/out transfer).
+    pub workspace: Arc<FileWorkspace>,
     pub sandbox: Arc<dyn SandboxBackend>,
     /// Per-user persistent "computer" control plane. `None` disables its routes.
     pub computers: Option<Arc<ComputerOrchestrator>>,

@@ -34,6 +34,8 @@ use crate::error::ApiError;
 use crate::extract::{AdminUser, AuthUser};
 use crate::state::AppState;
 use crate::stream::{SseEvent, StreamState};
+use crate::tools::CodeBackend;
+use crate::workspace::sanitize_filename;
 
 /// Persist a streaming reply to the database every this many bytes.
 const PERSIST_EVERY_BYTES: usize = 256;
@@ -621,18 +623,8 @@ pub async fn delete_conversation(
         .get_conversation(conversation_id, user.id)
         .await?;
 
-    // Best-effort cleanup of stored blobs before the cascade drops the rows.
-    match state.store.list_files(conversation_id).await {
-        Ok(files) => {
-            for file in files {
-                if let Err(err) = state.files.delete(&file.storage_path).await {
-                    tracing::warn!(error = %err, file = %file.id, "failed to delete stored blob");
-                }
-            }
-        }
-        Err(err) => tracing::warn!(error = %err, "failed to list files for deleted conversation"),
-    }
-
+    // Attachments (join rows) cascade away, but the files themselves stay in
+    // the caller's personal storage.
     state
         .store
         .delete_conversation(conversation_id, user.id)
@@ -1161,13 +1153,21 @@ pub async fn upload_file(
         .store
         .create_file(
             user.id,
-            body.conversation_id,
+            None,
             &body.filename,
             body.mime.as_deref(),
             bytes.len() as i64,
             &location,
         )
         .await?;
+
+    // Uploading into a conversation also attaches the new library file to it.
+    if let Some(conversation_id) = body.conversation_id {
+        state
+            .store
+            .attach_file(record.id, conversation_id, user.id)
+            .await?;
+    }
 
     // Index into the vector store when RAG is enabled. Failures here do not
     // fail the upload — the file is already stored.
@@ -1204,6 +1204,63 @@ pub async fn list_files(
         .get_conversation(conversation_id, user.id)
         .await?;
     Ok(Json(state.store.list_files(conversation_id).await?))
+}
+
+/// `GET /api/files` — the caller's personal file storage (library).
+pub async fn list_user_files(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+) -> Result<Json<Vec<FileRecord>>, ApiError> {
+    Ok(Json(state.store.list_user_files(user.id).await?))
+}
+
+#[derive(Deserialize)]
+pub struct AttachFilesBody {
+    pub file_ids: Vec<Uuid>,
+}
+
+/// `POST /api/conversations/{id}/files` — attach existing library files to a
+/// conversation so they are materialized into its sandbox.
+pub async fn attach_conversation_file(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path(conversation_id): Path<Uuid>,
+    Json(body): Json<AttachFilesBody>,
+) -> Result<Json<Vec<FileRecord>>, ApiError> {
+    state
+        .store
+        .get_conversation(conversation_id, user.id)
+        .await?;
+    for file_id in &body.file_ids {
+        state
+            .store
+            .get_file(*file_id, user.id)
+            .await?
+            .ok_or(ChatError::NotFound)?;
+        state
+            .store
+            .attach_file(*file_id, conversation_id, user.id)
+            .await?;
+    }
+    Ok(Json(state.store.list_files(conversation_id).await?))
+}
+
+/// `DELETE /api/conversations/{id}/files/{file_id}` — detach a file from a
+/// conversation, keeping it in the personal library.
+pub async fn detach_conversation_file(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path((conversation_id, file_id)): Path<(Uuid, Uuid)>,
+) -> Result<StatusCode, ApiError> {
+    state
+        .store
+        .get_conversation(conversation_id, user.id)
+        .await?;
+    state
+        .store
+        .detach_file(file_id, conversation_id, user.id)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 pub async fn download_file(
@@ -1248,12 +1305,7 @@ pub async fn delete_file(
         .ok_or(ChatError::NotFound)?;
 
     // Best-effort cleanup of the blob and its embeddings, then the row.
-    if let Err(err) = state.files.delete(&file.storage_path).await {
-        tracing::warn!(error = %err, file = %file.id, "failed to delete stored blob");
-    }
-    if let Err(err) = state.vectors.delete_for_file(file.id).await {
-        tracing::warn!(error = %err, file = %file.id, "failed to delete embeddings");
-    }
+    state.workspace.delete_blob(&file).await;
     state.store.delete_file(file_id, user.id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -1598,17 +1650,22 @@ async fn resolve_agent(
         tools = state.tools.restricted(&names);
     }
 
-    // When the per-user computer plane is enabled, `execute_code` runs on the
-    // caller's own persistent sandbox (one live computer per user, enforced by
-    // the placement registry) instead of the shared, ephemeral backend. This
-    // also makes the tool available to agents that opt in via `sandbox_enabled`
-    // even when the process-wide sandbox tool is off.
-    let computer = state
-        .computers
-        .clone()
-        .filter(|_| wants_code || tools.get("execute_code").is_some());
-    if let Some(computers) = computer {
-        tools.register(crate::tools::computer_code_interpreter(computers, user_id));
+    // When the code interpreter is available, bind it to this conversation so
+    // the sandbox receives the conversation's files and saves its own outputs
+    // back into the user's library. The persistent computer plane is preferred
+    // when enabled; otherwise the shared ephemeral backend is used.
+    let code_enabled = wants_code || tools.get("execute_code").is_some();
+    if code_enabled {
+        let backend = match &state.computers {
+            Some(computers) => CodeBackend::Computer(computers.clone()),
+            None => CodeBackend::Ephemeral(state.sandbox.clone()),
+        };
+        tools.register(crate::tools::conversation_code_tool(
+            backend,
+            state.workspace.clone(),
+            user_id,
+            conversation.id,
+        ));
     }
 
     let model = pick_model(provider.as_ref(), model).await?;
@@ -1926,6 +1983,10 @@ pub struct SandboxBody {
     pub code: String,
     #[serde(default)]
     pub files: Vec<SandboxFile>,
+    /// When set, the conversation's attached files are injected into the run
+    /// and its `/app/output` is saved back to the user's library.
+    #[serde(default)]
+    pub conversation_id: Option<Uuid>,
 }
 
 pub async fn sandbox_run(
@@ -1935,16 +1996,37 @@ pub async fn sandbox_run(
     Json(body): Json<SandboxBody>,
 ) -> Result<Json<ExecResult>, ApiError> {
     let language = body.language.clone();
-    let request = ExecRequest {
+    let mut request = ExecRequest {
         language: body.language,
         code: body.code,
         files: body.files,
+        outputs: Vec::new(),
     };
+    if let Some(conversation_id) = body.conversation_id {
+        state
+            .store
+            .get_conversation(conversation_id, user.id)
+            .await?;
+        request.files = state
+            .workspace
+            .load_for_conversation(user.id, conversation_id)
+            .await?;
+    }
     let result = state
         .sandbox
         .run(&request)
         .await
         .map_err(|e| ApiError(ChatError::Internal(anyhow::anyhow!(e))))?;
+
+    if let Some(conversation_id) = body.conversation_id {
+        if let Err(err) = state
+            .workspace
+            .persist_outputs(user.id, conversation_id, &result.files)
+            .await
+        {
+            tracing::warn!(error = %err, "failed to persist sandbox outputs");
+        }
+    }
 
     audit(
         &state,
@@ -2031,12 +2113,33 @@ pub async fn computer_exec(
     Json(body): Json<SandboxBody>,
 ) -> Result<Json<ExecResult>, ApiError> {
     let language = body.language.clone();
-    let request = ExecRequest {
+    let mut request = ExecRequest {
         language: body.language,
         code: body.code,
         files: body.files,
+        outputs: Vec::new(),
     };
+    if let Some(conversation_id) = body.conversation_id {
+        state
+            .store
+            .get_conversation(conversation_id, user.id)
+            .await?;
+        request.files = state
+            .workspace
+            .load_for_conversation(user.id, conversation_id)
+            .await?;
+    }
     let result = computer_plane(&state)?.exec(user.id, &request).await?;
+
+    if let Some(conversation_id) = body.conversation_id {
+        if let Err(err) = state
+            .workspace
+            .persist_outputs(user.id, conversation_id, &result.files)
+            .await
+        {
+            tracing::warn!(error = %err, "failed to persist computer outputs");
+        }
+    }
 
     audit(
         &state,
@@ -2056,26 +2159,6 @@ pub async fn computer_exec(
     .await;
 
     Ok(Json(result))
-}
-
-/// Keep only characters that are safe in a file name.
-fn sanitize_filename(name: &str) -> String {
-    let cleaned: String = name
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    let cleaned = cleaned.trim_matches('.').to_string();
-    if cleaned.is_empty() {
-        "upload".into()
-    } else {
-        cleaned
-    }
 }
 
 #[cfg(test)]

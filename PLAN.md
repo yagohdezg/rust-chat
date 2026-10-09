@@ -17,7 +17,8 @@ BoxLite sandbox exec (via the standalone `sandboxd` service), Postgres +
 SQLite stores, `pgvector` and brute-force vector search, chunker. Providers
 are configured at runtime (first-run setup, admin global + per-user), agents
 can be created and attached to conversations, and `/api/chat` runs the
-agent/tool loop.
+agent/tool loop. A per-user **file library** with conversation attachments and
+sandbox file in/out is implemented (§4c).
 
 Still scaffolded (not reachable from the server): the MCP client and the
 `mcp_servers` table.
@@ -195,9 +196,9 @@ stay out of it and provider keys keep resolving from the DB/env via
 >    frame decoding, timeout, cleanup); sandboxd returns 401 without the
 >    token.
 > 10. **Docs.** Update README, `.env.example`, `deploy/compose.yaml`.
-> 11. **Deferred** (not this task): conversation-file -> box injection
->     (needs a `ToolContext` in the agent loop), box -> store output,
->     gVisor, §4b persistent computer.
+> 11. **Deferred** (not this task): gVisor, §4b persistent computer.
+>     Conversation-file -> box injection and box -> store output are now
+>     implemented (see §4c).
 >
 > Defaults: `SANDBOXD_URL=http://localhost:3081`,
 > `BOXLITE_URL=http://localhost:8100`, `SANDBOX_IMAGE=python:3.12-slim`.
@@ -261,8 +262,34 @@ after. A persistent per-user computer is a different control plane.
 - [ ] P2 Warm VM pool to hide Firecracker cold start. P1 warms boxes
       (`COMPUTER_WARM_POOL`), but a crash leaks them (no durable pool ownership).
 - [ ] P2 Per-computer egress allow-list / proxy.
-- [ ] P3 File-transfer API into/out of a computer
-      (`ExecRequest.files` only supports inline base64 today).
+- [x] P3 File-transfer API into/out of a computer
+      (`ExecRequest.files` in, `ExecResult.files` out via BoxLite's tar
+      download; see §4c).
+
+## 4c. Personal file library + sandbox file I/O
+
+Files are a per-user **library**, not conversation-owned. The `files` table is
+the library; the new `conversation_files` join attaches any library file to any
+number of conversations. Uploading into a conversation creates the library file
+and attaches it; `GET/POST/DELETE /api/conversations/{id}/files[/{file_id}]`
+list/attach/detach, and `GET /api/files` lists the library.
+
+- [x] P1 `conversation_files` join + backfill of legacy `files.conversation_id`
+      (Postgres + SQLite). Conversation delete drops attachments, not files.
+- [x] P1 Attach any library file to another conversation (sandbox reuse).
+- [x] P1 Sandbox **input**: the conversation's attached files are materialized
+      into `/app` for `execute_code`, `/api/sandbox/run` and
+      `/api/computers/exec` (shared `FileWorkspace`, both ephemeral and
+      persistent backends).
+- [x] P1 Sandbox **output**: `/app/output` (+ explicit `ExecRequest.outputs`) is
+      downloaded from the box as a tar, decoded to `ExecResult.files`, saved to
+      the library and attached to the conversation; the tool reports the names.
+      Persistent computers clear the directory after collection.
+- [x] P2 Output dedupe: identical (filename + bytes) outputs are not re-stored.
+- [ ] P2 Frontend: library browser + attach picker in the composer.
+- [ ] P2 RAG over attached-to-other-conversation files (embeddings are still
+      indexed under the upload's origin conversation).
+- [ ] P3 Per-file size/type limits for outputs; antivirus/MIME sniffing (§8).
 
 ## 5. Scaling / deployment
 
@@ -434,7 +461,14 @@ after. A persistent per-user computer is a different control plane.
       wrapped in `web/src/lib/ThinkingOrb.svelte`) shown with a "Thinking…"
       label in the assistant bubble while a reply is pending (before the first
       token).
-- [ ] P2 File management (list/download/delete) and upload progress.
+- [ ] P2 File management UI. The backend now exposes a personal file library
+      and cross-conversation attachments (§4c), but the web app has no library
+      browser or "attach an existing library file" picker: the composer's
+      upload button only uploads into the active conversation (`POST /api/files`
+      with `conversation_id`) and the attached-file list is read-only. Still
+      missing: list/download/delete from `GET /api/files`, attach via
+      `POST /api/conversations/{id}/files`, detach via
+      `DELETE /api/conversations/{id}/files/{file_id}`, and upload progress.
 - [~] P2 Conversation management UI: delete exists; rename/archive and a proper
       agent-rebind control are still pending (the PATCH endpoint is in place).
 - [x] P2 Per-conversation three-dot menu: an overflow (⋮) opener beside each

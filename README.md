@@ -71,6 +71,20 @@ attach, and force-deletes the box on every path (success, error and timeout).
 Both the exec and the surrounding sequence carry a timeout, and each stream is
 capped at 1 MiB.
 
+### Code over your files
+
+Every user has a personal file library. Uploading a file into a conversation
+stores it in that library and attaches it to the conversation; a library file
+can then be attached to any other conversation. When code runs — through the
+`execute_code` tool, `POST /api/sandbox/run`, or `POST /api/computers/exec` —
+the conversation's attached files are materialized into the box's `/app`
+directory, so generated code can read them. Files the run writes to
+`/app/output` are pulled back out (via BoxLite's tar download), saved to the
+library, and attached to the conversation, and the tool reports their names to
+the model. This works for both the ephemeral `sandboxd` backend and the
+persistent per-user computer; a computer clears `/app/output` after each run so
+it does not re-report the same files.
+
 There is no host-kernel (Podman) execution path. If `sandboxd`/BoxLite is
 unreachable the backend **fails closed** rather than silently degrading.
 
@@ -292,17 +306,20 @@ See [`.env.example`](.env.example).
 | `DELETE`| `/api/conversations/{id}`          | JWT  | Delete a conversation (+ its files)  |
 | `GET`  | `/api/conversations/{id}/messages`  | JWT  | List messages in a conversation      |
 | `GET`  | `/api/conversations/{id}/files`     | JWT  | List files attached to a conversation |
-| `POST` | `/api/files`                        | JWT  | Upload a file (base64) and index it  |
+| `POST` | `/api/conversations/{id}/files`     | JWT  | Attach library files (`{file_ids}`)  |
+| `DELETE` | `/api/conversations/{id}/files/{file_id}` | JWT | Detach a file from a conversation |
+| `GET`  | `/api/files`                        | JWT  | List the caller's personal file library |
+| `POST` | `/api/files`                        | JWT  | Upload a file (base64); attach with `conversation_id` |
 | `GET`  | `/api/files/{id}`                   | JWT  | Download a stored file               |
-| `DELETE` | `/api/files/{id}`                 | JWT  | Delete a file, its blob and embeddings |
+| `DELETE` | `/api/files/{id}`                 | JWT  | Delete a library file, its blob and embeddings |
 | `POST` | `/api/chat`                         | JWT  | Stream a completion as SSE           |
 | `GET`  | `/api/messages/{id}/stream`         | JWT  | Resume a stream (send `Last-Event-ID`) |
-| `POST` | `/api/sandbox/run`                  | JWT  | Execute code in the sandbox          |
+| `POST` | `/api/sandbox/run`                  | JWT  | Execute code in the sandbox (`conversation_id` injects its files) |
 | `GET`  | `/api/computers/me`                 | JWT  | Get (or create) the caller's computer |
 | `DELETE`| `/api/computers/me`                | JWT  | Destroy the caller's computer        |
 | `POST` | `/api/computers/me/pause`           | JWT  | Pause the caller's computer          |
 | `POST` | `/api/computers/me/resume`          | JWT  | Resume the caller's computer         |
-| `POST` | `/api/computers/exec`               | JWT  | Run code on the caller's computer    |
+| `POST` | `/api/computers/exec`               | JWT  | Run code on the caller's computer (`conversation_id` injects its files) |
 
 `/api/chat` streams `text/event-stream` events: `meta` (the assistant
 `message_id` and a `resume_path`), optional `sources` (retrieved RAG chunks),
@@ -326,8 +343,10 @@ key. `GET /api/providers` returns `has_key` per provider so the UI can prompt
 for the missing key, and admins are never forced through provider setup.
 
 `POST /api/files` takes JSON: `{ filename, mime?, content_b64, conversation_id? }`.
-Uploads are written under `FILE_STORAGE_DIR` and, when RAG is enabled, indexed
-for retrieval. The response reports `chunks_indexed` and any `indexing_error`.
+Uploads are written under `FILE_STORAGE_DIR` into the caller's personal
+library; when `conversation_id` is set the file is also attached to that
+conversation. When RAG is enabled the upload is indexed for retrieval. The
+response reports `chunks_indexed` and any `indexing_error`.
 
 Authenticated routes expect `Authorization: Bearer <jwt>`. Registering and
 logging in return a short-lived access token plus a rotating `refresh_token`;

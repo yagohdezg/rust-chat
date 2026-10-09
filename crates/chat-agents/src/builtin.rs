@@ -114,6 +114,7 @@ fn parse_request(arguments: &Value) -> anyhow::Result<ExecRequest> {
         language,
         code,
         files: Vec::new(),
+        outputs: Vec::new(),
     })
 }
 
@@ -125,6 +126,14 @@ fn format_result(result: ExecResult) -> String {
     );
     if result.truncated {
         output.push_str("\n[output truncated at 1 MiB]");
+    }
+    if !result.files.is_empty() {
+        let names: Vec<&str> = result.files.iter().map(|f| f.name.as_str()).collect();
+        output.push_str(&format!(
+            "\n[saved {} output file(s) to the user's storage: {}]",
+            names.len(),
+            names.join(", ")
+        ));
     }
     output
 }
@@ -157,6 +166,7 @@ mod tests {
                 stderr: String::new(),
                 timed_out: false,
                 truncated: false,
+                files: Vec::new(),
             })
         }
     }

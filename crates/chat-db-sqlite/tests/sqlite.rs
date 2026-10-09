@@ -657,3 +657,72 @@ async fn vector_search_returns_nearest_chunk() {
     drop(store);
     let _ = std::fs::remove_file(path);
 }
+
+#[tokio::test]
+async fn file_library_and_conversation_attachments() {
+    let (store, path) = temp_store().await;
+    let user = store
+        .create_user("ada@example.com", None, "hash", "user")
+        .await
+        .unwrap();
+    let conv_a = store.create_conversation(user.id, None, "a").await.unwrap();
+    let conv_b = store.create_conversation(user.id, None, "b").await.unwrap();
+
+    // A library file uploaded with no conversation.
+    let library = store
+        .create_file(user.id, None, "notes.txt", Some("text/plain"), 3, "u/f1")
+        .await
+        .unwrap();
+    // A file uploaded into conv_a (origin set) plus its attachment.
+    let attached = store
+        .create_file(user.id, Some(conv_a.id), "data.csv", None, 4, "u/f2")
+        .await
+        .unwrap();
+    store
+        .attach_file(attached.id, conv_a.id, user.id)
+        .await
+        .unwrap();
+
+    assert_eq!(store.list_user_files(user.id).await.unwrap().len(), 2);
+
+    let a_files = store.list_files(conv_a.id).await.unwrap();
+    assert_eq!(a_files.len(), 1);
+    assert_eq!(a_files[0].filename, "data.csv");
+
+    // A library file can be attached to another conversation, idempotently.
+    store
+        .attach_file(library.id, conv_b.id, user.id)
+        .await
+        .unwrap();
+    store
+        .attach_file(library.id, conv_b.id, user.id)
+        .await
+        .unwrap();
+    assert_eq!(store.list_files(conv_b.id).await.unwrap().len(), 1);
+
+    // A different user cannot attach the file (ownership-checked insert).
+    let other = store
+        .create_user("grace@example.com", None, "hash", "user")
+        .await
+        .unwrap();
+    let conv_c = store
+        .create_conversation(other.id, None, "c")
+        .await
+        .unwrap();
+    store
+        .attach_file(library.id, conv_c.id, other.id)
+        .await
+        .unwrap();
+    assert!(store.list_files(conv_c.id).await.unwrap().is_empty());
+
+    // Detaching keeps the library file.
+    store
+        .detach_file(library.id, conv_b.id, user.id)
+        .await
+        .unwrap();
+    assert!(store.list_files(conv_b.id).await.unwrap().is_empty());
+    assert_eq!(store.list_user_files(user.id).await.unwrap().len(), 2);
+
+    drop(store);
+    let _ = std::fs::remove_file(path);
+}

@@ -86,6 +86,7 @@ mod tests {
                 stderr: String::new(),
                 timed_out: false,
                 truncated: false,
+                files: Vec::new(),
             })
         }
 
@@ -189,6 +190,7 @@ mod tests {
                     language: "python".into(),
                     code: "print(1)".into(),
                     files: Vec::new(),
+                    outputs: Vec::new(),
                 },
             )
             .await
@@ -285,6 +287,7 @@ mod tests {
                 stderr: String::new(),
                 timed_out: false,
                 truncated: false,
+                files: Vec::new(),
             })
         }
 
@@ -318,6 +321,7 @@ mod tests {
                     language: "python".into(),
                     code: "print('hi')".into(),
                     files: Vec::new(),
+                    outputs: Vec::new(),
                 },
             )
             .await

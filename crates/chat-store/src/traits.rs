@@ -240,7 +240,20 @@ pub trait Store: Send + Sync {
 
     async fn get_file(&self, id: Uuid, user_id: Uuid) -> Result<Option<FileRecord>>;
 
+    /// Files attached to a conversation (via the `conversation_files` join),
+    /// oldest attachment first. This is the set materialized into that
+    /// conversation's sandbox.
     async fn list_files(&self, conversation_id: Uuid) -> Result<Vec<FileRecord>>;
+
+    /// Every file in the user's personal storage (library), newest first.
+    async fn list_user_files(&self, user_id: Uuid) -> Result<Vec<FileRecord>>;
+
+    /// Attach an existing library file to a conversation. The file must belong
+    /// to `user_id`; re-attaching is a no-op.
+    async fn attach_file(&self, file_id: Uuid, conversation_id: Uuid, user_id: Uuid) -> Result<()>;
+
+    /// Detach a file from a conversation without deleting the library file.
+    async fn detach_file(&self, file_id: Uuid, conversation_id: Uuid, user_id: Uuid) -> Result<()>;
 
     async fn delete_file(&self, id: Uuid, user_id: Uuid) -> Result<()>;
 

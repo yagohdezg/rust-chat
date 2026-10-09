@@ -21,6 +21,12 @@ impl From<ChatError> for ApiError {
     }
 }
 
+impl std::fmt::Display for ApiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
 impl From<anyhow::Error> for ApiError {
     fn from(err: anyhow::Error) -> Self {
         Self(ChatError::Internal(err))

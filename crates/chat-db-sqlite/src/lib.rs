@@ -819,12 +819,54 @@ impl Store for SqliteStore {
 
     async fn list_files(&self, conversation_id: Uuid) -> Result<Vec<FileRecord>> {
         let rows = sqlx::query_as::<_, FileRecord>(
-            "select * from files where conversation_id = ? order by created_at asc",
+            "select f.* from files f
+             join conversation_files cf on cf.file_id = f.id
+             where cf.conversation_id = ?
+             order by cf.created_at asc, f.created_at asc",
         )
         .bind(conversation_id)
         .fetch_all(&self.pool)
         .await?;
         Ok(rows)
+    }
+
+    async fn list_user_files(&self, user_id: Uuid) -> Result<Vec<FileRecord>> {
+        let rows = sqlx::query_as::<_, FileRecord>(
+            "select * from files where user_id = ? order by created_at desc",
+        )
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    async fn attach_file(&self, file_id: Uuid, conversation_id: Uuid, user_id: Uuid) -> Result<()> {
+        sqlx::query(
+            "insert or ignore into conversation_files (conversation_id, file_id, created_at)
+             select ?, id, ? from files where id = ? and user_id = ?",
+        )
+        .bind(conversation_id)
+        .bind(Utc::now())
+        .bind(file_id)
+        .bind(user_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn detach_file(&self, file_id: Uuid, conversation_id: Uuid, user_id: Uuid) -> Result<()> {
+        sqlx::query(
+            "delete from conversation_files
+             where conversation_id = ? and file_id = ?
+               and exists (select 1 from files where id = ? and user_id = ?)",
+        )
+        .bind(conversation_id)
+        .bind(file_id)
+        .bind(file_id)
+        .bind(user_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 
     async fn delete_file(&self, id: Uuid, user_id: Uuid) -> Result<()> {
