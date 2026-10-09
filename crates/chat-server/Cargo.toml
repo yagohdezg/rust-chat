@@ -17,7 +17,6 @@ chat-db-sqlite.workspace = true
 chat-files-s3.workspace = true
 chat-auth.workspace = true
 chat-providers.workspace = true
-chat-rag.workspace = true
 chat-agents.workspace = true
 chat-sandbox.workspace = true
 chat-computers.workspace = true

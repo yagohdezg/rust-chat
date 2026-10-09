@@ -585,6 +585,11 @@
 		background: var(--primary-soft);
 		color: var(--accent);
 	}
+	.hint {
+		color: var(--text-faint);
+		font-size: 0.75rem;
+		font-weight: 400;
+	}
 	.dot {
 		display: inline-block;
 		width: 8px;

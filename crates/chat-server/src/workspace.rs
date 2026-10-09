@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use base64::Engine as _;
 use chat_sandbox::SandboxFile;
-use chat_store::{FileRecord, FileStore, Store, VectorStore};
+use chat_store::{FileRecord, FileStore, Store};
 use uuid::Uuid;
 
 use crate::error::ApiError;
@@ -21,20 +21,11 @@ use crate::error::ApiError;
 pub struct FileWorkspace {
     files: Arc<dyn FileStore>,
     store: Arc<dyn Store>,
-    vectors: Arc<dyn VectorStore>,
 }
 
 impl FileWorkspace {
-    pub fn new(
-        files: Arc<dyn FileStore>,
-        store: Arc<dyn Store>,
-        vectors: Arc<dyn VectorStore>,
-    ) -> Self {
-        Self {
-            files,
-            store,
-            vectors,
-        }
+    pub fn new(files: Arc<dyn FileStore>, store: Arc<dyn Store>) -> Self {
+        Self { files, store }
     }
 
     /// Load every file attached to `conversation_id` as sandbox inputs. Missing
@@ -68,6 +59,65 @@ impl FileWorkspace {
             }
         }
         Ok(inputs)
+    }
+
+    /// Load the conversation's attached text files as a prompt preamble.
+    ///
+    /// Non-text (binary) files are skipped, and each file is truncated to keep
+    /// the prompt bounded. Returns `None` when nothing usable is attached.
+    pub async fn attachment_context(
+        &self,
+        user_id: Uuid,
+        conversation_id: Uuid,
+    ) -> Result<Option<String>, ApiError> {
+        const MAX_FILE_BYTES: usize = 128 * 1024;
+        const MAX_TOTAL_CHARS: usize = 256 * 1024;
+
+        let records = self.store.list_files(conversation_id).await?;
+        let mut out = String::new();
+        let mut included = 0usize;
+        for record in records {
+            if record.user_id != user_id {
+                continue;
+            }
+            let bytes = match self.files.get(&record.storage_path).await {
+                Ok(bytes) => bytes,
+                Err(err) => {
+                    tracing::warn!(error = %err, file = %record.id, "failed to load attachment");
+                    continue;
+                }
+            };
+            let Some(text) = crate::text::decode_text(&bytes) else {
+                continue; // only text-like files are inlined
+            };
+
+            if included == 0 {
+                out.push_str(
+                    "The user has attached the following documents to this conversation. \
+                     Use them to answer and say when the answer is not present.\n",
+                );
+            }
+
+            let mut end = text.len().min(MAX_FILE_BYTES);
+            while end > 0 && !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            let truncated = text.len() > end;
+            out.push_str(&format!(
+                "\n--- File: {}{} ---\n",
+                record.filename,
+                if truncated { " (truncated)" } else { "" }
+            ));
+            out.push_str(&text[..end]);
+            out.push('\n');
+            included += 1;
+
+            if out.len() >= MAX_TOTAL_CHARS {
+                out.push_str("\n[additional attachments omitted]\n");
+                break;
+            }
+        }
+        Ok((included > 0).then_some(out))
     }
 
     /// Persist sandbox output files into the user's library and attach them to
@@ -125,14 +175,11 @@ impl FileWorkspace {
         Ok(saved)
     }
 
-    /// Remove a library file's blob and embeddings. Used when deleting a file;
-    /// the row itself is removed by the caller through the store.
+    /// Remove a library file's blob. Used when deleting a file; the row itself
+    /// is removed by the caller through the store.
     pub async fn delete_blob(&self, file: &FileRecord) {
         if let Err(err) = self.files.delete(&file.storage_path).await {
             tracing::warn!(error = %err, file = %file.id, "failed to delete stored blob");
-        }
-        if let Err(err) = self.vectors.delete_for_file(file.id).await {
-            tracing::warn!(error = %err, file = %file.id, "failed to delete embeddings");
         }
     }
 }

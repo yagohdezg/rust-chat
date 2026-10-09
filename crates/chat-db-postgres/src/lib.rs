@@ -1,9 +1,7 @@
-//! Postgres implementation of the `chat-store` traits, plus `pgvector` search.
+//! Postgres implementation of the `chat-store` traits.
 //!
 //! All SQL for this backend lives here. Swapping to another engine means
 //! writing a sibling crate, not touching the application.
-
-mod vector;
 
 use std::sync::Arc;
 
@@ -17,8 +15,6 @@ use sqlx::postgres::PgPoolOptions;
 use sqlx::types::Json;
 use sqlx::PgPool;
 use uuid::Uuid;
-
-pub use vector::PgVectorStore;
 
 /// Relational store backed by Postgres.
 #[derive(Clone)]
@@ -43,7 +39,7 @@ impl PostgresStore {
         Ok(Self { pool, secrets })
     }
 
-    /// Handle to the pool, for sharing with the vector store.
+    /// Handle to the underlying pool.
     pub fn pool(&self) -> PgPool {
         self.pool.clone()
     }

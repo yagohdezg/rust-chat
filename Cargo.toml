@@ -7,7 +7,6 @@ members = [
   "crates/chat-db-sqlite",
   "crates/chat-files-s3",
   "crates/chat-providers",
-  "crates/chat-rag",
   "crates/chat-mcp",
   "crates/chat-agents",
   "crates/chat-sandbox",
@@ -68,7 +67,6 @@ chat-db-postgres = { path = "crates/chat-db-postgres" }
 chat-db-sqlite = { path = "crates/chat-db-sqlite" }
 chat-files-s3 = { path = "crates/chat-files-s3" }
 chat-providers = { path = "crates/chat-providers" }
-chat-rag = { path = "crates/chat-rag" }
 chat-mcp = { path = "crates/chat-mcp" }
 chat-agents = { path = "crates/chat-agents" }
 chat-sandbox = { path = "crates/chat-sandbox" }

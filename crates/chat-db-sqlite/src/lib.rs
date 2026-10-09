@@ -1,9 +1,7 @@
-//! SQLite implementation of the `chat-store` traits, plus brute-force vector search.
+//! SQLite implementation of the `chat-store` traits.
 //!
 //! Useful for local development, tests, and single-file deployments. UUIDs are
 //! BLOBs, timestamps are RFC3339 TEXT, JSON is TEXT.
-
-mod vector;
 
 use std::str::FromStr;
 use std::sync::Arc;
@@ -18,8 +16,6 @@ use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::types::Json;
 use sqlx::SqlitePool;
 use uuid::Uuid;
-
-pub use vector::SqliteVectorStore;
 
 /// Relational store backed by SQLite.
 #[derive(Clone)]
@@ -49,7 +45,7 @@ impl SqliteStore {
         Ok(Self { pool, secrets })
     }
 
-    /// Handle to the pool, for sharing with the vector store.
+    /// Handle to the underlying pool.
     pub fn pool(&self) -> SqlitePool {
         self.pool.clone()
     }

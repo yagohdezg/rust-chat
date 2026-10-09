@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { onMount, tick } from 'svelte';
 	import { goto } from '$app/navigation';
-	import type { Provider } from '#lib/api';
+	import type { FileRecord, Provider } from '#lib/api';
 	import { auth } from '#lib/auth.svelte';
 	import { chat } from '#lib/chat.svelte';
 	import BudgetCircle from '#lib/BudgetCircle.svelte';
@@ -75,6 +75,60 @@
 	let savingProvider = $state(false);
 
 	const isAdmin = $derived(auth.session?.user.role === 'admin');
+
+	// ---- file library / attach picker (composer) ---------------------------
+	let showFiles = $state(false);
+	let fileMenuEl: HTMLDivElement | undefined;
+	let fileQuery = $state('');
+
+	let filteredLibrary = $derived(
+		fileQuery.trim()
+			? chat.library.filter((f) =>
+					f.filename.toLowerCase().includes(fileQuery.trim().toLowerCase())
+				)
+			: chat.library
+	);
+	let attachedFileIds = $derived(chat.attachedFileIds);
+
+	// Dismiss the file picker on an outside click or Escape.
+	$effect(() => {
+		if (!showFiles) return;
+		const onPointerDown = (event: MouseEvent) => {
+			if (fileMenuEl && !fileMenuEl.contains(event.target as Node)) showFiles = false;
+		};
+		const onKeydown = (event: KeyboardEvent) => {
+			if (event.key === 'Escape') showFiles = false;
+		};
+		window.addEventListener('mousedown', onPointerDown);
+		window.addEventListener('keydown', onKeydown);
+		return () => {
+			window.removeEventListener('mousedown', onPointerDown);
+			window.removeEventListener('keydown', onKeydown);
+		};
+	});
+
+	function toggleFilePanel() {
+		showFiles = !showFiles;
+		if (showFiles && !chat.libraryLoaded) void chat.loadLibrary();
+	}
+
+	function toggleAttach(file: FileRecord) {
+		if (attachedFileIds.has(file.id)) void chat.detachFile(file.id);
+		else void chat.attachFile(file.id);
+	}
+
+	function confirmRemoveFile(file: FileRecord) {
+		if (confirm(`Delete "${file.filename}" from your library? This cannot be undone.`)) {
+			void chat.removeLibraryFile(file.id);
+		}
+	}
+
+	/** Compact human-readable byte size for the library rows. */
+	function formatSize(bytes: number): string {
+		if (bytes < 1024) return `${bytes} B`;
+		if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+		return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+	}
 
 	async function addProvider(event: SubmitEvent) {
 		event.preventDefault();
@@ -161,9 +215,6 @@
 		{#if chat.selectedAgent}
 			<span class="agent-tag" title="Agent">{chat.selectedAgent.name}</span>
 		{/if}
-		{#if chat.sourcesCount > 0}
-			<span class="sources">{chat.sourcesCount} source{chat.sourcesCount === 1 ? '' : 's'}</span>
-		{/if}
 		{#if chat.selected}
 			<button class="icon-btn danger" onclick={deleteCurrent} title="Delete chat" aria-label="Delete chat">
 				<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -227,6 +278,23 @@
 	{/if}
 
 	<div class="composer">
+		{#if chat.files.length > 0}
+			<div class="attachments">
+				{#each chat.files as file (file.id)}
+					<span class="attachment-chip" title={file.filename}>
+						<span class="attachment-name">{file.filename}</span>
+						<button
+							class="chip-x"
+							onclick={() => chat.detachFile(file.id)}
+							title="Detach from this chat"
+							aria-label="Detach {file.filename}"
+						>
+							×
+						</button>
+					</span>
+				{/each}
+			</div>
+		{/if}
 		<textarea
 			bind:value={input}
 			onkeydown={onKeydown}
@@ -236,18 +304,96 @@
 		<div class="controls">
 			<div class="controls-left">
 				<input bind:this={fileInput} type="file" hidden onchange={onFile} />
-				<button
-					type="button"
-					class="icon-ghost"
-					onclick={() => fileInput?.click()}
-					disabled={uploading || !chat.selectedId}
-					title={uploading ? 'Uploading…' : 'Attach a file'}
-					aria-label="Attach a file"
-				>
-					<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-						<path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
-					</svg>
-				</button>
+				<div class="file-menu" bind:this={fileMenuEl}>
+					<button
+						type="button"
+						class="icon-ghost"
+						class:open={showFiles}
+						onclick={toggleFilePanel}
+						disabled={uploading}
+						title={uploading ? 'Uploading…' : 'Files & attachments'}
+						aria-label="Files and attachments"
+					>
+						<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+							<path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+						</svg>
+						{#if chat.files.length > 0}
+							<span class="badge">{chat.files.length}</span>
+						{/if}
+					</button>
+
+					{#if showFiles}
+						<div class="file-panel">
+							<div class="panel-head">
+								<span>File library</span>
+								<button class="panel-x" onclick={() => (showFiles = false)} aria-label="Close">×</button>
+							</div>
+							<button
+								type="button"
+								class="upload-btn"
+								onclick={() => fileInput?.click()}
+								disabled={uploading}
+							>
+								{uploading ? 'Uploading…' : '+ Upload new file'}
+							</button>
+							<input class="file-search" bind:value={fileQuery} placeholder="Search library…" />
+							{#if chat.libraryLoading && !chat.libraryLoaded}
+								<p class="panel-empty">Loading…</p>
+							{:else if filteredLibrary.length === 0}
+								<p class="panel-empty">
+									{chat.libraryLoaded
+										? fileQuery
+											? 'No matching files.'
+											: 'Your library is empty. Upload a file to get started.'
+										: 'No files yet.'}
+								</p>
+							{:else}
+								<ul class="file-library">
+									{#each filteredLibrary as file (file.id)}
+										<li class="file-row" class:attached={attachedFileIds.has(file.id)}>
+											<button
+												class="file-toggle"
+												onclick={() => toggleAttach(file)}
+												title={attachedFileIds.has(file.id)
+													? 'Detach from this chat'
+													: 'Attach to this chat'}
+											>
+												<span class="file-check" aria-hidden="true">
+													{attachedFileIds.has(file.id) ? '✓' : '+'}
+												</span>
+												<span class="file-name">{file.filename}</span>
+												<span class="file-size">{formatSize(file.size_bytes)}</span>
+											</button>
+											<button
+												class="panel-icon"
+												onclick={() => chat.downloadFile(file)}
+												title="Download"
+												aria-label="Download {file.filename}"
+											>
+												<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+													<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+													<polyline points="7 10 12 15 17 10" />
+													<line x1="12" y1="15" x2="12" y2="3" />
+												</svg>
+											</button>
+											<button
+												class="panel-icon danger"
+												onclick={() => confirmRemoveFile(file)}
+												title="Delete file"
+												aria-label="Delete {file.filename}"
+											>
+												<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+													<polyline points="3 6 5 6 21 6" />
+													<path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+												</svg>
+											</button>
+										</li>
+									{/each}
+								</ul>
+							{/if}
+						</div>
+					{/if}
+				</div>
 			</div>
 
 			<div class="controls-right">
@@ -449,11 +595,6 @@
 		text-overflow: ellipsis;
 		white-space: nowrap;
 	}
-	.sources {
-		margin-left: auto;
-		color: var(--text-muted);
-		font-size: 0.75rem;
-	}
 	.agent-tag {
 		flex: 0 0 auto;
 		padding: 0.15rem 0.55rem;
@@ -473,9 +614,6 @@
 		border-radius: var(--radius-sm);
 		background: transparent;
 		color: var(--text-muted);
-	}
-	.sources + .icon-btn {
-		margin-left: 0.25rem;
 	}
 	.icon-btn:hover {
 		background: var(--surface-hover);
@@ -609,6 +747,7 @@
 		width: 38px;
 		height: 38px;
 		flex: 0 0 auto;
+		position: relative;
 		border: 1px solid var(--border-strong);
 		border-radius: var(--radius-full);
 		background: transparent;
@@ -626,6 +765,170 @@
 	.icon-ghost svg {
 		width: 17px;
 		height: 17px;
+	}
+	.icon-ghost.open {
+		background: var(--surface-hover);
+		border-color: var(--primary);
+		color: var(--text);
+	}
+	.badge {
+		position: absolute;
+		top: -5px;
+		right: -5px;
+		min-width: 16px;
+		height: 16px;
+		padding: 0 4px;
+		border-radius: var(--radius-full);
+		background: var(--primary);
+		color: var(--on-primary);
+		font-size: 0.62rem;
+		font-weight: 700;
+		line-height: 16px;
+		text-align: center;
+	}
+	/* attached-file chips shown above the message box */
+	.attachments {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.4rem;
+	}
+	.attachment-chip {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.35rem;
+		max-width: 240px;
+		padding: 0.2rem 0.3rem 0.2rem 0.6rem;
+		border: 1px solid var(--border-strong);
+		border-radius: var(--radius-full);
+		background: var(--primary-soft);
+		font-size: 0.78rem;
+	}
+	.attachment-name {
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+	.chip-x {
+		display: grid;
+		place-items: center;
+		width: 18px;
+		height: 18px;
+		border: none;
+		border-radius: var(--radius-full);
+		background: transparent;
+		color: var(--text-muted);
+		font-size: 0.95rem;
+		line-height: 1;
+	}
+	.chip-x:hover {
+		background: var(--danger-bg);
+		color: var(--danger);
+	}
+	/* file library / attach picker, anchored to the composer's attach button */
+	.file-menu {
+		position: relative;
+	}
+	.file-panel {
+		position: absolute;
+		left: 0;
+		bottom: calc(100% + 0.6rem);
+		z-index: 20;
+		width: min(360px, 85vw);
+		max-height: 60vh;
+		display: flex;
+		flex-direction: column;
+		gap: 0.45rem;
+		padding: 0.7rem;
+		border: 1px solid var(--border-strong);
+		border-radius: var(--radius);
+		background: var(--bg-elevated);
+		box-shadow: var(--shadow);
+		animation: rise 160ms var(--ease) both;
+	}
+	.upload-btn {
+		width: 100%;
+		padding: 0.45rem;
+		border: none;
+		border-radius: var(--radius-sm);
+		background: var(--primary);
+		color: var(--on-primary);
+		font-weight: 600;
+	}
+	.upload-btn:disabled {
+		opacity: 0.45;
+		cursor: default;
+	}
+	.file-search {
+		width: 100%;
+		background: var(--bg);
+		border: 1px solid var(--border-strong);
+		border-radius: var(--radius-sm);
+		color: var(--text);
+		padding: 0.4rem 0.6rem;
+		font-size: 0.82rem;
+	}
+	.file-library {
+		list-style: none;
+		margin: 0;
+		padding: 0;
+		overflow-y: auto;
+		display: flex;
+		flex-direction: column;
+		gap: 0.15rem;
+	}
+	.file-row {
+		display: flex;
+		align-items: center;
+		gap: 0.1rem;
+		border-radius: var(--radius-sm);
+	}
+	.file-row.attached {
+		background: var(--primary-soft);
+	}
+	.file-toggle {
+		flex: 1;
+		min-width: 0;
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+		text-align: left;
+		border: none;
+		background: transparent;
+		color: var(--text-muted);
+		padding: 0.4rem 0.45rem;
+		overflow: hidden;
+	}
+	.file-row.attached .file-toggle,
+	.file-toggle:hover {
+		color: var(--text);
+	}
+	.file-check {
+		flex: 0 0 auto;
+		display: grid;
+		place-items: center;
+		width: 18px;
+		height: 18px;
+		border: 1px solid var(--border-strong);
+		border-radius: var(--radius-sm);
+		font-size: 0.7rem;
+		line-height: 1;
+	}
+	.file-row.attached .file-check {
+		background: var(--primary);
+		border-color: var(--primary);
+		color: var(--on-primary);
+	}
+	.file-name {
+		flex: 1;
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+	.file-size {
+		flex: 0 0 auto;
+		color: var(--text-faint);
+		font-size: 0.72rem;
 	}
 	.pinned {
 		align-self: center;
@@ -848,6 +1151,13 @@
 	.tag.needs {
 		background: var(--danger-bg);
 		color: var(--danger);
+	}
+	.tag.embed {
+		background: var(--primary-soft);
+		color: var(--primary);
+	}
+	.panel-icon.on {
+		color: var(--primary);
 	}
 	.panel-icon {
 		display: grid;

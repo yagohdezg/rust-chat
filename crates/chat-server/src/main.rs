@@ -4,6 +4,7 @@ mod rate_limit;
 mod routes;
 mod state;
 mod stream;
+mod text;
 mod tools;
 mod workspace;
 
@@ -22,12 +23,11 @@ use tracing_subscriber::EnvFilter;
 use chat_agents::{CodeInterpreterTool, ToolRegistry};
 use chat_computers::{ComputerOrchestrator, HttpComputerNode, NodeRouter};
 use chat_core::{Config, DatabaseBackend, FileStorageKind, SecretCipher};
-use chat_db_postgres::{PgVectorStore, PostgresStore};
-use chat_db_sqlite::{SqliteStore, SqliteVectorStore};
+use chat_db_postgres::PostgresStore;
+use chat_db_sqlite::SqliteStore;
 use chat_files_s3::S3FileStore;
-use chat_rag::{OpenAiEmbedder, RagPipeline};
 use chat_sandbox::{HttpSandboxBackend, SandboxBackend};
-use chat_store::{FileStore, LocalFileStore, Store, VectorStore};
+use chat_store::{FileStore, LocalFileStore, Store};
 
 use crate::state::AppState;
 use crate::stream::StreamHub;
@@ -55,8 +55,8 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    // Composition root: pick the relational + vector backend from config.
-    let (store, vectors) = connect_store(&cfg, secrets, cfg.migrate_on_boot).await?;
+    // Composition root: pick the relational backend from config.
+    let store = connect_store(&cfg, secrets, cfg.migrate_on_boot).await?;
     if !cfg.migrate_on_boot {
         tracing::warn!("MIGRATE_ON_BOOT=false; expecting migrations to run out-of-band");
     }
@@ -75,31 +75,6 @@ async fn main() -> anyhow::Result<()> {
         )?),
     };
     tracing::info!(kind = ?cfg.file_storage_kind, "file storage ready");
-
-    // RAG is enabled only when an embedding key is available.
-    let rag = cfg
-        .openai_api_key
-        .as_ref()
-        .filter(|key| !key.trim().is_empty())
-        .map(|key| {
-            let embedder = Arc::new(OpenAiEmbedder::new(
-                &cfg.openai_base_url,
-                key,
-                &cfg.embedding_model,
-                1536,
-            ));
-            tracing::info!(model = %cfg.embedding_model, "RAG enabled");
-            RagPipeline::new(
-                vectors.clone(),
-                embedder,
-                cfg.rag_top_k,
-                cfg.rag_chunk_chars,
-                cfg.rag_chunk_overlap,
-            )
-        });
-    if rag.is_none() {
-        tracing::warn!("OPENAI_API_KEY not set; RAG/file indexing disabled");
-    }
 
     // Execution always goes through the standalone `sandboxd` service; the
     // sandbox spec (image, limits) lives there.
@@ -159,11 +134,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let bind_addr = cfg.bind_addr.clone();
-    let workspace = Arc::new(workspace::FileWorkspace::new(
-        files.clone(),
-        store.clone(),
-        vectors.clone(),
-    ));
+    let workspace = Arc::new(workspace::FileWorkspace::new(files.clone(), store.clone()));
     let state = Arc::new(AppState {
         cfg: Arc::new(cfg),
         store,
@@ -172,7 +143,6 @@ async fn main() -> anyhow::Result<()> {
         sandbox,
         computers,
         tools,
-        rag,
         hub: Arc::new(StreamHub::new()),
         rate_limit: Arc::new(rate_limit::RateLimiter::new()),
     });
@@ -315,13 +285,13 @@ fn build_cors(cfg: &Config) -> CorsLayer {
     }
 }
 
-/// Connect to the configured relational + vector backend, optionally applying
+/// Connect to the configured relational backend, optionally applying
 /// migrations. Shared by the server boot path and the `migrate` subcommand.
 async fn connect_store(
     cfg: &Config,
     secrets: Arc<SecretCipher>,
     migrate: bool,
-) -> anyhow::Result<(Arc<dyn Store>, Arc<dyn VectorStore>)> {
+) -> anyhow::Result<Arc<dyn Store>> {
     match cfg.database_backend {
         DatabaseBackend::Postgres => {
             let db = PostgresStore::connect(&cfg.database_url, secrets).await?;
@@ -332,8 +302,7 @@ async fn connect_store(
                     tracing::info!(rows = rewritten, "encrypted provider API keys at rest");
                 }
             }
-            let vectors = Arc::new(PgVectorStore::new(db.pool()));
-            Ok((Arc::new(db), vectors))
+            Ok(Arc::new(db))
         }
         DatabaseBackend::Sqlite => {
             let db = SqliteStore::connect(&cfg.database_url, secrets).await?;
@@ -344,8 +313,7 @@ async fn connect_store(
                     tracing::info!(rows = rewritten, "encrypted provider API keys at rest");
                 }
             }
-            let vectors = Arc::new(SqliteVectorStore::new(db.pool()));
-            Ok((Arc::new(db), vectors))
+            Ok(Arc::new(db))
         }
     }
 }

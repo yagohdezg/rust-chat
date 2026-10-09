@@ -12,13 +12,14 @@ Legend: `[ ]` todo, `[~]` partially done, `[x]` done.
 ## 0. Current state (for reference)
 
 Working end-to-end: register/login (JWT + Argon2), conversations, message
-history, file upload + UTF-8 RAG indexing, OpenAI-compatible SSE chat,
+history, file upload + inline document injection, OpenAI-compatible SSE chat,
 BoxLite sandbox exec (via the standalone `sandboxd` service), Postgres +
-SQLite stores, `pgvector` and brute-force vector search, chunker. Providers
-are configured at runtime (first-run setup, admin global + per-user), agents
-can be created and attached to conversations, and `/api/chat` runs the
-agent/tool loop. A per-user **file library** with conversation attachments and
-sandbox file in/out is implemented (§4c).
+SQLite stores. Providers are configured at runtime (first-run setup, admin
+global + per-user), agents can be created and attached to conversations, and
+`/api/chat` runs the agent/tool loop. A per-user **file library** with
+conversation attachments and sandbox file in/out is implemented (§4c).
+Documents are **inlined** into the prompt; the RAG/embedding stack was removed
+(§7).
 
 Still scaffolded (not reachable from the server): the MCP client and the
 `mcp_servers` table.
@@ -286,9 +287,22 @@ list/attach/detach, and `GET /api/files` lists the library.
       the library and attached to the conversation; the tool reports the names.
       Persistent computers clear the directory after collection.
 - [x] P2 Output dedupe: identical (filename + bytes) outputs are not re-stored.
-- [ ] P2 Frontend: library browser + attach picker in the composer.
-- [ ] P2 RAG over attached-to-other-conversation files (embeddings are still
-      indexed under the upload's origin conversation).
+- [x] P2 Frontend: library browser + attach picker in the composer. The
+      composer's attach button opens a "File library" popover (`GET /api/files`
+      with search) where any library file can be attached/detached for the
+      active conversation (`POST`/`DELETE
+      /api/conversations/{id}/files[/{file_id}]`), downloaded (`GET
+      /api/files/{id}`, bearer-auth'd blob save) or deleted
+      (`DELETE /api/files/{id}`), plus an "Upload new file" action. Attached
+      files render as detachable chips above the textarea. The picker opens
+      even with no active conversation; uploading/attaching lazily creates one.
+      Upload progress is still a binary busy state.
+- [x] P1 Attached files reach the model. `FileWorkspace::attachment_context`
+      inlines the conversation's attached text-like files (UTF-8 / UTF-16,
+      128 KiB/file, 256 KiB total) as a system preamble on every turn.
+      Binary formats (PDF/DOCX/...) are skipped until §7.
+- [ ] P1 Transform files to text (PDF/DOCX/...) so more attachments inline
+      (see §7).
 - [ ] P3 Per-file size/type limits for outputs; antivirus/MIME sniffing (§8).
 
 ## 5. Scaling / deployment
@@ -334,11 +348,8 @@ list/attach/detach, and `GET /api/files` lists the library.
 
 - [ ] P1 Add a transaction around chat turn persistence (insert user message +
       read history + insert assistant message) so partial turns don't persist.
-- [x] P1 `delete_file` route + handler, with blob and embedding cleanup via
-      `VectorStore::delete_for_file` (`DELETE /api/files/{id}`). Conversation
-      delete still pending.
-- [~] P1 Vector cleanup on file delete done explicitly. Conversation-delete
-      cascade review still open.
+- [x] P1 `delete_file` route + handler, with blob cleanup
+      (`DELETE /api/files/{id}`). Conversation delete still pending.
 - [ ] P2 Conversation management endpoints: rename, delete, archive
       (`conversations` CRUD is create/list/read only).
 - [ ] P2 Message pagination (list is capped at 1000, `lib.rs:168`; no cursor).
@@ -346,33 +357,53 @@ list/attach/detach, and `GET /api/files` lists the library.
       message; add trigger or explicit update.
 - [ ] P2 UUIDv7 / monotonic ordering for messages (currently UUIDv4 +
       `created_at`; ordering ties are possible).
-- [ ] P2 `sqlite-vec` extension to replace brute-force scan
-      (`chat-db-sqlite/src/vector.rs`) for larger corpora.
-- [ ] P3 Postgres vector index tuning: HNSW vs ivfflat, reindex/`ANALYZE`
-      strategy, tune `lists` (`migrations/postgres/0002_pgvector.sql:21`).
 - [ ] P3 Collapse the backends: the SQL lives in two sibling crates
       (`chat-db-postgres`, `chat-db-sqlite`) that each re-implement the same
-      `Store`/`VectorStore` surface. Prefer a single `chat-db` crate with
-      `postgres` / `sqlite` modules (feature-gated), so a new `Store` method is
-      one trait + two impls in one place rather than two crates.
+      `Store` surface. Prefer a single `chat-db` crate with `postgres` /
+      `sqlite` modules (feature-gated), so a new `Store` method is one trait +
+      two impls in one place rather than two crates.
 
-## 7. RAG
+## 7. Documents — inline only (no embeddings)
 
-- [ ] P1 Configurable embedding dimension. Dimension is hardcoded `1536` in
-      `main.rs:58` and in the `vector(1536)` column
-      (`migrations/postgres/0002_pgvector.sql:17`); changing
-      `EMBEDDING_MODEL` to a different-dim model silently breaks search.
-- [ ] P1 Binary document extraction: PDF, DOCX, HTML, Markdown currently
-      rejected by `extract_text` (`chat-rag/src/lib.rs:141`). Add a parser
-      layer and make extraction async/queued.
-- [ ] P2 Async indexing pipeline: indexing currently runs inline on the upload
-      request (`routes.rs:197-208`). Move to a job/queue for large files.
-- [ ] P2 Re-embedding / re-indexing on model change (version embeddings by
-      model).
-- [ ] P2 Cross-conversation / global scope retrieval (scope is per-user +
-      optional per-conversation).
-- [ ] P3 Reranking, hybrid (BM25 + vector) search, score thresholds.
-- [ ] P3 Chunk metadata (page/section) surfaced in `sources` SSE events.
+**Decision: attached documents are inlined into the prompt; embeddings/RAG were
+removed.** Rationale:
+
+- The models we target have large context windows, so a normal attached
+  document fits directly in the prompt. Inlining is exact (no retrieval misses,
+  no chunk-boundary loss), needs no embedder, and answers instantly.
+- Retrieval only pays off when the corpus is much larger than the context
+  window, when the same files are queried many times, or for cross-document /
+  cross-conversation search — none of which is the default product shape here.
+- RAG added a heavy synchronous cost on upload (minutes of CPU embedding per
+  large file) plus the whole tuning surface of a retrieval stack (extraction
+  engine, splitter, chunk size/overlap, top-k, reranking, reindex). Open WebUI's
+  document settings are a good catalog of that surface; "Bypass Embedding and
+  Retrieval" / "Full Context Mode" are the escape hatch we are taking by
+  default.
+
+Inline behavior: `FileWorkspace::attachment_context` (`chat-server/src/workspace.rs`)
+reads the conversation's attached text-like files and prepends them as a system
+preamble on every turn, bounded at 128 KiB/file and 256 KiB total. Text decoding
+(`chat-server/src/text.rs`) handles UTF-8 and UTF-16 (LE/BE); anything else is
+skipped.
+
+- [x] P1 Remove the RAG/embedding implementation: the `chat-rag` crate, the
+      `VectorStore` / `Embedder` traits and types, `PgVectorStore` /
+      `SqliteVectorStore`, the `embeddings` table, the per-provider
+      `embedding_model`, `user_rag` / the RAG prompt path, the `sources` SSE
+      event, and the `EMBEDDING_*` / `RAG_*` config. See migrations
+      `**/drop_embeddings`.
+- [x] P1 Inline attached text files into the prompt (UTF-8 / UTF-16).
+- [ ] P1 **Transform files to text**: extract text from binary/common document
+      formats so they can be inlined — PDF, DOCX, XLSX/CSV, PPTX, HTML,
+      Markdown, and OCR for image-only pages. Gate on a size cap and parse
+      asynchronously so a large file cannot block the request.
+- [ ] P2 Revisit only if a real "search across many documents" need appears:
+      then prefer a light embedding model (e.g. `multi-MiniLM`, 384-dim) with
+      fully async background indexing behind a `ragd`-style service boundary
+      (the `sandboxd` pattern). Not now.
+- [ ] P2 Multimodal input (send images/pages to a vision-capable model) as an
+      alternative to OCR for image-heavy documents.
 
 ## 8. Auth & security
 
@@ -440,6 +471,15 @@ list/attach/detach, and `GET /api/files` lists the library.
       global-provider add/delete/key-rotation and bulk import, plus the audit
       log (`GET /api/admin/audit`).
 - [ ] P2 Surface agent/tool-call events and `sources` citations in the UI.
+- [ ] P2 Streaming "thinking" / reasoning tokens. Parse the provider's reasoning
+      deltas — DeepSeek/LiteLLM `reasoning_content`, OpenRouter `reasoning`, etc.
+      — which `chat-providers/src/openai.rs:145` currently drops (only
+      `delta.content` is read). Add a `reasoning` field to `ChatChunk`, forward
+      it through the agent runtime as a new `thinking` SSE event alongside
+      `delta`, persist it on the assistant message, and render a collapsible
+      "thinking" block in the bubble. Only reasoning models expose this; plain
+      models emit nothing. (The existing `ThinkingOrb` is just a pre-first-token
+      waiting animation, not real reasoning output.)
 - [x] P1 First-run provider setup (`/setup`) and provider list in the sidebar;
       redirect from `/chat` when no provider is configured.
 - [x] P1 Agent picker + management: a sidebar "Agents" section (create/list/
@@ -461,14 +501,13 @@ list/attach/detach, and `GET /api/files` lists the library.
       wrapped in `web/src/lib/ThinkingOrb.svelte`) shown with a "Thinking…"
       label in the assistant bubble while a reply is pending (before the first
       token).
-- [ ] P2 File management UI. The backend now exposes a personal file library
-      and cross-conversation attachments (§4c), but the web app has no library
-      browser or "attach an existing library file" picker: the composer's
-      upload button only uploads into the active conversation (`POST /api/files`
-      with `conversation_id`) and the attached-file list is read-only. Still
-      missing: list/download/delete from `GET /api/files`, attach via
-      `POST /api/conversations/{id}/files`, detach via
-      `DELETE /api/conversations/{id}/files/{file_id}`, and upload progress.
+- [~] P2 File management UI. The composer's attach button now opens a file
+      library popover that lists/search/downloads/deletes from `GET /api/files`
+      and attaches/detaches (`POST`/`DELETE /api/conversations/{id}/files`) any
+      library file to the active conversation, with an upload action and
+      detachable attachment chips above the textarea. Still missing:
+      per-upload progress (the button shows one busy state for the whole
+      upload).
 - [~] P2 Conversation management UI: delete exists; rename/archive and a proper
       agent-rebind control are still pending (the PATCH endpoint is in place).
 - [x] P2 Per-conversation three-dot menu: an overflow (⋮) opener beside each

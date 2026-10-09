@@ -3,9 +3,6 @@ use std::env;
 use serde::{Deserialize, Serialize};
 
 /// Which relational backend to persist to.
-///
-/// The vector store is chosen to match (`pgvector` for Postgres, brute-force
-/// SQLite otherwise), so switching here switches both seams.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DatabaseBackend {
@@ -130,11 +127,6 @@ pub struct Config {
     /// explicitly in production so rotating `JWT_SECRET` does not strand data.
     pub secret_encryption_key: Option<String>,
 
-    /// OpenAI-compatible endpoint used for RAG embeddings. Chat providers are
-    /// configured in the database, not from the environment.
-    pub openai_api_key: Option<String>,
-    pub openai_base_url: String,
-
     /// Whether the server applies migrations on boot. Set `false` in production
     /// and run migrations from a one-shot Job instead.
     pub migrate_on_boot: bool,
@@ -152,14 +144,6 @@ pub struct Config {
     pub s3_endpoint: Option<String>,
     /// Optional key prefix inside the bucket.
     pub s3_prefix: Option<String>,
-    /// OpenAI-compatible embedding model used for RAG.
-    pub embedding_model: String,
-    /// Number of chunks to retrieve per query.
-    pub rag_top_k: usize,
-    /// Approximate chunk size in characters.
-    pub rag_chunk_chars: usize,
-    /// Chunk overlap in characters.
-    pub rag_chunk_overlap: usize,
 
     /// Base URL of the standalone `sandboxd` execution service.
     pub sandboxd_url: String,
@@ -317,10 +301,6 @@ impl Config {
 
             secret_encryption_key: var("SECRET_ENCRYPTION_KEY"),
 
-            openai_api_key: var("OPENAI_API_KEY"),
-            openai_base_url: var("OPENAI_BASE_URL")
-                .unwrap_or_else(|| "https://api.openai.com/v1".into()),
-
             migrate_on_boot: var_bool("MIGRATE_ON_BOOT", true),
             file_storage_kind,
             file_storage_dir: var("FILE_STORAGE_DIR").unwrap_or_else(|| "./.data/files".into()),
@@ -328,15 +308,6 @@ impl Config {
             s3_region: var("S3_REGION").unwrap_or_else(|| "us-east-1".into()),
             s3_endpoint: var("S3_ENDPOINT"),
             s3_prefix: var("S3_PREFIX"),
-            embedding_model: var("EMBEDDING_MODEL")
-                .unwrap_or_else(|| "text-embedding-3-small".into()),
-            rag_top_k: var("RAG_TOP_K").and_then(|v| v.parse().ok()).unwrap_or(4),
-            rag_chunk_chars: var("RAG_CHUNK_CHARS")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(1200),
-            rag_chunk_overlap: var("RAG_CHUNK_OVERLAP")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(200),
 
             sandboxd_url,
             sandboxd_token: var("SANDBOXD_TOKEN"),

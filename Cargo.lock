@@ -475,22 +475,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "chat-rag"
-version = "0.0.1"
-dependencies = [
- "anyhow",
- "async-trait",
- "chat-core",
- "chat-store",
- "reqwest",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
- "uuid",
-]
-
-[[package]]
 name = "chat-sandbox"
 version = "0.0.1"
 dependencies = [
@@ -528,7 +512,6 @@ dependencies = [
  "chat-db-sqlite",
  "chat-files-s3",
  "chat-providers",
- "chat-rag",
  "chat-sandbox",
  "chat-store",
  "chrono",

@@ -3,7 +3,6 @@ use std::sync::Arc;
 use chat_agents::ToolRegistry;
 use chat_computers::ComputerOrchestrator;
 use chat_core::Config;
-use chat_rag::RagPipeline;
 use chat_sandbox::SandboxBackend;
 use chat_store::{FileStore, Store};
 
@@ -25,8 +24,6 @@ pub struct AppState {
     pub computers: Option<Arc<ComputerOrchestrator>>,
     /// Tools available to the agent runtime. Empty disables the agent path.
     pub tools: ToolRegistry,
-    /// RAG is optional; `None` when no embedding API key is configured.
-    pub rag: Option<RagPipeline>,
     /// Registry of in-flight assistant generations, for resumable SSE.
     pub hub: Arc<StreamHub>,
     /// Process-local per-IP rate limiter for the auth and chat routes.

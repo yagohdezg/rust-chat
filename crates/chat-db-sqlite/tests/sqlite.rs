@@ -1,8 +1,8 @@
 //! Smoke test proving the SQLite backend behind the `chat-store` traits:
-//! relational CRUD through `Store` and cosine search through `VectorStore`.
+//! relational CRUD through `Store`.
 
-use chat_db_sqlite::{SqliteStore, SqliteVectorStore};
-use chat_store::{EmbeddingChunk, ProviderModel, Scope, Store, VectorStore};
+use chat_db_sqlite::SqliteStore;
+use chat_store::{ProviderModel, Store};
 use uuid::Uuid;
 
 async fn temp_store() -> (SqliteStore, std::path::PathBuf) {
@@ -597,62 +597,6 @@ async fn refresh_tokens_rotate_and_audit_is_recorded() {
         login.metadata.as_ref().unwrap().0["email"],
         "rotate@example.com"
     );
-
-    drop(store);
-    let _ = std::fs::remove_file(path);
-}
-
-#[tokio::test]
-async fn vector_search_returns_nearest_chunk() {
-    let (store, path) = temp_store().await;
-
-    let user = store
-        .create_user("vector@example.com", None, "hash", "user")
-        .await
-        .unwrap();
-    let conversation = store
-        .create_conversation(user.id, None, "docs")
-        .await
-        .unwrap();
-
-    let vectors = SqliteVectorStore::new(store.pool());
-    let file_id = Uuid::new_v4();
-    vectors
-        .insert_chunks(&[
-            EmbeddingChunk {
-                user_id: user.id,
-                conversation_id: Some(conversation.id),
-                file_id: Some(file_id),
-                content: "cats are independent".into(),
-                embedding: vec![1.0, 0.0, 0.0],
-            },
-            EmbeddingChunk {
-                user_id: user.id,
-                conversation_id: Some(conversation.id),
-                file_id: Some(file_id),
-                content: "dogs are loyal".into(),
-                embedding: vec![0.0, 1.0, 0.0],
-            },
-        ])
-        .await
-        .unwrap();
-
-    let scope = Scope {
-        user_id: user.id,
-        conversation_id: Some(conversation.id),
-    };
-    let results = vectors.search(&scope, &[1.0, 0.0, 0.0], 1).await.unwrap();
-    assert_eq!(results.len(), 1);
-    assert_eq!(results[0].content, "cats are independent");
-    assert!(results[0].score > 0.99);
-
-    // Re-indexing the same file replaces its chunks.
-    vectors.delete_for_file(file_id).await.unwrap();
-    assert!(vectors
-        .search(&scope, &[1.0, 0.0, 0.0], 5)
-        .await
-        .unwrap()
-        .is_empty());
 
     drop(store);
     let _ = std::fs::remove_file(path);

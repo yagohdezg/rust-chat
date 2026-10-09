@@ -22,12 +22,11 @@ use chat_auth::{
 use chat_computers::ComputerOrchestrator;
 use chat_core::ChatError;
 use chat_providers::{ChatMessage, ChatRequest, LlmProvider, ModelInfo, OpenAiProvider};
-use chat_rag::RagPipeline;
 use chat_sandbox::{ExecRequest, ExecResult, SandboxFile};
 use chat_store::types::message_status;
 use chat_store::{
     AdminUserSummary, AuditEntry, AuditLog, Computer, Conversation, FileRecord, Message, Provider,
-    ProviderModel, Scope, Store,
+    ProviderModel, Store,
 };
 
 use crate::error::ApiError;
@@ -1111,7 +1110,7 @@ pub async fn delete_provider(
     Ok(StatusCode::NO_CONTENT)
 }
 
-// ---- files (upload + download + delete + RAG indexing) --------------------
+// ---- files (upload + download + delete) -----------------------------------
 
 #[derive(Deserialize)]
 pub struct UploadFileBody {
@@ -1169,29 +1168,7 @@ pub async fn upload_file(
             .await?;
     }
 
-    // Index into the vector store when RAG is enabled. Failures here do not
-    // fail the upload — the file is already stored.
-    let mut chunks_indexed = 0usize;
-    let mut indexing_error: Option<String> = None;
-    if let Some(rag) = &state.rag {
-        match rag
-            .index_file(user.id, body.conversation_id, record.id, &bytes)
-            .await
-        {
-            Ok(n) => chunks_indexed = n,
-            Err(err) => {
-                tracing::warn!(error = %err, file = %record.filename, "indexing failed");
-                indexing_error = Some(err.to_string());
-            }
-        }
-    }
-
-    Ok(Json(json!({
-        "file": record,
-        "rag_enabled": state.rag.is_some(),
-        "chunks_indexed": chunks_indexed,
-        "indexing_error": indexing_error,
-    })))
+    Ok(Json(json!({ "file": record })))
 }
 
 pub async fn list_files(
@@ -1304,7 +1281,7 @@ pub async fn delete_file(
         .await?
         .ok_or(ChatError::NotFound)?;
 
-    // Best-effort cleanup of the blob and its embeddings, then the row.
+    // Best-effort cleanup of the blob, then the row.
     state.workspace.delete_blob(&file).await;
     state.store.delete_file(file_id, user.id).await?;
     Ok(StatusCode::NO_CONTENT)
@@ -1350,29 +1327,6 @@ pub async fn chat(
         })
         .collect();
 
-    // Retrieval-augmented generation: prepend the most relevant chunks.
-    let mut sources: Vec<Value> = Vec::new();
-    if let Some(rag) = &state.rag {
-        let scope = Scope {
-            user_id: user.id,
-            conversation_id: Some(conversation.id),
-        };
-        match rag.retrieve(&scope, &body.content).await {
-            Ok(chunks) => {
-                if !chunks.is_empty() {
-                    messages.insert(0, ChatMessage::system(RagPipeline::format_context(&chunks)));
-                    sources = chunks
-                        .iter()
-                        .map(|c| json!({ "file_id": c.file_id, "score": c.score }))
-                        .collect();
-                }
-            }
-            Err(err) => {
-                tracing::warn!(error = %err, "RAG retrieval failed; continuing without context")
-            }
-        }
-    }
-
     let requested_model = body.model;
     let requested_provider = body.provider_id;
 
@@ -1395,6 +1349,38 @@ pub async fn chat(
     } else {
         None
     };
+
+    // Build the leading system preamble(s), in order: the bound agent's
+    // instructions, then the contents of the conversation's attached
+    // documents. Attached text-like files are inlined directly so the model
+    // reads them as part of the prompt. (The agent runtime only auto-injects
+    // its system prompt when the first message is not already a system message,
+    // so the agent instructions must lead.)
+    let mut preambles: Vec<String> = Vec::new();
+    if let Some(resolved) = &resolved {
+        if let Some(system) = resolved
+            .config
+            .system
+            .clone()
+            .filter(|s| !s.trim().is_empty())
+        {
+            preambles.push(system);
+        }
+    }
+
+    match state
+        .workspace
+        .attachment_context(user.id, conversation.id)
+        .await
+    {
+        Ok(Some(context)) => preambles.push(context),
+        Ok(None) => {}
+        Err(err) => tracing::warn!(error = %err, "failed to load attachment context"),
+    }
+
+    for preamble in preambles.into_iter().rev() {
+        messages.insert(0, ChatMessage::system(preamble));
+    }
 
     // Persist an assistant placeholder first so partial output survives a
     // client disconnect, then run generation in a detached task.
@@ -1446,13 +1432,9 @@ pub async fn chat(
         "resume_path": format!("/api/messages/{message_id}/stream"),
     })
     .to_string();
-    let sources_json = serde_json::to_string(&sources).unwrap_or_else(|_| "[]".into());
 
     let stream = async_stream::stream! {
         yield Ok(Event::default().event("meta").data(meta));
-        if !sources.is_empty() {
-            yield Ok(Event::default().event("sources").data(sources_json));
-        }
         let live = live_stream(rx, 0);
         futures::pin_mut!(live);
         while let Some(event) = live.next().await {
@@ -1629,7 +1611,7 @@ async fn resolve_agent(
 
     let mut system = None;
     let mut model = requested_model.map(str::to_string);
-    let mut tools = state.tools.clone();
+    let mut tools = ToolRegistry::new();
     let mut wants_code = false;
     if let Some(agent) = &agent {
         if let Some(agent_model) = agent.model.clone().filter(|m| !m.trim().is_empty()) {

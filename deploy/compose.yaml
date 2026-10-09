@@ -2,7 +2,7 @@
 #
 #   podman compose -f deploy/compose.yaml up --build -d      # or `docker compose`
 #
-# Services: postgres (pgvector) + chat-server (API, SSE, RAG) + web (SvelteKit).
+# Services: postgres (pgvector) + chat-server (API, SSE) + web (SvelteKit).
 #
 # Code execution runs through the standalone `sandboxd` service, which drives a
 # BoxLite server. Enable both with `--profile sandboxd`: that starts a `boxlite`
@@ -58,9 +58,6 @@ services:
       RATE_LIMIT_ENABLED: ${RATE_LIMIT_ENABLED:-true}
       RATE_LIMIT_AUTH_PER_MINUTE: ${RATE_LIMIT_AUTH_PER_MINUTE:-30}
       RATE_LIMIT_CHAT_PER_MINUTE: ${RATE_LIMIT_CHAT_PER_MINUTE:-60}
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
-      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-text-embedding-3-small}
       # File storage: `local` (default) or `s3` (requires the `s3` profile).
       FILE_STORAGE_KIND: ${FILE_STORAGE_KIND:-local}
       FILE_STORAGE_DIR: /data/files

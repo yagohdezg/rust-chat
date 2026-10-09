@@ -19,14 +19,18 @@ class ChatStore {
 	/** Agent bound to the *next* conversation; applied when a chat is created. */
 	pendingAgentId = $state<string | null>(null);
 	messages = $state<api.Message[]>([]);
+	/** Files attached to the selected conversation. */
 	files = $state<api.FileRecord[]>([]);
+	/** The caller's whole personal library (for the attach picker). */
+	library = $state<api.FileRecord[]>([]);
+	libraryLoaded = $state(false);
+	libraryLoading = $state(false);
 	loading = $state(false);
 	initialized = $state(false);
 	streaming = $state(false);
 	uploading = $state(false);
 	error = $state<string | null>(null);
 	notice = $state<string | null>(null);
-	sourcesCount = $state(0);
 	model = $state('');
 	/** Bumped whenever messages change, so views can react (e.g. auto-scroll). */
 	revision = $state(0);
@@ -88,6 +92,11 @@ class ChatStore {
 		return this.pendingAgentId
 			? (this.agents.find((a) => a.id === this.pendingAgentId) ?? null)
 			: null;
+	}
+
+	/** Ids of library files currently attached to the selected conversation. */
+	get attachedFileIds(): Set<string> {
+		return new Set(this.files.map((f) => f.id));
 	}
 
 	private touch() {
@@ -176,9 +185,10 @@ class ChatStore {
 		this.pendingAgentId = null;
 		this.messages = [];
 		this.files = [];
+		this.library = [];
+		this.libraryLoaded = false;
 		this.error = null;
 		this.notice = null;
-		this.sourcesCount = 0;
 		this.touch();
 	}
 
@@ -384,8 +394,20 @@ class ChatStore {
 		this.touch();
 	}
 
+	/** Return the active conversation id, creating one when none is selected. */
+	private async ensureConversation(): Promise<string | null> {
+		if (this.selectedId) return this.selectedId;
+		try {
+			return (await this.create()).id;
+		} catch (err) {
+			this.error = message(err);
+			return null;
+		}
+	}
+
 	async upload(file: File) {
-		if (!this.selectedId) return;
+		const conversationId = await this.ensureConversation();
+		if (!conversationId) return;
 		this.uploading = true;
 		this.error = null;
 		this.notice = null;
@@ -394,20 +416,80 @@ class ChatStore {
 				filename: file.name,
 				mime: file.type || undefined,
 				content_b64: await fileToBase64(file),
-				conversation_id: this.selectedId
+				conversation_id: conversationId
 			});
 			this.files = [...this.files, response.file];
-			if (response.indexing_error) {
-				this.notice = `Attached ${file.name}, but indexing failed: ${response.indexing_error}`;
-			} else if (response.rag_enabled) {
-				this.notice = `Attached ${file.name} — indexed ${response.chunks_indexed} chunk(s).`;
-			} else {
-				this.notice = `Attached ${file.name} (RAG disabled, not indexed).`;
-			}
+			if (this.libraryLoaded) this.library = [...this.library, response.file];
+			this.notice = `Attached ${file.name}.`;
 		} catch (err) {
 			this.error = message(err);
 		} finally {
 			this.uploading = false;
+		}
+	}
+
+	/** Fetch the personal file library (used by the attach picker). */
+	async loadLibrary() {
+		if (this.libraryLoading) return;
+		this.libraryLoading = true;
+		this.error = null;
+		try {
+			this.library = await api.listUserFiles();
+			this.libraryLoaded = true;
+		} catch (err) {
+			this.error = message(err);
+		} finally {
+			this.libraryLoading = false;
+		}
+	}
+
+	/** Attach an existing library file to the selected conversation. */
+	async attachFile(fileId: string) {
+		const conversationId = await this.ensureConversation();
+		if (!conversationId) return;
+		this.error = null;
+		try {
+			this.files = await api.attachConversationFiles(conversationId, [fileId]);
+			this.touch();
+		} catch (err) {
+			this.error = message(err);
+		}
+	}
+
+	/** Detach a file from the selected conversation (it stays in the library). */
+	async detachFile(fileId: string) {
+		if (!this.selectedId) return;
+		this.error = null;
+		try {
+			await api.detachConversationFile(this.selectedId, fileId);
+			this.files = this.files.filter((f) => f.id !== fileId);
+			this.touch();
+		} catch (err) {
+			this.error = message(err);
+		}
+	}
+
+	/** Delete a file from the library, detaching it from the current chat. */
+	async removeLibraryFile(fileId: string) {
+		this.error = null;
+		try {
+			await api.deleteFile(fileId);
+			this.library = this.library.filter((f) => f.id !== fileId);
+			this.files = this.files.filter((f) => f.id !== fileId);
+			this.notice = 'File deleted.';
+			this.touch();
+		} catch (err) {
+			this.error = message(err);
+		}
+	}
+
+	/** Save a library file to the user's machine. */
+	async downloadFile(file: api.FileRecord) {
+		this.error = null;
+		try {
+			await api.downloadFile(file);
+		} catch (err) {
+			this.error = message(err);
 		}
 	}
 
@@ -434,7 +516,6 @@ class ChatStore {
 		// Read the proxied element back so streaming mutations stay reactive.
 		const assistant = this.messages[this.messages.length - 1];
 		this.streaming = true;
-		this.sourcesCount = 0;
 		this.touch();
 
 		await api.streamChat(
@@ -445,9 +526,6 @@ class ChatStore {
 				provider_id: this.effectiveProviderId || undefined
 			},
 			{
-				onSources: (sources) => {
-					this.sourcesCount = sources.length;
-				},
 				onDelta: (delta) => {
 					assistant.content = (assistant.content ?? '') + delta;
 					this.touch();

@@ -100,9 +100,6 @@ export type UploadInput = {
 
 export type UploadResponse = {
 	file: FileRecord;
-	rag_enabled: boolean;
-	chunks_indexed: number;
-	indexing_error: string | null;
 };
 
 /** An account as returned by the admin user-management endpoints. */
@@ -414,10 +411,60 @@ export function listFiles(conversationId: string): Promise<FileRecord[]> {
 	return request<FileRecord[]>(`/api/conversations/${conversationId}/files`);
 }
 
-export type SourceRef = { file_id: string | null; score: number };
+/** The caller's personal file library (`GET /api/files`). */
+export function listUserFiles(): Promise<FileRecord[]> {
+	return request<FileRecord[]>('/api/files');
+}
+
+/** Attach existing library files to a conversation; returns the new list. */
+export function attachConversationFiles(
+	conversationId: string,
+	fileIds: string[]
+): Promise<FileRecord[]> {
+	return request<FileRecord[]>(`/api/conversations/${conversationId}/files`, {
+		method: 'POST',
+		body: JSON.stringify({ file_ids: fileIds })
+	});
+}
+
+/** Detach a file from a conversation, keeping it in the library. */
+export function detachConversationFile(conversationId: string, fileId: string): Promise<void> {
+	return request<void>(`/api/conversations/${conversationId}/files/${fileId}`, {
+		method: 'DELETE'
+	});
+}
+
+/** Remove a file from the library entirely. */
+export function deleteFile(fileId: string): Promise<void> {
+	return request<void>(`/api/files/${fileId}`, { method: 'DELETE' });
+}
+
+/**
+ * Download a library file to the user's machine. The endpoint is bearer-auth'd,
+ * so we fetch the blob and trigger a save instead of using a plain link.
+ */
+export async function downloadFile(file: FileRecord): Promise<void> {
+	const open = () => {
+		const headers = new Headers();
+		const token = auth.token;
+		if (token) headers.set('authorization', `Bearer ${token}`);
+		return fetch(`${API_BASE}/api/files/${file.id}`, { headers });
+	};
+	let res = await open();
+	if (res.status === 401 && auth.refreshToken && (await refreshOnce())) res = await open();
+	if (!res.ok) throw await toApiError(res);
+	const blob = await res.blob();
+	const url = URL.createObjectURL(blob);
+	const link = document.createElement('a');
+	link.href = url;
+	link.download = file.filename;
+	document.body.appendChild(link);
+	link.click();
+	link.remove();
+	URL.revokeObjectURL(url);
+}
 
 export type StreamHandlers = {
-	onSources?: (sources: SourceRef[]) => void;
 	onDelta?: (text: string) => void;
 	onError?: (error: unknown) => void;
 	onDone?: () => void;
@@ -493,13 +540,7 @@ export async function streamChat(
 
 				const event = parseFrame(frame);
 				if (!event) continue;
-				if (event.event === 'sources') {
-					try {
-						handlers.onSources?.(JSON.parse(event.data) as SourceRef[]);
-					} catch {
-						// ignore malformed sources payloads
-					}
-				} else if (event.event === 'delta') handlers.onDelta?.(event.data);
+				if (event.event === 'delta') handlers.onDelta?.(event.data);
 				else if (event.event === 'error') handlers.onError?.(new Error(event.data));
 				else if (event.event === 'done') {
 					handlers.onDone?.();

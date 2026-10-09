@@ -7,7 +7,7 @@ heavy Node stack.
 
 The memory win comes from the Rust runtime and from offloading sandboxes to
 isolated microVMs, **not** from the database. Postgres is kept for relational
-integrity, with `pgvector` for RAG.
+integrity.
 
 ## Architecture
 
@@ -20,8 +20,8 @@ integrity, with `pgvector` for RAG.
                        ┌──────────────┬───────────────────┼───────────────────┐
                        ▼              ▼                   ▼                   ▼
                   ┌──────────┐  ┌────────────┐     ┌────────────┐     ┌──────────────┐
-                  │ Postgres │  │ providers  │     │   agents   │     │   sandboxd   │
-                  │ pgvector │  │ OpenAI SSE │     │ tools/loop │     │   BoxLite    │
+                   │ Postgres │  │ providers  │     │   agents   │     │   sandboxd   │
+                   │          │  │ OpenAI SSE │     │ tools/loop │     │   BoxLite    │
                   └──────────┘  └────────────┘     └─────┬──────┘     └──────┬───────┘
                                                          │                   │
                                                    ┌─────▼──────┐   ┌────────▼────────┐
@@ -35,11 +35,10 @@ integrity, with `pgvector` for RAG.
 | Crate                    | Responsibility                                                |
 | ------------------------ | ------------------------------------------------------------- |
 | `crates/chat-core`       | Config, domain IDs, shared `ChatError`/`Result`.              |
-| `crates/chat-store`      | Storage-agnostic domain models + `Store`/`VectorStore`/`Embedder` traits. |
-| `crates/chat-db-postgres`| `Store` + `VectorStore` on Postgres / `pgvector`.             |
-| `crates/chat-db-sqlite`  | `Store` + `VectorStore` on SQLite (brute-force cosine).       |
+| `crates/chat-store`      | Storage-agnostic domain models + `Store` trait.               |
+| `crates/chat-db-postgres`| `Store` on Postgres.                                          |
+| `crates/chat-db-sqlite`  | `Store` on SQLite.                                            |
 | `crates/chat-providers`  | `LlmProvider` trait + OpenAI-compatible streaming SSE client. |
-| `crates/chat-rag`        | Chunking, OpenAI embedder, indexer and retriever.             |
 | `crates/chat-mcp`        | Minimal MCP client (stdio JSON-RPC): init/list/call tools.    |
 | `crates/chat-agents`     | `Tool`/`ToolRegistry`, agent tool-call loop, code tool.       |
 | `crates/chat-sandbox`    | `SandboxBackend` trait + BoxLite and `sandboxd` HTTP backends. |
@@ -93,16 +92,14 @@ unreachable the backend **fails closed** rather than silently degrading.
 Persistence sits behind the `chat-store` traits, so the database engine is a
 composition-root choice rather than an application dependency:
 
-- **`postgres` (default).** Relational data in Postgres; RAG vectors in
-  `pgvector` (`vector(1536)`, ivfflat index). Best integrity and scale.
-- **`sqlite`.** A single file, no server. Relational data uses BLOBs/TEXT and
-  vector search is a brute-force cosine scan over f32 blobs. Great for local
+- **`postgres` (default).** Relational data in Postgres. Best integrity and
+  scale.
+- **`sqlite`.** A single file, no server; BLOBs/TEXT. Great for local
   development, tests and single-file deployments.
 
 Select with `DB_BACKEND=postgres|sqlite` (plus `DATABASE_URL`). Adding another
-engine means writing one more impl of `Store`/`VectorStore`; application code
-does not change. The SQL, migrations and vector strategy are still per-backend —
-a clean seam, not a free lunch.
+engine means writing one more impl of `Store`; application code does not change.
+The SQL and migrations are still per-backend — a clean seam, not a free lunch.
 
 ## File (object) storage
 
@@ -147,19 +144,19 @@ addressing is used automatically. Credentials are read from the standard
 `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` variables (or an instance
 profile), so the same config works on EC2/EKS with an IAM role.
 
-## RAG over uploaded files
+## Attached documents (inline, no embeddings)
 
-When `OPENAI_API_KEY` is set, retrieval-augmented generation is enabled:
+Attached documents are **inlined into the prompt**, not embedded. On every
+`POST /api/chat` turn, `FileWorkspace::attachment_context` reads the
+conversation's attached text-like files and prepends them as a system preamble,
+bounded at 128 KiB/file and 256 KiB total. Text decoding handles UTF-8 and
+UTF-16 (LE/BE); other formats are skipped.
 
-1. `POST /api/files` stores the upload and, for UTF-8 text files, chunks it,
-   embeds every chunk and indexes it (scoped to user + conversation).
-2. On `POST /api/chat`, the user message is embedded, the top `RAG_TOP_K` chunks
-   are retrieved and prepended as a system message before streaming. A `sources`
-   SSE event reports the retrieved `file_id`/`score` pairs.
-
-Binary formats (PDF, DOCX, ...) are rejected for indexing until a parser is
-added; the upload is still stored. Retrieval failures are logged and the chat
-continues without context.
+There is no vector store, chunker or embedder: the RAG/embedding stack was
+removed because inlining is exact, needs no extra service, and answers
+instantly for the document sizes this product targets. Extracting text from
+binary formats (PDF, DOCX, OCR, ...) so they can be inlined is a planned
+follow-up (see `PLAN.md` §7).
 
 ## Requirements
 
@@ -203,7 +200,7 @@ curl -s localhost:3080/health
 [`deploy/docker/web.Dockerfile`](deploy/docker/web.Dockerfile).
 
 ```bash
-cp deploy/.env.example deploy/.env   # optional: set OPENAI_API_KEY, JWT_SECRET...
+cp deploy/.env.example deploy/.env   # required: JWT_SECRET, SANDBOXD_TOKEN, ...
 just stack-up                        # podman compose; or just compose="docker compose" stack-up
 #   API: http://localhost:3080
 #   Web: http://localhost:5173
@@ -221,8 +218,9 @@ unqualified-search registry. Override the compose provider with
 > `SANDBOXD_TOKEN` (mandatory) and, to use an external BoxLite instead, point
 > `BOXLITE_URL` at a reachable `boxlite serve`.
 >
-> **Chat needs a provider.** Set `OPENAI_API_KEY` in `deploy/.env` before
-> starting; without it, chat completions and RAG embeddings are disabled.
+> **Chat needs a provider.** Register the first account (it becomes admin) and
+> configure a provider on the `/setup` page, or create one per user at runtime.
+> Providers are BYOK; no provider key is required in the env.
 
 ### Quality gates
 
@@ -253,18 +251,12 @@ See [`.env.example`](.env.example).
 | `RATE_LIMIT_AUTH_PER_MINUTE` | `30`                                              | `/api/auth/*` requests per IP/min  |
 | `RATE_LIMIT_CHAT_PER_MINUTE` | `60`                                              | `/api/chat` requests per IP/min    |
 | `LOG_LEVEL`               | `info`                                               | `tracing` filter                   |
-| `OPENAI_API_KEY`          | —                                                    | Empty disables provider + RAG      |
-| `OPENAI_BASE_URL`         | `https://api.openai.com/v1`                          | Any OpenAI-compatible endpoint     |
 | `FILE_STORAGE_KIND`       | `local`                                              | `local` \| `s3`; use `s3` with >1 replica |
 | `FILE_STORAGE_DIR`        | `./.data/files`                                      | Where uploads are written (`local`) |
 | `S3_BUCKET`               | —                                                    | Required when `FILE_STORAGE_KIND=s3` |
 | `S3_REGION`               | `us-east-1`                                          | S3 region                          |
 | `S3_ENDPOINT`             | —                                                    | Custom endpoint (MinIO/R2)         |
 | `S3_PREFIX`               | —                                                    | Optional key prefix in the bucket  |
-| `EMBEDDING_MODEL`         | `text-embedding-3-small`                             | Model for RAG embeddings           |
-| `RAG_TOP_K`               | `4`                                                  | Chunks retrieved per query         |
-| `RAG_CHUNK_CHARS`         | `1200`                                               | Chunk size (characters)            |
-| `RAG_CHUNK_OVERLAP`       | `200`                                                | Chunk overlap (characters)         |
 | `SANDBOXD_URL`            | `http://localhost:3081`                              | Standalone `sandboxd` endpoint     |
 | `SANDBOXD_TOKEN`          | —                                                    | Shared bearer token sent to `sandboxd` |
 | `SANDBOX_TOOL_ENABLED`    | `false`                                              | Expose `execute_code` to the agent  |
@@ -311,7 +303,7 @@ See [`.env.example`](.env.example).
 | `GET`  | `/api/files`                        | JWT  | List the caller's personal file library |
 | `POST` | `/api/files`                        | JWT  | Upload a file (base64); attach with `conversation_id` |
 | `GET`  | `/api/files/{id}`                   | JWT  | Download a stored file               |
-| `DELETE` | `/api/files/{id}`                 | JWT  | Delete a library file, its blob and embeddings |
+| `DELETE` | `/api/files/{id}`                 | JWT  | Delete a library file and its blob   |
 | `POST` | `/api/chat`                         | JWT  | Stream a completion as SSE           |
 | `GET`  | `/api/messages/{id}/stream`         | JWT  | Resume a stream (send `Last-Event-ID`) |
 | `POST` | `/api/sandbox/run`                  | JWT  | Execute code in the sandbox (`conversation_id` injects its files) |
@@ -322,9 +314,9 @@ See [`.env.example`](.env.example).
 | `POST` | `/api/computers/exec`               | JWT  | Run code on the caller's computer (`conversation_id` injects its files) |
 
 `/api/chat` streams `text/event-stream` events: `meta` (the assistant
-`message_id` and a `resume_path`), optional `sources` (retrieved RAG chunks),
-`delta` (incremental text, with the byte offset as the SSE event `id`), `error`,
-and a terminal `done`.
+`message_id` and a `resume_path`), `delta` (incremental text, with the byte
+offset as the SSE event `id`), `error`, and a terminal `done`. Agent turns also
+emit `tool_call` and `tool_result` events.
 
 The assistant reply is streamed and checkpointed to the database as it is
 generated, and generation runs in a detached task, so a client disconnect does
@@ -345,8 +337,7 @@ for the missing key, and admins are never forced through provider setup.
 `POST /api/files` takes JSON: `{ filename, mime?, content_b64, conversation_id? }`.
 Uploads are written under `FILE_STORAGE_DIR` into the caller's personal
 library; when `conversation_id` is set the file is also attached to that
-conversation. When RAG is enabled the upload is indexed for retrieval. The
-response reports `chunks_indexed` and any `indexing_error`.
+conversation. The response returns the created `file` record.
 
 Authenticated routes expect `Authorization: Bearer <jwt>`. Registering and
 logging in return a short-lived access token plus a rotating `refresh_token`;
@@ -379,12 +370,11 @@ Migrations live per backend and are applied automatically on server start
 
 - [`migrations/postgres/`](migrations/postgres) — `0001_init.sql` creates the
   core tables (users, providers, agents, mcp_servers, conversations, messages,
-  files); `0002_pgvector.sql` adds an `embeddings` table **only if** the
-  `vector` extension is available, so the app still migrates on vanilla
-  Postgres.
+  files); a later migration drops the legacy `embeddings` table now that RAG is
+  gone.
 - [`migrations/sqlite/`](migrations/sqlite) — the equivalent SQLite schema
-  (UUIDs as BLOBs, timestamps as RFC3339 TEXT, plus a `chunks` table for the
-  brute-force vector store).
+  (UUIDs as BLOBs, timestamps as RFC3339 TEXT); a later migration drops the
+  legacy `chunks` table.
 
 ## Status
 

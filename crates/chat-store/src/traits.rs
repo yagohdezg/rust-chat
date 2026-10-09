@@ -6,8 +6,6 @@ use crate::models::{
     AdminUserSummary, Agent, AgentDraft, AuditEntry, AuditLog, Computer, Conversation, FileRecord,
     Message, Provider, ProviderModel, RefreshToken, User,
 };
-use crate::types::{EmbeddingChunk, RetrievedChunk, Scope};
-
 /// Relational persistence, independent of the database engine.
 ///
 /// Implementations own their own SQL and migrations; the rest of the app only
@@ -294,31 +292,4 @@ pub trait Store: Send + Sync {
 
     /// Mark a computer active now (refreshes the idle-reaper clock).
     async fn touch_computer(&self, id: Uuid) -> Result<()>;
-}
-
-/// Vector storage and similarity search, independent of the engine.
-///
-/// Postgres backs this with `pgvector`; SQLite uses a brute-force cosine scan
-/// (fine for the small corpora of a personal deployment).
-#[async_trait::async_trait]
-pub trait VectorStore: Send + Sync {
-    /// Delete every chunk previously indexed for a file (idempotent re-index).
-    async fn delete_for_file(&self, file_id: Uuid) -> Result<()>;
-
-    /// Persist a batch of embedded chunks.
-    async fn insert_chunks(&self, chunks: &[EmbeddingChunk]) -> Result<()>;
-
-    /// Return the `k` most similar chunks within `scope`.
-    async fn search(&self, scope: &Scope, query: &[f32], k: usize) -> Result<Vec<RetrievedChunk>>;
-}
-
-/// Turns text into embedding vectors. Backed by an OpenAI-compatible
-/// `/embeddings` endpoint, but swappable for a local model.
-#[async_trait::async_trait]
-pub trait Embedder: Send + Sync {
-    /// Dimensionality of the vectors this embedder produces.
-    fn dimensions(&self) -> usize;
-
-    /// Embed a batch of texts, preserving order.
-    async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>>;
 }
