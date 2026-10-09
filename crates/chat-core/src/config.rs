@@ -2,31 +2,6 @@ use std::env;
 
 use serde::{Deserialize, Serialize};
 
-/// Which sandbox backend to use for untrusted code execution.
-///
-/// `Podman` is the dev/fallback backend (shared-kernel, rootless containers).
-/// `Boxlite` is the production backend: one hardware-isolated microVM per run.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum SandboxBackendKind {
-    #[default]
-    Podman,
-    Boxlite,
-}
-
-impl std::str::FromStr for SandboxBackendKind {
-    type Err = ChatError;
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_ascii_lowercase().as_str() {
-            "podman" => Ok(Self::Podman),
-            "boxlite" => Ok(Self::Boxlite),
-            other => Err(ChatError::Config(format!(
-                "unknown SANDBOX_BACKEND `{other}` (expected `podman` or `boxlite`)"
-            ))),
-        }
-    }
-}
-
 /// Which relational backend to persist to.
 ///
 /// The vector store is chosen to match (`pgvector` for Postgres, brute-force
@@ -137,12 +112,10 @@ pub struct Config {
     /// Chunk overlap in characters.
     pub rag_chunk_overlap: usize,
 
-    pub sandbox_backend: SandboxBackendKind,
-    pub sandbox_image: String,
-    pub sandbox_timeout_seconds: u64,
-    pub sandbox_memory_mb: u64,
-    pub sandbox_cpus: f64,
-    pub boxlite_url: String,
+    /// Base URL of the standalone `sandboxd` execution service.
+    pub sandboxd_url: String,
+    /// Shared bearer token presented to `sandboxd` (`SANDBOXD_TOKEN`).
+    pub sandboxd_token: Option<String>,
 
     /// Expose the sandbox as the `execute_code` tool to the agent runtime.
     /// Off by default so a plain deployment never grants model-driven code
@@ -228,11 +201,6 @@ impl Config {
             .transpose()?
             .unwrap_or_default();
 
-        let sandbox_backend = var("SANDBOX_BACKEND")
-            .map(|v| v.parse())
-            .transpose()?
-            .unwrap_or_default();
-
         let file_storage_kind = var("FILE_STORAGE_KIND")
             .map(|v| v.parse())
             .transpose()?
@@ -304,18 +272,8 @@ impl Config {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(200),
 
-            sandbox_backend,
-            sandbox_image: var("SANDBOX_IMAGE").unwrap_or_else(|| "python:3.12-slim".into()),
-            sandbox_timeout_seconds: var("SANDBOX_TIMEOUT_SECONDS")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(30),
-            sandbox_memory_mb: var("SANDBOX_MEMORY_MB")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(512),
-            sandbox_cpus: var("SANDBOX_CPUS")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(1.0),
-            boxlite_url: var("BOXLITE_URL").unwrap_or_else(|| "http://localhost:8100".into()),
+            sandboxd_url: var("SANDBOXD_URL").unwrap_or_else(|| "http://localhost:3081".into()),
+            sandboxd_token: var("SANDBOXD_TOKEN"),
 
             sandbox_tool_enabled: var_bool("SANDBOX_TOOL_ENABLED", false),
             agent_max_iterations: var("AGENT_MAX_ITERATIONS")

@@ -13,13 +13,13 @@ Legend: `[ ]` todo, `[~]` partially done, `[x]` done.
 
 Working end-to-end: register/login (JWT + Argon2), conversations, message
 history, file upload + UTF-8 RAG indexing, OpenAI-compatible SSE chat,
-Podman sandbox exec (direct, in the API process), Postgres + SQLite stores,
-`pgvector` and brute-force vector search, chunker. Providers are configured at
-runtime (first-run setup, admin global + per-user), agents can be created and
-attached to conversations, and `/api/chat` runs the agent/tool loop.
+BoxLite sandbox exec (via the standalone `sandboxd` service), Postgres +
+SQLite stores, `pgvector` and brute-force vector search, chunker. Providers
+are configured at runtime (first-run setup, admin global + per-user), agents
+can be created and attached to conversations, and `/api/chat` runs the
+agent/tool loop.
 
-Still scaffolded (not reachable from the server): the MCP client, BoxLite
-backend, the standalone `sandboxd` (the API never calls it), and the
+Still scaffolded (not reachable from the server): the MCP client and the
 `mcp_servers` table.
 
 ---
@@ -121,20 +121,75 @@ not the environment; the runtime builds an `OpenAiProvider` per provider row.
 
 ### 4a. Missing backends and routing
 
-- [ ] P0 Wire `BoxliteBackend::run` (`chat-sandbox/src/boxlite.rs:39`) against
-      the BoxLite OpenAPI exec endpoints; it deliberately fails closed today.
-- [ ] P1 Add an `HttpSandboxBackend` so `chat-server` calls `sandboxd` over
-      HTTP instead of instantiating a backend in-process (`main.rs:78`). This
-      is the whole point of the separate service and is currently not done.
-- [ ] P1 Auth between `chat-server` and `sandboxd` (shared token / mTLS);
-      `/v1/exec` is currently unauthenticated.
+> **Agreed design (implemented).** BoxLite is the *only*
+> execution backend; there is no host-kernel (Podman) execution path.
+> `chat-server` talks to `sandboxd` over HTTP; `sandboxd` talks to a BoxLite
+> server. Decisions, in dependency order:
+>
+> 1. **Delete Podman.** Remove `chat-sandbox/src/podman.rs`, `PodmanBackend`,
+>    `scratch_dir()`, `SandboxBackendKind` (`chat-core/src/config.rs`), and
+>    `SANDBOX_BACKEND`. Sandbox is BoxLite-only.
+> 2. **Spec ownership.** Change
+>    `SandboxBackend::run(&self, spec, request)` -> `run(&self, request)`;
+>    each backend holds its `SandboxSpec` from construction. Drop the
+>    `sandbox_image/timeout/memory/cpus` + `boxlite_url` fields from the
+>    chat-server `Config`; sandboxd owns the spec (from its env). Update
+>    `chat-agents::CodeInterpreterTool::new(sandbox)` (no spec) and
+>    `routes::sandbox_run`.
+> 3. **Isolation reporting.** Add `IsolationLevel::Remote`; return it from
+>    `HttpSandboxBackend` (the real level is sandboxd's).
+> 4. **Routing.** `chat-server` always builds
+>    `HttpSandboxBackend::new(SANDBOXD_URL, SANDBOXD_TOKEN)`. `sandboxd`
+>    always builds `BoxliteBackend::new(BOXLITE_URL, BOXLITE_TOKEN?, spec)`.
+>    No in-process backend in `chat-server`.
+> 5. **BoxLite client.** Optional `BOXLITE_TOKEN`: when set, send
+>    `Authorization: Bearer` on every call and resolve + cache the optional
+>    `{prefix}` via `GET /v1/me` (`path_prefix`); no token => no prefix
+>    (single-tenant `boxlite serve`). Derive `ws://`/`wss://` from
+>    `BOXLITE_URL`.
+> 6. **Ephemeral lifecycle.** Per run: `POST /boxes` (`detach=false`,
+>    `auto_delete=0`), materialize `main.{ext}` + decoded `ExecRequest.files`
+>    via `PUT /files` (in-memory tar, box auto-starts on first exec), stream
+>    output over `GET .../executions/{id}/attach` (WebSocket: binary
+>    `[channel:u8][payload]`, `0x01` stdout / `0x02` stderr; JSON
+>    `{"type":"exit","exit_code":N}`), then `DELETE /boxes/{id}?force=true`
+>    in *all* paths (timeout/error included). Set the exec `timeout_seconds`
+>    *and* wrap the whole sequence in a local timeout; on expiry kill the
+>    exec + delete the box, `timed_out=true`. Cap captured stdout/stderr at
+>    1 MiB each (mark truncation).
+> 7. **WebSocket client.** Add `tokio-tungstenite` with a rustls feature
+>    (matches reqwest's rustls-tls); add `tar` for the upload archive.
+> 8. **sandboxd auth.** `SANDBOXD_TOKEN` is mandatory — sandboxd refuses to
+>    start without it; `/v1/exec` requires `Authorization: Bearer`
+>    (constant-time compare); `/health` stays open. `chat-server` sends it.
+> 9. **Tests.** axum mock for `HttpSandboxBackend`; a mock BoxLite HTTP+WS
+>    server for `BoxliteBackend` (assert create->exec->attach->delete,
+>    frame decoding, timeout, cleanup); sandboxd returns 401 without the
+>    token.
+> 10. **Docs.** Update README, `.env.example`, `deploy/compose.yaml`.
+> 11. **Deferred** (not this task): conversation-file -> box injection
+>     (needs a `ToolContext` in the agent loop), box -> store output,
+>     gVisor, §4b persistent computer.
+>
+> Defaults: `SANDBOXD_URL=http://localhost:3081`,
+> `BOXLITE_URL=http://localhost:8100`, `SANDBOX_IMAGE=python:3.12-slim`.
+
+- [x] P0 Wire `BoxliteBackend::run` against the BoxLite OpenAPI exec endpoints
+      per the design above (create → upload → exec → WebSocket attach → forced
+      delete, dual timeout, 1 MiB caps). Verified end-to-end against BoxLite
+      `serve` in a privileged container.
+- [x] P1 Add an `HttpSandboxBackend` so `chat-server` calls `sandboxd` over
+      HTTP instead of instantiating a backend in-process (`main.rs`).
+- [x] P1 Auth between `chat-server` and `sandboxd` (shared bearer token,
+      constant-time compare); `SANDBOXD_TOKEN` is mandatory and `/v1/exec` is
+      protected while `/health` stays open.
 - [ ] P2 gVisor backend (the `IsolationLevel::UserSpaceKernel` variant already
       exists at `chat-sandbox/src/lib.rs:28`) as a cheap, no-KVM middle tier.
 
 ### 4b. Per-user "computer" (factory.ai-style) — new subsystem
 
-Current model is ephemeral exec: `podman run --rm` per request. A persistent
-per-user computer is a different control plane.
+Current model is ephemeral exec: one BoxLite microVM per request, destroyed
+after. A persistent per-user computer is a different control plane.
 
 - [ ] P1 Decide persistent-across-sessions vs per-conversation ephemeral
       (drives everything below).
@@ -144,8 +199,8 @@ per-user computer is a different control plane.
       or Postgres. Used for routing and to survive restarts.
 - [ ] P1 Sandbox gateway: resolve `computer_id` to a node; avoid sticky LB.
 - [ ] P2 Persistent workspace storage (EBS/EFS/S3-backed overlay) and
-      snapshot-on-pause. Today `scratch_dir()` is pod-local `/tmp`
-      (`chat-sandbox/src/lib.rs:128`) and dies with the run.
+      snapshot-on-pause. Ephemeral runs currently upload inline and discard the
+      box, so a workspace needs BoxLite volumes or an external store.
 - [ ] P2 Warm VM pool to hide Firecracker cold start.
 - [ ] P2 Per-computer egress allow-list / proxy.
 - [ ] P3 File-transfer API into/out of a computer
@@ -283,8 +338,10 @@ per-user computer is a different control plane.
       a fake provider + in-memory store.
 - [ ] P1 SSE contract tests (event ordering, terminal `done`, error events).
 - [ ] P2 Postgres tests via testcontainers.
-- [ ] P2 Sandbox backend contract tests (shared suite across podman/boxlite/
-      gVisor/http).
+- [~] P2 Sandbox backend contract tests. `BoxliteBackend` (mock BoxLite
+      HTTP+WS) and `HttpSandboxBackend` (axum mock) have coverage for frame
+      decoding, timeout and cleanup; a shared suite across boxlite/gVisor/http
+      is still pending.
 - [ ] P2 Load/soak test for concurrent SSE streams (measures the memory claim
       in the README).
 - [ ] P3 Property tests for the chunker (`chat-rag/src/chunker.rs`).
@@ -335,10 +392,11 @@ per-user computer is a different control plane.
 
 ## 12. Documentation / housekeeping
 
-- [ ] P1 Update README to reflect that `chat-server` calls `sandboxd` over
-      HTTP once 4a lands (today it does not).
+- [x] P1 Update README to reflect that `chat-server` calls `sandboxd` over
+      HTTP.
 - [ ] P2 Document the target EKS topology and scaling model.
-- [ ] P2 `.env.example`: add any new config (sandboxd URL/token, S3, queue).
+- [x] P2 `.env.example`: add new sandbox config (`SANDBOXD_URL`,
+      `SANDBOXD_TOKEN`, `BOXLITE_URL`) and the `boxlite` compose profile.
 - [ ] P3 Remove or label dead code paths until they're wired.
 
 ---
@@ -349,8 +407,9 @@ per-user computer is a different control plane.
    (5a), resumable SSE (5b), file delete + vector cleanup (6).
 2. **M2 — Agents live:** wire `run_agent` into `/api/chat` with streaming and
    tool-call persistence (1), register `CodeInterpreterTool` (1).
-3. **M3 — Sandbox split:** `HttpSandboxBackend` + `sandboxd` auth (4a), wire
-   BoxLite (4a).
+3. **M3 — Sandbox split:** DONE. `HttpSandboxBackend` + `sandboxd` auth (4a),
+   BoxLite wired and verified in a privileged container with `/dev/kvm`.
+   BoxLite-only (Podman removed); see §4a.
 4. **M4 — Computer orchestration:** registry + orchestrator + gateway +
    persistent workspaces (4b).
 5. **M5 — EKS:** manifests, node groups, autoscaling (5c), observability (9).

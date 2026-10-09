@@ -22,7 +22,7 @@ use chat_auth::{
 use chat_core::ChatError;
 use chat_providers::{ChatMessage, ChatRequest, LlmProvider, ModelInfo, OpenAiProvider};
 use chat_rag::RagPipeline;
-use chat_sandbox::{ExecRequest, ExecResult, SandboxFile, SandboxSpec};
+use chat_sandbox::{ExecRequest, ExecResult, SandboxFile};
 use chat_store::types::message_status;
 use chat_store::{
     AdminUserSummary, AuditEntry, AuditLog, Conversation, FileRecord, Message, Provider,
@@ -1919,13 +1919,6 @@ pub async fn sandbox_run(
     Json(body): Json<SandboxBody>,
 ) -> Result<Json<ExecResult>, ApiError> {
     let language = body.language.clone();
-    let spec = SandboxSpec {
-        image: state.cfg.sandbox_image.clone(),
-        timeout_seconds: state.cfg.sandbox_timeout_seconds,
-        memory_mb: state.cfg.sandbox_memory_mb,
-        cpus: state.cfg.sandbox_cpus,
-        network: false,
-    };
     let request = ExecRequest {
         language: body.language,
         code: body.code,
@@ -1933,7 +1926,7 @@ pub async fn sandbox_run(
     };
     let result = state
         .sandbox
-        .run(&spec, &request)
+        .run(&request)
         .await
         .map_err(|e| ApiError(ChatError::Internal(anyhow::anyhow!(e))))?;
 

@@ -18,12 +18,12 @@ use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::EnvFilter;
 
 use chat_agents::{CodeInterpreterTool, ToolRegistry};
-use chat_core::{Config, DatabaseBackend, FileStorageKind, SandboxBackendKind, SecretCipher};
+use chat_core::{Config, DatabaseBackend, FileStorageKind, SecretCipher};
 use chat_db_postgres::{PgVectorStore, PostgresStore};
 use chat_db_sqlite::{SqliteStore, SqliteVectorStore};
 use chat_files_s3::S3FileStore;
 use chat_rag::{OpenAiEmbedder, RagPipeline};
-use chat_sandbox::{BoxliteBackend, PodmanBackend, SandboxBackend, SandboxSpec};
+use chat_sandbox::{HttpSandboxBackend, SandboxBackend};
 use chat_store::{FileStore, LocalFileStore, Store, VectorStore};
 
 use crate::state::AppState;
@@ -98,13 +98,16 @@ async fn main() -> anyhow::Result<()> {
         tracing::warn!("OPENAI_API_KEY not set; RAG/file indexing disabled");
     }
 
-    let sandbox: Arc<dyn SandboxBackend> = match cfg.sandbox_backend {
-        SandboxBackendKind::Podman => Arc::new(PodmanBackend::new()),
-        SandboxBackendKind::Boxlite => Arc::new(BoxliteBackend::new(&cfg.boxlite_url)),
-    };
+    // Execution always goes through the standalone `sandboxd` service; the
+    // sandbox spec (image, limits) lives there.
+    let sandbox: Arc<dyn SandboxBackend> = Arc::new(HttpSandboxBackend::new(
+        cfg.sandboxd_url.clone(),
+        cfg.sandboxd_token.clone(),
+    ));
     tracing::info!(
         backend = sandbox.name(),
         isolation = ?sandbox.isolation(),
+        url = %cfg.sandboxd_url,
         "sandbox backend ready"
     );
 
@@ -112,14 +115,7 @@ async fn main() -> anyhow::Result<()> {
     // is opt-in so a plain deployment never grants model-driven execution.
     let mut tools = ToolRegistry::new();
     if cfg.sandbox_tool_enabled {
-        let spec = SandboxSpec {
-            image: cfg.sandbox_image.clone(),
-            timeout_seconds: cfg.sandbox_timeout_seconds,
-            memory_mb: cfg.sandbox_memory_mb,
-            cpus: cfg.sandbox_cpus,
-            network: false,
-        };
-        tools.register(Arc::new(CodeInterpreterTool::new(sandbox.clone(), spec)));
+        tools.register(Arc::new(CodeInterpreterTool::new(sandbox.clone())));
         tracing::info!(tool = "execute_code", "sandbox tool registered");
     }
     if !tools.is_empty() {

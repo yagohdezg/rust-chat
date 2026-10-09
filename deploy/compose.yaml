@@ -4,10 +4,11 @@
 #
 # Services: postgres (pgvector) + chat-server (API, SSE, RAG) + web (SvelteKit).
 #
-# The sandbox (Podman microVM-less containers / BoxLite microVMs) is NOT part of
-# this stack: PodmanBackend bind-mounts a scratch dir into a container runtime on
-# the *host*, and BoxLiteBackend needs a hypervisor. Run those on the host, or
-# point SANDBOX_BACKEND=boxlite at a reachable `boxlite serve`. See README.
+# Code execution runs through the standalone `sandboxd` service, which drives a
+# BoxLite server. Enable both with `--profile sandboxd`: that starts a `boxlite`
+# container (privileged, with /dev/kvm passed through) plus `sandboxd`.
+# chat-server holds no in-process backend and fails closed if sandboxd is
+# unreachable. See README.
 #
 # Configuration is read from `deploy/.env` (see deploy/.env.example) or the
 # ambient environment; every value below has a sensible default.
@@ -70,9 +71,10 @@ services:
       # Credentials for the S3 backend (matched to MinIO below by default).
       AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-rustchat}
       AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-rustchat-secret}
-      # Sandbox is unavailable in-container; leave it be or point at BoxLite.
-      SANDBOX_BACKEND: ${SANDBOX_BACKEND:-podman}
-      BOXLITE_URL: ${BOXLITE_URL:-http://host.docker.internal:8100}
+      # Execution goes through sandboxd (profile `sandboxd`). The token must
+      # match sandboxd's SANDBOXD_TOKEN.
+      SANDBOXD_URL: ${SANDBOXD_URL:-http://sandboxd:3081}
+      SANDBOXD_TOKEN: ${SANDBOXD_TOKEN:-}
     ports:
       - "3080:3080"
     volumes:
@@ -95,9 +97,36 @@ services:
     ports:
       - "5173:3000"
 
-  # Optional standalone exec service. Enable with `--profile sandboxd`.
-  # Point it at an external BoxLite server; do not expect host-container
-  # bind mounts to work from inside a container.
+  # BoxLite REST server (`boxlite serve`), used by sandboxd. Enable with
+  # `--profile sandboxd`.
+  #
+  # BoxLite starts a microVM per box, so it needs the host's KVM device and
+  # runs privileged. Point BOXLITE_URL at an external `boxlite serve` instead
+  # if you do not want it in this stack.
+  boxlite:
+    profiles: ["sandboxd"]
+    build:
+      context: ..
+      dockerfile: deploy/docker/boxlite.Dockerfile
+    restart: unless-stopped
+    privileged: true
+    devices:
+      - /dev/kvm:/dev/kvm
+      - /dev/net/tun:/dev/net/tun
+    volumes:
+      # Cached OCI images, guest kernel and box state.
+      - boxlite_data:/root/.boxlite
+    ports:
+      - "8100:8100"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8100/v1/config >/dev/null || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  # Standalone BoxLite exec service. Enable with `--profile sandboxd`.
+  # Reaches `boxlite` by service name; set BOXLITE_URL to use an external
+  # BoxLite instead.
   sandboxd:
     profiles: ["sandboxd"]
     build:
@@ -105,11 +134,20 @@ services:
       dockerfile: deploy/docker/rust.Dockerfile
       args:
         SERVICE: sandboxd
+    depends_on:
+      boxlite:
+        condition: service_healthy
     environment:
       SANDBOXD_BIND_ADDR: 0.0.0.0:3081
-      SANDBOX_BACKEND: ${SANDBOX_BACKEND:-boxlite}
-      BOXLITE_URL: ${BOXLITE_URL:-http://host.docker.internal:8100}
+      # Mandatory: sandboxd refuses to start without it. Must match
+      # chat-server's SANDBOXD_TOKEN.
+      SANDBOXD_TOKEN: ${SANDBOXD_TOKEN:-}
+      BOXLITE_URL: ${BOXLITE_URL:-http://boxlite:8100}
+      BOXLITE_TOKEN: ${BOXLITE_TOKEN:-}
       SANDBOX_IMAGE: ${SANDBOX_IMAGE:-python:3.12-slim}
+      SANDBOX_TIMEOUT_SECONDS: ${SANDBOX_TIMEOUT_SECONDS:-30}
+      SANDBOX_MEMORY_MB: ${SANDBOX_MEMORY_MB:-512}
+      SANDBOX_CPUS: ${SANDBOX_CPUS:-1}
       RUST_LOG: ${RUST_LOG:-info}
     ports:
       - "3081:3081"
@@ -163,3 +201,4 @@ volumes:
   pgdata:
   file_data:
   minio_data:
+  boxlite_data:

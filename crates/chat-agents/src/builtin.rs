@@ -2,19 +2,18 @@ use std::sync::Arc;
 
 use serde_json::{json, Value};
 
-use chat_sandbox::{ExecRequest, SandboxBackend, SandboxSpec};
+use chat_sandbox::{ExecRequest, SandboxBackend};
 
 use crate::tool::Tool;
 
 /// A tool that runs model-generated code in the configured [`SandboxBackend`].
 pub struct CodeInterpreterTool {
     sandbox: Arc<dyn SandboxBackend>,
-    spec: SandboxSpec,
 }
 
 impl CodeInterpreterTool {
-    pub fn new(sandbox: Arc<dyn SandboxBackend>, spec: SandboxSpec) -> Self {
-        Self { sandbox, spec }
+    pub fn new(sandbox: Arc<dyn SandboxBackend>) -> Self {
+        Self { sandbox }
     }
 }
 
@@ -60,11 +59,15 @@ impl Tool for CodeInterpreterTool {
             code,
             files: Vec::new(),
         };
-        let result = self.sandbox.run(&self.spec, &request).await?;
+        let result = self.sandbox.run(&request).await?;
 
-        Ok(format!(
+        let mut output = format!(
             "exit_code={}\ntimed_out={}\nstdout:\n{}\nstderr:\n{}",
             result.exit_code, result.timed_out, result.stdout, result.stderr
-        ))
+        );
+        if result.truncated {
+            output.push_str("\n[output truncated at 1 MiB]");
+        }
+        Ok(output)
     }
 }

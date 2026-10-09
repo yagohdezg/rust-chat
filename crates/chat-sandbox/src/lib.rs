@@ -1,24 +1,18 @@
 //! Pluggable sandbox for executing untrusted, model-generated code.
 //!
-//! Two backends are provided:
-//!
-//! * [`PodmanBackend`] — rootless Podman containers (`crun`). Fast and low-memory,
-//!   but shares the host kernel with the workload. Suitable for local development
-//!   and as a fallback.
-//! * [`BoxliteBackend`] — one hardware-isolated microVM per run, via the BoxLite
-//!   REST server (`boxlite serve`). This is the production backend and offers the
-//!   strongest isolation (own kernel + seccomp + cgroups + egress allow-list).
-//!
-//! Callers depend only on [`SandboxBackend`], so switching backends is a config
-//! change (`SANDBOX_BACKEND=podman|boxlite`).
+//! BoxLite is the only execution backend: [`BoxliteBackend`] talks to a BoxLite
+//! server (`boxlite serve`) and runs each request in a hardware-isolated
+//! microVM. [`HttpSandboxBackend`] is a client for a remote `sandboxd` service,
+//! which in turn owns a [`BoxliteBackend`]. Callers depend only on
+//! [`SandboxBackend`].
 
 pub mod boxlite;
-pub mod podman;
+pub mod http;
 
 use serde::{Deserialize, Serialize};
 
 pub use boxlite::BoxliteBackend;
-pub use podman::PodmanBackend;
+pub use http::HttpSandboxBackend;
 
 /// Strength of the isolation boundary around a sandboxed run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -29,6 +23,9 @@ pub enum IsolationLevel {
     UserSpaceKernel,
     /// A dedicated kernel in a virtual machine (Firecracker/BoxLite).
     MicroVm,
+    /// Execution happens behind a remote service (e.g. `sandboxd`); the real
+    /// isolation level is decided by the remote backend.
+    Remote,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -76,6 +73,9 @@ pub struct ExecResult {
     pub stdout: String,
     pub stderr: String,
     pub timed_out: bool,
+    /// Set when captured stdout or stderr hit the size cap and was clipped.
+    #[serde(default)]
+    pub truncated: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -101,11 +101,10 @@ pub trait SandboxBackend: Send + Sync {
     fn isolation(&self) -> IsolationLevel;
 
     /// Run one request in a fresh sandbox and return its result.
-    async fn run(
-        &self,
-        spec: &SandboxSpec,
-        request: &ExecRequest,
-    ) -> Result<ExecResult, SandboxError>;
+    ///
+    /// The backend holds its own [`SandboxSpec`] (image, limits, timeout), so
+    /// callers only supply the request.
+    async fn run(&self, request: &ExecRequest) -> Result<ExecResult, SandboxError>;
 }
 
 /// Map a language identifier to (interpreter argv, source file extension).
@@ -124,8 +123,36 @@ pub(crate) fn language_command(language: &str) -> Option<(Vec<&'static str>, &'s
     })
 }
 
-/// Create a unique scratch directory for a sandbox run.
-pub(crate) fn scratch_dir() -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("rust-chat-sbx-{}", uuid::Uuid::new_v4()));
-    dir
+/// In-box directory the upload lands in and exec runs from.
+const WORK_DIR: &str = "/app";
+
+/// BoxLite's `boxlite serve` unpacks a `PUT /files` archive into a temp
+/// `extracted/` directory and then copies that directory *into* `path`, so
+/// entries land at `<path>/extracted/...` instead of `<path>/...`. Flatten it
+/// before running. This is a no-op once upstream copies the directory contents.
+fn flatten_upload() -> String {
+    format!(
+        "cp -a {WORK_DIR}/extracted/. {WORK_DIR}/ 2>/dev/null; \
+         rm -rf {WORK_DIR}/extracted 2>/dev/null; cd {WORK_DIR} 2>/dev/null"
+    )
+}
+
+/// Split a request into a BoxLite `command` + `args` pair and the source file
+/// extension, using `/app` as the in-box working directory.
+pub(crate) fn program(language: &str) -> Option<(String, Vec<String>, &'static str)> {
+    let lower = language.to_ascii_lowercase();
+    let (mut argv, ext) = language_command(&lower)?;
+    let inner = match lower.as_str() {
+        "rust" => format!("rustc main.{ext} -o /tmp/a && /tmp/a"),
+        "c" => format!("cc main.{ext} -o /tmp/a && /tmp/a"),
+        "cpp" | "c++" => format!("c++ main.{ext} -o /tmp/a && /tmp/a"),
+        "typescript" | "ts" => format!("npx --yes tsx main.{ext}"),
+        _ => {
+            let mut parts: Vec<String> = argv.drain(..).map(String::from).collect();
+            parts.push(format!("main.{ext}"));
+            parts.join(" ")
+        }
+    };
+    let script = format!("{}; {inner}", flatten_upload());
+    Some(("sh".into(), vec!["-c".into(), script], ext))
 }

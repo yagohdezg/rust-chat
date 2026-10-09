@@ -26,7 +26,7 @@
             # Frontend
             nodejs_22
             bun
-            # Sandbox backend (dev/fallback; production backend is BoxLite)
+            # Container runtime used by `podman compose` for the local stack
             podman
             # Misc
             just
