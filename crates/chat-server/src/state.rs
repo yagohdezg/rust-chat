@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use chat_agents::ToolRegistry;
+use chat_computers::ComputerOrchestrator;
 use chat_core::Config;
 use chat_rag::RagPipeline;
 use chat_sandbox::SandboxBackend;
@@ -19,6 +20,8 @@ pub struct AppState {
     /// Uploaded file blob storage (local or S3-compatible).
     pub files: Arc<dyn FileStore>,
     pub sandbox: Arc<dyn SandboxBackend>,
+    /// Per-user persistent "computer" control plane. `None` disables its routes.
+    pub computers: Option<Arc<ComputerOrchestrator>>,
     /// Tools available to the agent runtime. Empty disables the agent path.
     pub tools: ToolRegistry,
     /// RAG is optional; `None` when no embedding API key is configured.

@@ -75,6 +75,18 @@ services:
       # match sandboxd's SANDBOXD_TOKEN.
       SANDBOXD_URL: ${SANDBOXD_URL:-http://sandboxd:3081}
       SANDBOXD_TOKEN: ${SANDBOXD_TOKEN:-}
+      # Agent runtime: expose `execute_code` to the model (off by default).
+      # With COMPUTERS_ENABLED, it runs on the caller's per-user computer.
+      SANDBOX_TOOL_ENABLED: ${SANDBOX_TOOL_ENABLED:-false}
+      AGENT_MAX_ITERATIONS: ${AGENT_MAX_ITERATIONS:-6}
+      # Per-user persistent computers (§4b). Off by default; requires the
+      # `sandboxd` profile. SANDBOX_NODES defaults to a single node at
+      # SANDBOXD_URL when unset.
+      COMPUTERS_ENABLED: ${COMPUTERS_ENABLED:-false}
+      SANDBOX_NODES: ${SANDBOX_NODES:-}
+      COMPUTER_IDLE_TTL_SECONDS: ${COMPUTER_IDLE_TTL_SECONDS:-1800}
+      COMPUTER_REAP_INTERVAL_SECONDS: ${COMPUTER_REAP_INTERVAL_SECONDS:-60}
+      COMPUTER_WARM_POOL: ${COMPUTER_WARM_POOL:-0}
     ports:
       - "3080:3080"
     volumes:

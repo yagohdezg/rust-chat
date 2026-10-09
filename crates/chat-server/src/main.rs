@@ -4,6 +4,7 @@ mod rate_limit;
 mod routes;
 mod state;
 mod stream;
+mod tools;
 
 use std::sync::Arc;
 
@@ -18,6 +19,7 @@ use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::EnvFilter;
 
 use chat_agents::{CodeInterpreterTool, ToolRegistry};
+use chat_computers::{ComputerOrchestrator, HttpComputerNode, NodeRouter};
 use chat_core::{Config, DatabaseBackend, FileStorageKind, SecretCipher};
 use chat_db_postgres::{PgVectorStore, PostgresStore};
 use chat_db_sqlite::{SqliteStore, SqliteVectorStore};
@@ -111,6 +113,39 @@ async fn main() -> anyhow::Result<()> {
         "sandbox backend ready"
     );
 
+    // Per-user persistent "computer" control plane (§4b). Off by default; when
+    // enabled it places a long-lived box per user, routes executions to its
+    // node, and reaps idle computers in the background.
+    let computers = if cfg.computers_enabled {
+        let mut router = NodeRouter::new();
+        for node in &cfg.sandbox_nodes {
+            router = router.with_node(Arc::new(HttpComputerNode::new(
+                node.name.clone(),
+                node.url.clone(),
+                cfg.sandboxd_token.clone(),
+            )));
+        }
+        let orchestrator = Arc::new(ComputerOrchestrator::new(
+            store.clone(),
+            router,
+            std::time::Duration::from_secs(cfg.computer_idle_ttl_seconds.max(1)),
+            cfg.computer_warm_pool,
+        ));
+        spawn_computer_reaper(
+            orchestrator.clone(),
+            std::time::Duration::from_secs(cfg.computer_reap_interval_seconds.max(1)),
+        );
+        tracing::info!(
+            nodes = cfg.sandbox_nodes.len(),
+            idle_ttl_secs = cfg.computer_idle_ttl_seconds,
+            warm_pool = cfg.computer_warm_pool,
+            "computer control plane enabled"
+        );
+        Some(orchestrator)
+    } else {
+        None
+    };
+
     // Tool registry for the agent runtime. The sandbox-backed code interpreter
     // is opt-in so a plain deployment never grants model-driven execution.
     let mut tools = ToolRegistry::new();
@@ -129,6 +164,7 @@ async fn main() -> anyhow::Result<()> {
         vectors,
         files,
         sandbox,
+        computers,
         tools,
         rag,
         hub: Arc::new(StreamHub::new()),
@@ -215,6 +251,13 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/api/messages/{id}/stream", get(routes::resume_stream))
         .route("/api/sandbox/run", post(routes::sandbox_run))
+        .route(
+            "/api/computers/me",
+            get(routes::get_computer).delete(routes::destroy_computer),
+        )
+        .route("/api/computers/me/pause", post(routes::pause_computer))
+        .route("/api/computers/me/resume", post(routes::resume_computer))
+        .route("/api/computers/exec", post(routes::computer_exec))
         .merge(auth_routes)
         .merge(chat_routes)
         .layer(TraceLayer::new_for_http())
@@ -289,6 +332,29 @@ async fn connect_store(
             Ok((Arc::new(db), vectors))
         }
     }
+}
+
+/// Background loop that destroys idle computers and tops up the warm pool.
+///
+/// A single reaper is spawned per process. With several replicas each reaps
+/// against the shared registry; `list_idle_computers` + state transitions keep
+/// the work convergent even if two tick at once.
+fn spawn_computer_reaper(orchestrator: Arc<ComputerOrchestrator>, interval: std::time::Duration) {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(interval);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            ticker.tick().await;
+            match orchestrator.reap_idle().await {
+                Ok(0) => {}
+                Ok(count) => tracing::info!(count, "reaped idle computers"),
+                Err(err) => tracing::warn!(error = %err, "idle computer reaper failed"),
+            }
+            if let Err(err) = orchestrator.refill_warm_pool().await {
+                tracing::warn!(error = %err, "warm pool refill failed");
+            }
+        }
+    });
 }
 
 fn init_tracing(level: &str) {

@@ -344,6 +344,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -360,6 +361,26 @@ dependencies = [
  "ring",
  "serde",
  "thiserror 2.0.21",
+ "uuid",
+]
+
+[[package]]
+name = "chat-computers"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "axum",
+ "chat-core",
+ "chat-db-sqlite",
+ "chat-sandbox",
+ "chat-store",
+ "chrono",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
  "uuid",
 ]
 
@@ -496,10 +517,12 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "async-stream",
+ "async-trait",
  "axum",
  "base64 0.22.1",
  "chat-agents",
  "chat-auth",
+ "chat-computers",
  "chat-core",
  "chat-db-postgres",
  "chat-db-sqlite",

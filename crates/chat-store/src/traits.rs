@@ -3,8 +3,8 @@ use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use crate::models::{
-    AdminUserSummary, Agent, AgentDraft, AuditEntry, AuditLog, Conversation, FileRecord, Message,
-    Provider, ProviderModel, RefreshToken, User,
+    AdminUserSummary, Agent, AgentDraft, AuditEntry, AuditLog, Computer, Conversation, FileRecord,
+    Message, Provider, ProviderModel, RefreshToken, User,
 };
 use crate::types::{EmbeddingChunk, RetrievedChunk, Scope};
 
@@ -243,6 +243,44 @@ pub trait Store: Send + Sync {
     async fn list_files(&self, conversation_id: Uuid) -> Result<Vec<FileRecord>>;
 
     async fn delete_file(&self, id: Uuid, user_id: Uuid) -> Result<()>;
+
+    // ---- computers (per-user persistent workspaces) --------------------
+    /// Record a placement, creating a new `running` computer.
+    async fn create_computer(
+        &self,
+        user_id: Uuid,
+        node: &str,
+        handle: Option<&str>,
+    ) -> Result<Computer>;
+
+    /// Fetch a single computer by id, regardless of owner or state.
+    async fn get_computer(&self, id: Uuid) -> Result<Option<Computer>>;
+
+    /// The user's live (non-destroyed) computer, newest first, if any.
+    async fn get_live_computer_for_user(&self, user_id: Uuid) -> Result<Option<Computer>>;
+
+    /// Every computer, newest first, capped at `limit` (admin/debug view).
+    async fn list_computers(&self, limit: i64) -> Result<Vec<Computer>>;
+
+    /// Live `running` computers whose `last_active_at` predates `idle_before`,
+    /// oldest first — the idle reaper's work queue.
+    async fn list_idle_computers(
+        &self,
+        idle_before: DateTime<Utc>,
+        limit: i64,
+    ) -> Result<Vec<Computer>>;
+
+    /// Count of live (non-destroyed) computers placed on `node`.
+    async fn count_live_computers_on_node(&self, node: &str) -> Result<i64>;
+
+    /// Change a computer's lifecycle state.
+    async fn set_computer_state(&self, id: Uuid, state: &str) -> Result<()>;
+
+    /// Set (or clear) the backend handle for a computer.
+    async fn set_computer_handle(&self, id: Uuid, handle: Option<&str>) -> Result<()>;
+
+    /// Mark a computer active now (refreshes the idle-reaper clock).
+    async fn touch_computer(&self, id: Uuid) -> Result<()>;
 }
 
 /// Vector storage and similarity search, independent of the engine.

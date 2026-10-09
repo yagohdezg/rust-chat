@@ -255,6 +255,11 @@ See [`.env.example`](.env.example).
 | `SANDBOXD_TOKEN`          | —                                                    | Shared bearer token sent to `sandboxd` |
 | `SANDBOX_TOOL_ENABLED`    | `false`                                              | Expose `execute_code` to the agent  |
 | `AGENT_MAX_ITERATIONS`    | `6`                                                  | Max tool iterations per chat turn   |
+| `COMPUTERS_ENABLED`       | `false`                                              | Enable per-user persistent computers |
+| `SANDBOX_NODES`           | (see below)                                          | `name=url[,...]` nodes for computers |
+| `COMPUTER_IDLE_TTL_SECONDS` | `1800`                                             | Destroy a computer idle this long   |
+| `COMPUTER_REAP_INTERVAL_SECONDS` | `60`                                        | Idle-reaper / warm-pool tick        |
+| `COMPUTER_WARM_POOL`      | `0`                                                  | Warm boxes per node (`0` disables)  |
 
 `sandboxd` reads its own environment: `SANDBOXD_TOKEN` (**required**),
 `SANDBOXD_BIND_ADDR` (`0.0.0.0:3081`), `BOXLITE_URL`
@@ -293,6 +298,11 @@ See [`.env.example`](.env.example).
 | `POST` | `/api/chat`                         | JWT  | Stream a completion as SSE           |
 | `GET`  | `/api/messages/{id}/stream`         | JWT  | Resume a stream (send `Last-Event-ID`) |
 | `POST` | `/api/sandbox/run`                  | JWT  | Execute code in the sandbox          |
+| `GET`  | `/api/computers/me`                 | JWT  | Get (or create) the caller's computer |
+| `DELETE`| `/api/computers/me`                | JWT  | Destroy the caller's computer        |
+| `POST` | `/api/computers/me/pause`           | JWT  | Pause the caller's computer          |
+| `POST` | `/api/computers/me/resume`          | JWT  | Resume the caller's computer         |
+| `POST` | `/api/computers/exec`               | JWT  | Run code on the caller's computer    |
 
 `/api/chat` streams `text/event-stream` events: `meta` (the assistant
 `message_id` and a `resume_path`), optional `sources` (retrieved RAG chunks),
@@ -360,5 +370,8 @@ Migrations live per backend and are applied automatically on server start
 ## Status
 
 Scaffolded and under active development. The sandbox split (`chat-server` ->
-`sandboxd` -> BoxLite) and the OpenAI-compatible streaming path are functional;
-the MCP integration and the persistent per-user "computer" are still pending.
+`sandboxd` -> BoxLite) and the OpenAI-compatible streaming path are functional.
+With `COMPUTERS_ENABLED`, a user's `execute_code` tool calls run on their own
+long-lived computer (one live box per user, placed via the `computers` registry)
+rather than a shared throwaway box. The MCP integration and persistent-workspace
+snapshots are still pending.

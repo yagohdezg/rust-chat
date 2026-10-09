@@ -10,12 +10,13 @@
 
 use std::sync::Arc;
 
-use axum::extract::{Request, State};
+use axum::extract::{Path, Request, State};
 use axum::http::{header, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::Response;
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
+use serde::Serialize;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::EnvFilter;
@@ -24,8 +25,16 @@ use chat_sandbox::{BoxliteBackend, ExecRequest, ExecResult, SandboxBackend, Sand
 
 #[derive(Clone)]
 struct AppState {
-    backend: Arc<dyn SandboxBackend>,
+    /// Concrete backend: computer endpoints need the persistent-box lifecycle,
+    /// which is not part of the object-safe [`SandboxBackend`] surface.
+    backend: Arc<BoxliteBackend>,
     token: Arc<String>,
+}
+
+/// Response wrapping a persistent box id.
+#[derive(Serialize)]
+struct ComputerRef {
+    handle: String,
 }
 
 #[tokio::main]
@@ -66,8 +75,7 @@ async fn main() -> anyhow::Result<()> {
         network: false,
     };
 
-    let backend: Arc<dyn SandboxBackend> =
-        Arc::new(BoxliteBackend::new(boxlite_url, boxlite_token, spec));
+    let backend = Arc::new(BoxliteBackend::new(boxlite_url, boxlite_token, spec));
 
     let bind_addr = std::env::var("SANDBOXD_BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:3081".into());
 
@@ -86,13 +94,15 @@ async fn main() -> anyhow::Result<()> {
 }
 
 fn build_app(state: AppState) -> Router {
-    let protected =
-        Router::new()
-            .route("/v1/exec", post(exec))
-            .route_layer(middleware::from_fn_with_state(
-                state.clone(),
-                require_bearer,
-            ));
+    let protected = Router::new()
+        .route("/v1/exec", post(exec))
+        .route("/v1/computers", post(create_computer))
+        .route("/v1/computers/{handle}/exec", post(exec_computer))
+        .route("/v1/computers/{handle}", delete(destroy_computer))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_bearer,
+        ));
     Router::new()
         .route("/health", get(health))
         .merge(protected)
@@ -139,6 +149,45 @@ async fn exec(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
 }
 
+/// Provision a persistent box for a per-user "computer".
+async fn create_computer(
+    State(state): State<AppState>,
+) -> Result<Json<ComputerRef>, (StatusCode, String)> {
+    state
+        .backend
+        .create_computer()
+        .await
+        .map(|handle| Json(ComputerRef { handle }))
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
+/// Run one request inside a persistent box, keeping the box alive.
+async fn exec_computer(
+    State(state): State<AppState>,
+    Path(handle): Path<String>,
+    Json(request): Json<ExecRequest>,
+) -> Result<Json<ExecResult>, (StatusCode, String)> {
+    state
+        .backend
+        .exec_computer(&handle, &request)
+        .await
+        .map(Json)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
+/// Destroy a persistent box. Idempotent.
+async fn destroy_computer(
+    State(state): State<AppState>,
+    Path(handle): Path<String>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    state
+        .backend
+        .destroy_computer(&handle)
+        .await
+        .map(|_| StatusCode::NO_CONTENT)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -147,7 +196,7 @@ mod tests {
     use tower::ServiceExt;
 
     fn test_state(token: &str) -> AppState {
-        let backend: Arc<dyn SandboxBackend> = Arc::new(BoxliteBackend::new(
+        let backend = Arc::new(BoxliteBackend::new(
             "http://127.0.0.1:1",
             None,
             SandboxSpec::default(),

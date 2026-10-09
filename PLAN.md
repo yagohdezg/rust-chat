@@ -117,6 +117,34 @@ not the environment; the runtime builds an `OpenAiProvider` per provider row.
 - [ ] P3 Provider failover / retries with backoff on 429/5xx.
 - [ ] P3 Token accounting and usage reporting per user.
 
+### Deployment config file (`rustchat.yaml`) — LibreChat-style
+
+Providers are runtime/DB-driven today, so a deployment has no single declarative
+file for global defaults. Add an optional `rustchat.yaml` (path from
+`RUSTCHAT_CONFIG`, default `/etc/rustchat/rustchat.yaml`; a missing file is fine)
+that acts as the *base layer* everything else overrides. It is global read-only
+config (baked into the image / a ConfigMap), so it is multi-replica safe; secrets
+stay out of it and provider keys keep resolving from the DB/env via
+`SecretCipher`.
+
+- [ ] P2 Load + validate at boot: parse with `serde_yaml` into a typed
+      `FileConfig`, layer it under env/`Config`, and fail fast on references to
+      unknown providers/models. `${ENV}` interpolation for non-secret values.
+- [ ] P2 `providers:` section: declare global providers + their model lists
+      (name, kind, base_url, models). Idempotently upsert into
+      `providers`/`models` at boot, making the file the source of truth for the
+      admin/global providers (subsumes the pending LiteLLM importer).
+- [ ] P2 `defaults:` section: base `provider` + `model` used when the request,
+      agent, and the user's own providers name none. Resolution order becomes
+      request -> agent -> user provider -> DB global -> file default.
+- [ ] P2 `title_model`: provider+model used to auto-generate a conversation
+      title from the first exchange (then `Store::rename_conversation`). New
+      feature: no title generation exists today (titles are user-set or
+      `New chat`); run it asynchronously after the first assistant turn and
+      leave the title unchanged if it fails.
+- [ ] P3 Later sections to mirror LibreChat's (`interface`, `registration`,
+      `rate_limits`, `file`, `speech`).
+
 ## 4. Sandbox / execution
 
 ### 4a. Missing backends and routing
@@ -191,17 +219,47 @@ not the environment; the runtime builds an `OpenAiProvider` per provider row.
 Current model is ephemeral exec: one BoxLite microVM per request, destroyed
 after. A persistent per-user computer is a different control plane.
 
-- [ ] P1 Decide persistent-across-sessions vs per-conversation ephemeral
-      (drives everything below).
-- [ ] P1 `computer-orchestrator` service: create / pause / resume / destroy,
-      idle TTL reaper, warm pool.
-- [ ] P1 Session placement registry (`user_id -> computer_id -> node`), Redis
-      or Postgres. Used for routing and to survive restarts.
-- [ ] P1 Sandbox gateway: resolve `computer_id` to a node; avoid sticky LB.
+> **Decision (P1):** computers are **per-user and persistent across sessions** —
+> one long-lived box per user, created on first use, destroyed by idle TTL or an
+> explicit request. **Implemented (P1 core):** the `chat-computers` crate holds
+> the control plane (embedded in `chat-server`; extractable to a standalone
+> service later); the `computers` table is the placement registry; `sandboxd`
+> exposes persistent-box endpoints; `BoxliteBackend` gained create/exec/destroy
+> without deleting the box. Control-plane `pause`/`resume` keep the placement;
+> durable/large workspaces, snapshots and egress control remain P2.
+>
+> **API:** `GET /api/computers/me` (get-or-create), `POST
+> /api/computers/me/pause|resume`, `DELETE /api/computers/me`, `POST
+> /api/computers/exec`. **Config:** `COMPUTERS_ENABLED`, `SANDBOX_NODES`,
+> `COMPUTER_IDLE_TTL_SECONDS`, `COMPUTER_REAP_INTERVAL_SECONDS`,
+> `COMPUTER_WARM_POOL`.
+
+- [x] P1 Decide persistent-across-sessions vs per-conversation ephemeral
+      (drives everything below). Chosen: per-user, persistent.
+- [x] P1 `computer-orchestrator` service: create / pause / resume / destroy,
+      idle TTL reaper, warm pool. (`chat-computers::ComputerOrchestrator`;
+      embedded in `chat-server`, not yet a standalone binary.)
+- [x] P1 Session placement registry (`user_id -> computer_id -> node`), Redis
+      or Postgres. Used for routing and to survive restarts. (`computers` table,
+      Postgres + SQLite.)
+- [x] P1 Sandbox gateway: resolve `computer_id` to a node; avoid sticky LB.
+      (`NodeRouter` + registry-provided node name; persistent-box endpoints on
+      `sandboxd`.)
+- [x] P1 Invoke the computer from chat. When `COMPUTERS_ENABLED` and a turn
+      exposes the code interpreter (an agent with `sandbox_enabled`, or
+      `execute_code` in its tool list — even if the process-wide
+      `SANDBOX_TOOL_ENABLED` is off), `resolve_agent` registers a user-bound
+      `execute_code` (`UserCodeInterpreterTool` + the `ComputerSandbox` adapter)
+      that calls `ComputerOrchestrator::exec(user_id, ..)`. Every call for a
+      user lands in the same persistent box; the `computers` one-live-row-per-
+      user index is what makes the sandbox unique per user. Without computers,
+      the tool falls back to the shared ephemeral sandbox.
 - [ ] P2 Persistent workspace storage (EBS/EFS/S3-backed overlay) and
       snapshot-on-pause. Ephemeral runs currently upload inline and discard the
-      box, so a workspace needs BoxLite volumes or an external store.
-- [ ] P2 Warm VM pool to hide Firecracker cold start.
+      box, so a workspace needs BoxLite volumes or an external store. P1 keeps
+      the box alive in place; pause/resume are control-plane only.
+- [ ] P2 Warm VM pool to hide Firecracker cold start. P1 warms boxes
+      (`COMPUTER_WARM_POOL`), but a crash leaks them (no durable pool ownership).
 - [ ] P2 Per-computer egress allow-list / proxy.
 - [ ] P3 File-transfer API into/out of a computer
       (`ExecRequest.files` only supports inline base64 today).
@@ -410,6 +468,7 @@ after. A persistent per-user computer is a different control plane.
 3. **M3 — Sandbox split:** DONE. `HttpSandboxBackend` + `sandboxd` auth (4a),
    BoxLite wired and verified in a privileged container with `/dev/kvm`.
    BoxLite-only (Podman removed); see §4a.
-4. **M4 — Computer orchestration:** registry + orchestrator + gateway +
-   persistent workspaces (4b).
+4. **M4 — Computer orchestration:** P1 core DONE (registry + orchestrator +
+   gateway; per-user persistent computers, 4b). Persistent workspaces /
+   snapshot-on-pause (P2) still pending.
 5. **M5 — EKS:** manifests, node groups, autoscaling (5c), observability (9).

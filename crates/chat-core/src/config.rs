@@ -53,6 +53,55 @@ impl std::str::FromStr for DatabaseBackend {
     }
 }
 
+/// One sandbox node the computer orchestrator may place per-user boxes on.
+///
+/// `name` is what the placement registry stores; `url` is the `sandboxd` base.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SandboxNodeConfig {
+    pub name: String,
+    pub url: String,
+}
+
+/// Parse `SANDBOX_NODES` (`name=url[,name=url...]`) into node configs. An empty
+/// or unset value yields a single `default` node at `default_url`.
+fn parse_sandbox_nodes(
+    value: Option<&str>,
+    default_url: &str,
+) -> Result<Vec<SandboxNodeConfig>, ChatError> {
+    let Some(value) = value.map(str::trim).filter(|v| !v.is_empty()) else {
+        return Ok(vec![SandboxNodeConfig {
+            name: "default".into(),
+            url: default_url.to_string(),
+        }]);
+    };
+
+    let mut nodes = Vec::new();
+    for entry in value.split(',') {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            continue;
+        }
+        let (name, url) = entry.split_once('=').ok_or_else(|| {
+            ChatError::Config(format!("SANDBOX_NODES entry `{entry}` must be `name=url`"))
+        })?;
+        let name = name.trim();
+        let url = url.trim();
+        if name.is_empty() || url.is_empty() {
+            return Err(ChatError::Config(format!(
+                "SANDBOX_NODES entry `{entry}` must be `name=url`"
+            )));
+        }
+        nodes.push(SandboxNodeConfig {
+            name: name.to_string(),
+            url: url.to_string(),
+        });
+    }
+    if nodes.is_empty() {
+        return Err(ChatError::Config("SANDBOX_NODES contained no nodes".into()));
+    }
+    Ok(nodes)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub database_backend: DatabaseBackend,
@@ -116,6 +165,20 @@ pub struct Config {
     pub sandboxd_url: String,
     /// Shared bearer token presented to `sandboxd` (`SANDBOXD_TOKEN`).
     pub sandboxd_token: Option<String>,
+
+    /// Expose the per-user persistent "computer" control plane (§4b). Off by
+    /// default; requires `sandboxd` (BoxLite) nodes.
+    pub computers_enabled: bool,
+    /// Sandbox nodes computers may be placed on, parsed from `SANDBOX_NODES`
+    /// (`name=url[,name=url...]`). When unset, a single `default` node points at
+    /// `sandboxd_url`.
+    pub sandbox_nodes: Vec<SandboxNodeConfig>,
+    /// A running/paused computer untouched for this long is destroyed.
+    pub computer_idle_ttl_seconds: u64,
+    /// How often the idle reaper (and warm-pool refill) runs.
+    pub computer_reap_interval_seconds: u64,
+    /// Blank boxes to keep warm per node, to hide box cold-start (0 disables).
+    pub computer_warm_pool: usize,
 
     /// Expose the sandbox as the `execute_code` tool to the agent runtime.
     /// Off by default so a plain deployment never grants model-driven code
@@ -217,6 +280,9 @@ impl Config {
             var("JWT_SECRET").ok_or_else(|| ChatError::Config("JWT_SECRET is required".into()))?;
         validate_jwt_secret(&jwt_secret)?;
 
+        let sandboxd_url = var("SANDBOXD_URL").unwrap_or_else(|| "http://localhost:3081".into());
+        let sandbox_nodes = parse_sandbox_nodes(var("SANDBOX_NODES").as_deref(), &sandboxd_url)?;
+
         Ok(Self {
             database_backend,
             database_url,
@@ -272,8 +338,20 @@ impl Config {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(200),
 
-            sandboxd_url: var("SANDBOXD_URL").unwrap_or_else(|| "http://localhost:3081".into()),
+            sandboxd_url,
             sandboxd_token: var("SANDBOXD_TOKEN"),
+
+            computers_enabled: var_bool("COMPUTERS_ENABLED", false),
+            sandbox_nodes,
+            computer_idle_ttl_seconds: var("COMPUTER_IDLE_TTL_SECONDS")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(1800),
+            computer_reap_interval_seconds: var("COMPUTER_REAP_INTERVAL_SECONDS")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(60),
+            computer_warm_pool: var("COMPUTER_WARM_POOL")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0),
 
             sandbox_tool_enabled: var_bool("SANDBOX_TOOL_ENABLED", false),
             agent_max_iterations: var("AGENT_MAX_ITERATIONS")
@@ -289,5 +367,44 @@ impl Config {
             Some(key) => crate::crypto::SecretCipher::from_base64(key),
             None => crate::crypto::SecretCipher::derive_from_secret(&self.jwt_secret),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sandbox_nodes_default_to_a_single_node() {
+        let nodes = parse_sandbox_nodes(None, "http://localhost:3081").unwrap();
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].name, "default");
+        assert_eq!(nodes[0].url, "http://localhost:3081");
+
+        // Blank (e.g. `${SANDBOX_NODES:-}` in compose) is treated as unset.
+        let nodes = parse_sandbox_nodes(Some("   "), "http://x:3081").unwrap();
+        assert_eq!(nodes[0].url, "http://x:3081");
+    }
+
+    #[test]
+    fn sandbox_nodes_parse_named_pairs() {
+        let nodes =
+            parse_sandbox_nodes(Some("a=http://a:3081, b = http://b:3081"), "http://x").unwrap();
+        assert_eq!(nodes.len(), 2);
+        assert_eq!(
+            (nodes[0].name.as_str(), nodes[0].url.as_str()),
+            ("a", "http://a:3081")
+        );
+        assert_eq!(
+            (nodes[1].name.as_str(), nodes[1].url.as_str()),
+            ("b", "http://b:3081")
+        );
+    }
+
+    #[test]
+    fn sandbox_nodes_reject_malformed_entries() {
+        assert!(parse_sandbox_nodes(Some("no-equals"), "http://x").is_err());
+        assert!(parse_sandbox_nodes(Some("=http://x"), "http://x").is_err());
+        assert!(parse_sandbox_nodes(Some("a="), "http://x").is_err());
     }
 }

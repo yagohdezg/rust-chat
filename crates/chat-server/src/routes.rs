@@ -19,13 +19,14 @@ use chat_agents::{run_agent_stream, AgentConfig, AgentEvent, ToolRegistry};
 use chat_auth::{
     generate_refresh_token, hash_password, hash_refresh_token, issue_token, verify_password,
 };
+use chat_computers::ComputerOrchestrator;
 use chat_core::ChatError;
 use chat_providers::{ChatMessage, ChatRequest, LlmProvider, ModelInfo, OpenAiProvider};
 use chat_rag::RagPipeline;
 use chat_sandbox::{ExecRequest, ExecResult, SandboxFile};
 use chat_store::types::message_status;
 use chat_store::{
-    AdminUserSummary, AuditEntry, AuditLog, Conversation, FileRecord, Message, Provider,
+    AdminUserSummary, AuditEntry, AuditLog, Computer, Conversation, FileRecord, Message, Provider,
     ProviderModel, Scope, Store,
 };
 
@@ -1577,6 +1578,7 @@ async fn resolve_agent(
     let mut system = None;
     let mut model = requested_model.map(str::to_string);
     let mut tools = state.tools.clone();
+    let mut wants_code = false;
     if let Some(agent) = &agent {
         if let Some(agent_model) = agent.model.clone().filter(|m| !m.trim().is_empty()) {
             model = Some(agent_model);
@@ -1587,12 +1589,26 @@ async fn resolve_agent(
             .filter(|instructions| !instructions.trim().is_empty());
 
         // The agent's tool list is authoritative; `sandbox_enabled` adds the
-        // code interpreter on top when it is registered.
+        // code interpreter on top when it is available.
         let mut names = agent.tools.0.clone();
         if agent.sandbox_enabled && !names.iter().any(|name| name == "execute_code") {
             names.push("execute_code".to_string());
         }
+        wants_code = names.iter().any(|name| name == "execute_code");
         tools = state.tools.restricted(&names);
+    }
+
+    // When the per-user computer plane is enabled, `execute_code` runs on the
+    // caller's own persistent sandbox (one live computer per user, enforced by
+    // the placement registry) instead of the shared, ephemeral backend. This
+    // also makes the tool available to agents that opt in via `sandbox_enabled`
+    // even when the process-wide sandbox tool is off.
+    let computer = state
+        .computers
+        .clone()
+        .filter(|_| wants_code || tools.get("execute_code").is_some());
+    if let Some(computers) = computer {
+        tools.register(crate::tools::computer_code_interpreter(computers, user_id));
     }
 
     let model = pick_model(provider.as_ref(), model).await?;
@@ -1936,6 +1952,98 @@ pub async fn sandbox_run(
             actor_id: Some(user.id),
             action: "sandbox.exec".into(),
             target_type: Some("sandbox".into()),
+            target_id: None,
+            metadata: Some(json!({
+                "language": language,
+                "exit_code": result.exit_code,
+                "timed_out": result.timed_out,
+            })),
+            ip: Some(addr.ip().to_string()),
+        },
+    )
+    .await;
+
+    Ok(Json(result))
+}
+
+// ---- computers (per-user persistent workspaces) ---------------------------
+
+/// Resolve the control plane, or fail with a clear message when disabled.
+fn computer_plane(state: &AppState) -> Result<&ComputerOrchestrator, ApiError> {
+    state
+        .computers
+        .as_deref()
+        .ok_or_else(|| ApiError(ChatError::BadRequest("computers are not enabled".into())))
+}
+
+/// Return the caller's computer, provisioning it on first use.
+pub async fn get_computer(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+) -> Result<Json<Computer>, ApiError> {
+    let computer = computer_plane(&state)?.ensure_running(user.id).await?;
+    Ok(Json(computer))
+}
+
+/// Pause the caller's computer, keeping its placement.
+pub async fn pause_computer(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+) -> Result<Json<Option<Computer>>, ApiError> {
+    Ok(Json(computer_plane(&state)?.pause(user.id).await?))
+}
+
+/// Resume a paused computer.
+pub async fn resume_computer(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+) -> Result<Json<Option<Computer>>, ApiError> {
+    Ok(Json(computer_plane(&state)?.resume(user.id).await?))
+}
+
+/// Destroy the caller's computer and free its box.
+pub async fn destroy_computer(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+) -> Result<Json<Value>, ApiError> {
+    let destroyed = computer_plane(&state)?.destroy(user.id).await?;
+    audit(
+        &state,
+        AuditEntry {
+            actor_id: Some(user.id),
+            action: "computer.destroy".into(),
+            target_type: Some("computer".into()),
+            target_id: None,
+            metadata: Some(json!({ "destroyed": destroyed })),
+            ip: Some(addr.ip().to_string()),
+        },
+    )
+    .await;
+    Ok(Json(json!({ "destroyed": destroyed })))
+}
+
+/// Run code on the caller's persistent computer (created on first use).
+pub async fn computer_exec(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    Json(body): Json<SandboxBody>,
+) -> Result<Json<ExecResult>, ApiError> {
+    let language = body.language.clone();
+    let request = ExecRequest {
+        language: body.language,
+        code: body.code,
+        files: body.files,
+    };
+    let result = computer_plane(&state)?.exec(user.id, &request).await?;
+
+    audit(
+        &state,
+        AuditEntry {
+            actor_id: Some(user.id),
+            action: "computer.exec".into(),
+            target_type: Some("computer".into()),
             target_id: None,
             metadata: Some(json!({
                 "language": language,

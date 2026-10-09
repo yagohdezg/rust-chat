@@ -2,6 +2,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use serde_json::{json, Value};
+use uuid::Uuid;
+
+use chat_sandbox::{ExecRequest, ExecResult};
 
 /// A callable tool exposed to the model.
 #[async_trait::async_trait]
@@ -11,6 +14,21 @@ pub trait Tool: Send + Sync {
     /// JSON Schema for the tool arguments.
     fn schema(&self) -> Value;
     async fn call(&self, arguments: Value) -> anyhow::Result<String>;
+}
+
+/// Runs sandboxed code on behalf of a specific user.
+///
+/// The shared [`ToolRegistry`] has no notion of who is calling, so any tool
+/// that must act *as a user* is built per request. The server implements this
+/// with its per-user "computer" control plane, which guarantees the same user
+/// always lands in the same persistent workspace.
+#[async_trait::async_trait]
+pub trait UserSandbox: Send + Sync {
+    async fn exec_for_user(
+        &self,
+        user_id: Uuid,
+        request: &ExecRequest,
+    ) -> anyhow::Result<ExecResult>;
 }
 
 /// Registry of tools addressable by name, with OpenAI tool definitions.

@@ -9,8 +9,8 @@ use std::sync::Arc;
 
 use chat_core::{ChatError, Result, SecretCipher};
 use chat_store::{
-    AdminUserSummary, Agent, AgentDraft, AuditEntry, AuditLog, Conversation, FileRecord, Message,
-    Provider, ProviderModel, RefreshToken, Store, User,
+    AdminUserSummary, Agent, AgentDraft, AuditEntry, AuditLog, Computer, Conversation, FileRecord,
+    Message, Provider, ProviderModel, RefreshToken, Store, User,
 };
 use chrono::{DateTime, Utc};
 use sqlx::postgres::PgPoolOptions;
@@ -809,6 +809,117 @@ impl Store for PostgresStore {
             .bind(user_id)
             .execute(&self.pool)
             .await?;
+        Ok(())
+    }
+
+    async fn create_computer(
+        &self,
+        user_id: Uuid,
+        node: &str,
+        handle: Option<&str>,
+    ) -> Result<Computer> {
+        let now = Utc::now();
+        let row = sqlx::query_as::<_, Computer>(
+            "insert into computers
+             (id, user_id, node, handle, state, created_at, updated_at, last_active_at)
+             values ($1, $2, $3, $4, $5, $6, $7, $8)
+             returning *",
+        )
+        .bind(Uuid::new_v4())
+        .bind(user_id)
+        .bind(node)
+        .bind(handle)
+        .bind(chat_store::types::computer_state::RUNNING)
+        .bind(now)
+        .bind(now)
+        .bind(now)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row)
+    }
+
+    async fn get_computer(&self, id: Uuid) -> Result<Option<Computer>> {
+        let row = sqlx::query_as::<_, Computer>("select * from computers where id = $1")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row)
+    }
+
+    async fn get_live_computer_for_user(&self, user_id: Uuid) -> Result<Option<Computer>> {
+        let row = sqlx::query_as::<_, Computer>(
+            "select * from computers
+             where user_id = $1 and state <> 'destroyed'
+             order by created_at desc limit 1",
+        )
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row)
+    }
+
+    async fn list_computers(&self, limit: i64) -> Result<Vec<Computer>> {
+        let rows = sqlx::query_as::<_, Computer>(
+            "select * from computers order by created_at desc limit $1",
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    async fn list_idle_computers(
+        &self,
+        idle_before: DateTime<Utc>,
+        limit: i64,
+    ) -> Result<Vec<Computer>> {
+        let rows = sqlx::query_as::<_, Computer>(
+            "select * from computers
+             where state in ('running', 'paused') and last_active_at < $1
+             order by last_active_at asc limit $2",
+        )
+        .bind(idle_before)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    async fn count_live_computers_on_node(&self, node: &str) -> Result<i64> {
+        let count = sqlx::query_scalar::<_, i64>(
+            "select count(*) from computers where node = $1 and state <> 'destroyed'",
+        )
+        .bind(node)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(count)
+    }
+
+    async fn set_computer_state(&self, id: Uuid, state: &str) -> Result<()> {
+        sqlx::query("update computers set state = $2, updated_at = now() where id = $1")
+            .bind(id)
+            .bind(state)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn set_computer_handle(&self, id: Uuid, handle: Option<&str>) -> Result<()> {
+        sqlx::query("update computers set handle = $2, updated_at = now() where id = $1")
+            .bind(id)
+            .bind(handle)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn touch_computer(&self, id: Uuid) -> Result<()> {
+        sqlx::query(
+            "update computers set last_active_at = now(), updated_at = now() where id = $1",
+        )
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 }

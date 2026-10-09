@@ -315,6 +315,61 @@ impl BoxliteBackend {
         *exec_id_cell.lock().unwrap() = Some(exec_id.clone());
         self.stream_exec(prefix, box_id, &exec_id).await
     }
+
+    /// Provision a persistent box and return its id.
+    ///
+    /// Unlike [`SandboxBackend::run`], the box is **not** deleted; the caller
+    /// owns its lifecycle and must eventually call [`Self::destroy_computer`].
+    /// This is the node-side primitive behind a per-user "computer".
+    pub async fn create_computer(&self) -> Result<String, SandboxError> {
+        let prefix = self.prefix().await?.to_owned();
+        self.create_box(&prefix).await
+    }
+
+    /// Run a request inside an existing persistent box, leaving the box alive.
+    ///
+    /// Mirrors [`SandboxBackend::run`]'s upload/exec/attach/timeout sequence but
+    /// skips the final delete so the workspace (files, installed packages) is
+    /// retained across calls.
+    pub async fn exec_computer(
+        &self,
+        box_id: &str,
+        request: &ExecRequest,
+    ) -> Result<ExecResult, SandboxError> {
+        let prefix = self.prefix().await?.to_owned();
+        let program = program(&request.language)
+            .ok_or_else(|| SandboxError::UnsupportedLanguage(request.language.clone()))?;
+
+        let exec_id: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let deadline = Duration::from_secs(self.spec.timeout_seconds.max(1));
+        let inner = self.run_in_box(&prefix, box_id, program, request, exec_id.clone());
+        match tokio::time::timeout(deadline, inner).await {
+            Ok(result) => result,
+            Err(_elapsed) => {
+                tracing::warn!(box_id, "persistent BoxLite exec exceeded local timeout");
+                // Bind before the `if let` so the guard is not held across await.
+                let timed_out_exec = exec_id.lock().unwrap().clone();
+                if let Some(exec_id) = timed_out_exec {
+                    if let Err(e) = self.kill_exec(&prefix, box_id, &exec_id).await {
+                        tracing::warn!(error = %e, "failed to kill timed-out execution");
+                    }
+                }
+                Ok(ExecResult {
+                    exit_code: -1,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    timed_out: true,
+                    truncated: false,
+                })
+            }
+        }
+    }
+
+    /// Destroy a persistent box, releasing its resources. Idempotent.
+    pub async fn destroy_computer(&self, box_id: &str) -> Result<(), SandboxError> {
+        let prefix = self.prefix().await?.to_owned();
+        self.delete_box(&prefix, box_id).await
+    }
 }
 
 #[async_trait::async_trait]

@@ -11,6 +11,7 @@ members = [
   "crates/chat-mcp",
   "crates/chat-agents",
   "crates/chat-sandbox",
+  "crates/chat-computers",
   "crates/chat-auth",
   "crates/chat-server",
   "services/sandboxd",
@@ -71,6 +72,7 @@ chat-rag = { path = "crates/chat-rag" }
 chat-mcp = { path = "crates/chat-mcp" }
 chat-agents = { path = "crates/chat-agents" }
 chat-sandbox = { path = "crates/chat-sandbox" }
+chat-computers = { path = "crates/chat-computers" }
 chat-auth = { path = "crates/chat-auth" }
 
 [profile.release]

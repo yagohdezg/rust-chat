@@ -160,6 +160,26 @@ pub struct AgentDraft {
     pub sandbox_enabled: bool,
 }
 
+/// A per-user, persistent execution workspace ("computer").
+///
+/// This row is the placement registry: it records which `node` hosts the
+/// user's computer and its lifecycle `state`, so the control plane can route
+/// executions without a sticky load balancer and can reconstruct placement
+/// after a restart. `handle` is the backend's id for the running box (opaque
+/// to everyone above the node client).
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+pub struct Computer {
+    pub id: Uuid,
+    pub user_id: Uuid,
+    pub node: String,
+    pub handle: Option<String>,
+    /// See [`crate::types::computer_state`].
+    pub state: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub last_active_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
 pub struct FileRecord {
     pub id: Uuid,
