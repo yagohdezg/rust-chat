@@ -604,6 +604,78 @@ impl Store for SqliteStore {
         self.decrypt_provider(row)
     }
 
+    async fn upsert_global_provider(
+        &self,
+        name: &str,
+        kind: &str,
+        base_url: &str,
+        models: &[String],
+    ) -> Result<Provider> {
+        let mut tx = self.pool.begin().await?;
+        let existing: Option<(Uuid,)> = sqlx::query_as(
+            "select id from providers
+             where user_id is null and name = ?
+             order by created_at asc limit 1",
+        )
+        .bind(name)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        let id = match existing {
+            Some((id,)) => {
+                sqlx::query("update providers set kind = ?, base_url = ? where id = ?")
+                    .bind(kind)
+                    .bind(base_url)
+                    .bind(id)
+                    .execute(&mut *tx)
+                    .await?;
+                id
+            }
+            None => {
+                let id = Uuid::new_v4();
+                sqlx::query(
+                    "insert into providers (id, user_id, name, kind, base_url, api_key, created_at)
+                     values (?, null, ?, ?, ?, null, ?)",
+                )
+                .bind(id)
+                .bind(name)
+                .bind(kind)
+                .bind(base_url)
+                .bind(Utc::now())
+                .execute(&mut *tx)
+                .await?;
+                id
+            }
+        };
+
+        // An empty `models` list means "discover at runtime"; leave the cache be.
+        if !models.is_empty() {
+            sqlx::query("delete from models where provider_id = ?")
+                .bind(id)
+                .execute(&mut *tx)
+                .await?;
+            let now = Utc::now();
+            for model in models {
+                sqlx::query(
+                    "insert into models (provider_id, id, owned_by, fetched_at)
+                     values (?, ?, null, ?)",
+                )
+                .bind(id)
+                .bind(model)
+                .bind(now)
+                .execute(&mut *tx)
+                .await?;
+            }
+        }
+
+        let row = sqlx::query_as::<_, Provider>("select * from providers where id = ?")
+            .bind(id)
+            .fetch_one(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        self.decrypt_provider(row)
+    }
+
     async fn set_provider_credential(
         &self,
         user_id: Uuid,

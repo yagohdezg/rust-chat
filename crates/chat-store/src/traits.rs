@@ -160,6 +160,19 @@ pub trait Store: Send + Sync {
         api_key: Option<&str>,
     ) -> Result<Provider>;
 
+    /// Idempotently insert or update a global (admin-provided) provider declared
+    /// in `rustchat.yaml`. Matches an existing global by `name`, refreshes its
+    /// `kind`/`base_url`, keeps any stored API key, and — when `models` is
+    /// non-empty — replaces the cached catalog with the declared list. Providers
+    /// absent from the file are left untouched.
+    async fn upsert_global_provider(
+        &self,
+        name: &str,
+        kind: &str,
+        base_url: &str,
+        models: &[String],
+    ) -> Result<Provider>;
+
     /// Store (or clear, with `None`) the caller's own API key for a provider.
     /// Used for admin-provisioned shared providers that ship without a key.
     async fn set_provider_credential(
