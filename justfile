@@ -52,9 +52,11 @@ sandboxd:
 
 # ---- database --------------------------------------------------------------
 
-# Start only Postgres + pgvector (for `just run` / local dev).
+# Start only Postgres + pgvector (opt-in; the default backend is SQLite). Set
+# DB_BACKEND=postgres and DATABASE_URL=postgres://rustchat:rustchat@localhost:5432/rustchat
+# in .env, then run this.
 db-up:
-    {{compose}} -f deploy/compose.yaml up -d postgres
+    {{compose}} -f deploy/compose.yaml --profile postgres up -d postgres
 
 # Stop the database.
 db-down:
@@ -72,7 +74,8 @@ db-create:
 
 # ---- full stack (compose) --------------------------------------------------
 
-# Build and start postgres + chat-server + web.
+# Build and start chat-server + web (SQLite by default; `--profile postgres`
+# for a Postgres-backed stack).
 stack-up:
     {{compose}} -f deploy/compose.yaml up --build -d
 

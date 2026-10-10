@@ -2,7 +2,12 @@
 #
 #   podman compose -f deploy/compose.yaml up --build -d      # or `docker compose`
 #
-# Services: postgres (pgvector) + chat-server (API, SSE) + web (SvelteKit).
+# Services: chat-server (API, SSE) + web (SvelteKit). The database defaults to
+# SQLite (a file on the `sqlite_data` volume, no extra service). To use Postgres
+# instead, start its profile and point chat-server at it:
+#   RUSTCHAT_DB_BACKEND=postgres \
+#   RUSTCHAT_DATABASE_URL=postgres://rustchat:rustchat@postgres:5432/rustchat \
+#   podman compose -f deploy/compose.yaml --profile postgres up --build -d
 #
 # Code execution runs through the standalone `sandboxd` service, which drives a
 # BoxLite server. Enable both with `--profile sandboxd`: that starts a `boxlite`
@@ -16,7 +21,11 @@
 name: rust-chat
 
 services:
+  # Optional Postgres backend. Enable with `--profile postgres` and set
+  # RUSTCHAT_DB_BACKEND=postgres + RUSTCHAT_DATABASE_URL on chat-server. SQLite
+  # is the default and needs no service.
   postgres:
+    profiles: ["postgres"]
     image: docker.io/pgvector/pgvector:pg16
     restart: unless-stopped
     environment:
@@ -40,12 +49,16 @@ services:
       args:
         SERVICE: chat-server
     restart: unless-stopped
-    depends_on:
-      postgres:
-        condition: service_healthy
     environment:
-      DB_BACKEND: postgres
-      DATABASE_URL: postgres://rustchat:rustchat@postgres:5432/rustchat
+      # SQLite by default, stored at /data/db on the `sqlite_data` volume. These
+      # use RUSTCHAT_-prefixed names so a developer `.env` for `cargo run`
+      # (which sets a relative `DATABASE_URL`) cannot leak into the container
+      # and write the database to the ephemeral container filesystem.
+      # For Postgres: set RUSTCHAT_DB_BACKEND=postgres and
+      # RUSTCHAT_DATABASE_URL=postgres://rustchat:rustchat@postgres:5432/rustchat,
+      # then start the `postgres` profile.
+      DB_BACKEND: ${RUSTCHAT_DB_BACKEND:-sqlite}
+      DATABASE_URL: ${RUSTCHAT_DATABASE_URL:-sqlite:///data/db/rustchat.db}
       BIND_ADDR: 0.0.0.0:3080
       # Required (>= 32 chars). Compose fails fast with a clear message if unset.
       JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in deploy/.env (openssl rand -base64 48)}
@@ -87,6 +100,8 @@ services:
     ports:
       - "3080:3080"
     volumes:
+      # SQLite database (when DB_BACKEND=sqlite) and uploaded files.
+      - sqlite_data:/data/db
       - file_data:/data/files
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -207,6 +222,7 @@ services:
       S3_BUCKET: ${S3_BUCKET:-rustchat}
 
 volumes:
+  sqlite_data:
   pgdata:
   file_data:
   minio_data:

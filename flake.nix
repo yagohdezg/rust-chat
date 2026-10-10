@@ -36,11 +36,14 @@
 
           shellHook = ''
             export PGDATA="$PWD/.dev/pgdata"
-            export DATABASE_URL="''${DATABASE_URL:-postgres://rustchat:rustchat@localhost:5432/rustchat}"
+            # DB_BACKEND / DATABASE_URL are read from .env (see .env.example),
+            # so the local backend is chosen in one place. Do not export
+            # DATABASE_URL here: dotenvy does not override the environment, so a
+            # value set here would shadow .env.
             echo "rust-chat dev shell"
             echo "  rustc: $(rustc --version 2>/dev/null || echo 'n/a')"
-            echo "  DATABASE_URL=$DATABASE_URL"
-            echo "  start db: just db-up   ·   cargo check: cargo check"
+            echo "  db: backend from .env (.env.example defaults to sqlite)"
+            echo "  start postgres: just db-up   ·   cargo check: cargo check"
           '';
         };
       });
