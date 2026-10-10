@@ -1,0 +1,38 @@
+# rustchat.yaml — optional declarative deployment config.
+#
+# Copy to /etc/rustchat/rustchat.yaml (or set RUSTCHAT_CONFIG) and edit. The file
+# is a read-only base layer: environment variables and runtime/DB state override
+# it. A missing file is fine. Since it is meant to be baked into an image or
+# mounted from a ConfigMap, it is multi-replica safe — never put secrets here.
+# Provider API keys still resolve from the DB/env via SECRET_ENCRYPTION_KEY.
+#
+# Values may reference the environment with ${VAR} or ${VAR:-default}; an unset
+# variable without a default fails boot. Unknown keys are rejected at boot.
+
+# Global providers and the models they advertise. These are the admin/global
+# providers every user inherits (personal providers are still created via the
+# API). `kind` is `openai`, `anthropic` or `custom`.
+providers:
+  - name: openai
+    kind: openai
+    base_url: https://api.openai.com/v1
+    models:
+      - gpt-4o
+      - gpt-4o-mini
+  - name: local
+    kind: custom
+    base_url: ${OLLAMA_BASE_URL:-http://localhost:11434/v1}
+    # Omit `models` to discover them at runtime.
+
+# Base provider + model used when the request, agent and the user's own
+# providers name none. Must reference a provider declared above, and (when that
+# provider lists models) one of its models.
+defaults:
+  provider: openai
+  model: gpt-4o-mini
+
+# Provider + model used to auto-generate conversation titles from the first
+# exchange. Omit to disable title generation.
+title_model:
+  provider: openai
+  model: gpt-4o-mini

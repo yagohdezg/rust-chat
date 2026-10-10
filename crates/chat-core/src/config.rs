@@ -2,6 +2,8 @@ use std::env;
 
 use serde::{Deserialize, Serialize};
 
+use crate::file_config::FileConfig;
+
 /// Which relational backend to persist to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -170,6 +172,10 @@ pub struct Config {
     pub sandbox_tool_enabled: bool,
     /// Maximum tool iterations the agent loop may run per chat turn.
     pub agent_max_iterations: usize,
+
+    /// Parsed `rustchat.yaml` (path from `RUSTCHAT_CONFIG`). This is the base
+    /// layer: environment variables and runtime/DB state override it.
+    pub file: FileConfig,
 }
 
 use crate::error::ChatError;
@@ -239,6 +245,9 @@ impl Config {
     /// Load configuration from the process environment (and a local `.env` if present).
     pub fn from_env() -> Result<Self, ChatError> {
         let _ = dotenvy::dotenv();
+
+        // Optional declarative base layer; env/runtime state override it.
+        let file = FileConfig::load()?;
 
         let database_url = var("DATABASE_URL")
             .ok_or_else(|| ChatError::Config("DATABASE_URL is required".into()))?;
@@ -328,6 +337,8 @@ impl Config {
             agent_max_iterations: var("AGENT_MAX_ITERATIONS")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(6),
+
+            file,
         })
     }
 
