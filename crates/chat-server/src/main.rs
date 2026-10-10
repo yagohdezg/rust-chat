@@ -1,3 +1,4 @@
+mod doctext;
 mod error;
 mod extract;
 mod rate_limit;

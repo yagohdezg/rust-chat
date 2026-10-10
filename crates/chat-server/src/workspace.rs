@@ -61,10 +61,12 @@ impl FileWorkspace {
         Ok(inputs)
     }
 
-    /// Load the conversation's attached text files as a prompt preamble.
+    /// Load the conversation's attached files as a prompt preamble.
     ///
-    /// Non-text (binary) files are skipped, and each file is truncated to keep
-    /// the prompt bounded. Returns `None` when nothing usable is attached.
+    /// Text files are decoded directly and common document formats (PDF, DOCX,
+    /// XLSX, PPTX, HTML) are parsed to text. Each file is truncated to keep the
+    /// prompt bounded; unsupported formats are skipped. Returns `None` when
+    /// nothing usable is attached.
     pub async fn attachment_context(
         &self,
         user_id: Uuid,
@@ -87,8 +89,8 @@ impl FileWorkspace {
                     continue;
                 }
             };
-            let Some(text) = crate::text::decode_text(&bytes) else {
-                continue; // only text-like files are inlined
+            let Some(text) = extract_attachment_text(&record.filename, bytes).await else {
+                continue; // unsupported or unreadable format
             };
 
             if included == 0 {
@@ -180,6 +182,32 @@ impl FileWorkspace {
     pub async fn delete_blob(&self, file: &FileRecord) {
         if let Err(err) = self.files.delete(&file.storage_path).await {
             tracing::warn!(error = %err, file = %file.id, "failed to delete stored blob");
+        }
+    }
+}
+
+/// Decode a file to text for inlining: try text codecs first (cheap), then fall
+/// back to a size-capped document parser on a blocking thread so a large PDF or
+/// office file never stalls the async runtime.
+async fn extract_attachment_text(filename: &str, bytes: Vec<u8>) -> Option<String> {
+    if let Some(text) = crate::text::decode_text(&bytes) {
+        return Some(text);
+    }
+    if bytes.len() > crate::doctext::MAX_PARSE_BYTES {
+        tracing::warn!(file = %filename, bytes = bytes.len(), "attachment too large to parse");
+        return None;
+    }
+    let name = filename.to_string();
+    let task = tokio::task::spawn_blocking(move || crate::doctext::extract_text(&name, &bytes));
+    match tokio::time::timeout(std::time::Duration::from_secs(20), task).await {
+        Ok(Ok(text)) => text,
+        Ok(Err(err)) => {
+            tracing::warn!(error = %err, file = %filename, "document parse failed");
+            None
+        }
+        Err(_) => {
+            tracing::warn!(file = %filename, "document parse timed out");
+            None
         }
     }
 }
