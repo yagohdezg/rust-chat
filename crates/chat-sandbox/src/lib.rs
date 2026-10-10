@@ -7,11 +7,13 @@
 //! [`SandboxBackend`].
 
 pub mod boxlite;
+pub mod egress;
 pub mod http;
 
 use serde::{Deserialize, Serialize};
 
 pub use boxlite::BoxliteBackend;
+pub use egress::{parse_egress_allow, validate_egress_allow};
 pub use http::HttpSandboxBackend;
 
 /// Strength of the isolation boundary around a sandboxed run.
@@ -37,6 +39,8 @@ pub struct SandboxSpec {
     /// Whether the sandbox may reach the network. Defaults to `false`.
     #[serde(default)]
     pub network: bool,
+    #[serde(default)]
+    pub egress_allow: Vec<String>,
 }
 
 impl Default for SandboxSpec {
@@ -47,6 +51,7 @@ impl Default for SandboxSpec {
             memory_mb: 512,
             cpus: 1.0,
             network: false,
+            egress_allow: Vec::new(),
         }
     }
 }

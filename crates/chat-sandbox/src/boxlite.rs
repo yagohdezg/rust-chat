@@ -112,15 +112,22 @@ impl BoxliteBackend {
 
     async fn create_box(&self, prefix: &str) -> Result<String, SandboxError> {
         let url = self.endpoint(prefix, "boxes");
+        let outbound = if self.spec.network {
+            let mut outbound = serde_json::json!({ "mode": "enabled" });
+            if !self.spec.egress_allow.is_empty() {
+                outbound["allow_net"] = serde_json::json!(self.spec.egress_allow);
+            }
+            outbound
+        } else {
+            serde_json::json!({ "mode": "disabled" })
+        };
         let body = serde_json::json!({
             "image": self.spec.image.clone(),
             "cpus": self.spec.cpus.round().max(1.0) as u32,
             "memory_mib": self.spec.memory_mb.max(128),
             "detach": false,
             "auto_delete": 0,
-            "network": {
-                "outbound": { "mode": if self.spec.network { "enabled" } else { "disabled" } }
-            },
+            "network": { "outbound": outbound },
         });
         let resp = self
             .auth(self.http.post(url))

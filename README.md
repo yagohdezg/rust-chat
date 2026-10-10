@@ -273,6 +273,13 @@ See [`.env.example`](.env.example).
 `SANDBOX_IMAGE` (`python:3.12-slim`), `SANDBOX_TIMEOUT_SECONDS` (`30`),
 `SANDBOX_MEMORY_MB` (`512`), `SANDBOX_CPUS` (`1`).
 
+Egress is denied by default. Set `SANDBOX_NETWORK=true` to allow outbound
+traffic, and optionally `SANDBOX_EGRESS_ALLOW` (comma-separated IPv4, IPv4 CIDR,
+hostname or `*.wildcard`, at most 10) to restrict it to an allow-list; other
+hosts are sinkholed and the box logs the block. `SANDBOX_EGRESS_ALLOW` requires
+`SANDBOX_NETWORK=true`. The policy applies to every box `sandboxd` creates,
+including per-user computers, so it is a per-node/per-deployment control.
+
 ## HTTP API
 
 | Method | Path                                | Auth | Description                          |
