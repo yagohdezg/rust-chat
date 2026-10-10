@@ -58,6 +58,27 @@ async fn main() -> anyhow::Result<()> {
         .ok()
         .filter(|t| !t.trim().is_empty());
 
+    let network = std::env::var("SANDBOX_NETWORK")
+        .ok()
+        .map(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false);
+    let egress_allow = chat_sandbox::parse_egress_allow(
+        &std::env::var("SANDBOX_EGRESS_ALLOW").unwrap_or_default(),
+    );
+    chat_sandbox::validate_egress_allow(&egress_allow)
+        .map_err(|e| anyhow::anyhow!("invalid SANDBOX_EGRESS_ALLOW: {e}"))?;
+    if !network && !egress_allow.is_empty() {
+        return Err(anyhow::anyhow!(
+            "SANDBOX_EGRESS_ALLOW is set but SANDBOX_NETWORK is false; \
+             set SANDBOX_NETWORK=true to enable egress"
+        ));
+    }
+
     let spec = SandboxSpec {
         image: std::env::var("SANDBOX_IMAGE").unwrap_or_else(|_| "python:3.12-slim".into()),
         timeout_seconds: std::env::var("SANDBOX_TIMEOUT_SECONDS")
@@ -72,14 +93,28 @@ async fn main() -> anyhow::Result<()> {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(1.0),
-        network: false,
+        network,
+        egress_allow,
     };
 
     let backend = Arc::new(BoxliteBackend::new(boxlite_url, boxlite_token, spec));
 
     let bind_addr = std::env::var("SANDBOXD_BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:3081".into());
 
-    tracing::info!(backend = backend.name(), isolation = ?backend.isolation(), "sandboxd ready");
+    let egress = if !network {
+        "denied"
+    } else if backend.spec().egress_allow.is_empty() {
+        "unrestricted"
+    } else {
+        "allow-list"
+    };
+    tracing::info!(
+        backend = backend.name(),
+        isolation = ?backend.isolation(),
+        egress,
+        allow_net = ?backend.spec().egress_allow,
+        "sandboxd ready"
+    );
 
     let state = AppState {
         backend,
