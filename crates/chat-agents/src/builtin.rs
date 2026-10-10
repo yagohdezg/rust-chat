@@ -8,12 +8,21 @@ use chat_sandbox::{ExecRequest, ExecResult, SandboxBackend};
 use crate::tool::{Tool, UserSandbox};
 
 const DESCRIPTION: &str =
-    "Execute code in an isolated sandbox and return stdout/stderr and the exit code. \
-     Network access is disabled. Use this for calculations, data processing and file generation.";
+    "Execute code in an isolated Linux sandbox (no network access) and return stdout, stderr and \
+     the exit code. Call this whenever a task needs computation, data analysis or transformation, \
+     or when producing a file — never guess numeric results or claim to have run code without \
+     calling this tool. The conversation's attached files are already available in the working \
+     directory /app; write any file you want to hand back to the user into /app/output so it is \
+     saved to their file library. Supported languages include python, javascript, bash, go and rust.";
 
-const PERSISTENT_DESCRIPTION: &str = "Execute code in the caller's persistent sandbox workspace and return \
-     stdout/stderr and the exit code. Files and installed packages persist between calls, so this is the \
-     place to do multi-step work. Network access is disabled.";
+const PERSISTENT_DESCRIPTION: &str =
+    "Execute code in the caller's persistent sandbox workspace: an isolated Linux environment \
+     (no network access) where files and installed packages persist between calls, so this is the \
+     place to do multi-step work. Call this whenever a task needs computation, data analysis or \
+     transformation, or when producing a file — never guess numeric results or claim to have run \
+     code without calling this tool. The conversation's attached files are already available in \
+     /app; write any file you want to hand back to the user into /app/output so it is saved to \
+     their file library. Supported languages include python, javascript, bash, go and rust.";
 
 /// A tool that runs model-generated code in the configured [`SandboxBackend`].
 pub struct CodeInterpreterTool {

@@ -712,6 +712,44 @@ impl Store for PostgresStore {
         Ok(row)
     }
 
+    async fn begin_turn(
+        &self,
+        conversation_id: Uuid,
+        user_content: &str,
+    ) -> Result<(Vec<Message>, Message)> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            "insert into messages (id, conversation_id, role, content, status, created_at)
+             values ($1, $2, 'user', $3, $4, $5)",
+        )
+        .bind(Uuid::new_v4())
+        .bind(conversation_id)
+        .bind(user_content)
+        .bind(chat_store::types::message_status::COMPLETE)
+        .bind(Utc::now())
+        .execute(&mut *tx)
+        .await?;
+        let history = sqlx::query_as::<_, Message>(
+            "select * from messages where conversation_id = $1 order by created_at asc limit 1000",
+        )
+        .bind(conversation_id)
+        .fetch_all(&mut *tx)
+        .await?;
+        let placeholder = sqlx::query_as::<_, Message>(
+            "insert into messages (id, conversation_id, role, content, status, created_at)
+             values ($1, $2, 'assistant', '', $3, $4)
+             returning *",
+        )
+        .bind(Uuid::new_v4())
+        .bind(conversation_id)
+        .bind(chat_store::types::message_status::STREAMING)
+        .bind(Utc::now())
+        .fetch_one(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok((history, placeholder))
+    }
+
     async fn update_message_content(&self, id: Uuid, content: &str, status: &str) -> Result<()> {
         sqlx::query("update messages set content = $2, status = $3 where id = $1")
             .bind(id)

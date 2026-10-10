@@ -37,6 +37,15 @@ impl SqliteStore {
             .map_err(|e| ChatError::Config(format!("invalid SQLite URL: {e}")))?
             .create_if_missing(true)
             .foreign_keys(true);
+        // `create_if_missing` creates the file but not its directory; make the
+        // parent so a fresh path like `sqlite://./.data/rustchat.db` just works.
+        if let Some(parent) = options.get_filename().parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent).map_err(|e| {
+                    ChatError::Config(format!("failed to create SQLite directory: {e}"))
+                })?;
+            }
+        }
         let pool = SqlitePoolOptions::new()
             .max_connections(5)
             .acquire_timeout(std::time::Duration::from_secs(10))
@@ -735,6 +744,44 @@ impl Store for SqliteStore {
         .fetch_one(&self.pool)
         .await?;
         Ok(row)
+    }
+
+    async fn begin_turn(
+        &self,
+        conversation_id: Uuid,
+        user_content: &str,
+    ) -> Result<(Vec<Message>, Message)> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            "insert into messages (id, conversation_id, role, content, status, created_at)
+             values (?, ?, 'user', ?, ?, ?)",
+        )
+        .bind(Uuid::new_v4())
+        .bind(conversation_id)
+        .bind(user_content)
+        .bind(chat_store::types::message_status::COMPLETE)
+        .bind(Utc::now())
+        .execute(&mut *tx)
+        .await?;
+        let history = sqlx::query_as::<_, Message>(
+            "select * from messages where conversation_id = ? order by created_at asc limit 1000",
+        )
+        .bind(conversation_id)
+        .fetch_all(&mut *tx)
+        .await?;
+        let placeholder = sqlx::query_as::<_, Message>(
+            "insert into messages (id, conversation_id, role, content, status, created_at)
+             values (?, ?, 'assistant', '', ?, ?)
+             returning *",
+        )
+        .bind(Uuid::new_v4())
+        .bind(conversation_id)
+        .bind(chat_store::types::message_status::STREAMING)
+        .bind(Utc::now())
+        .fetch_one(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok((history, placeholder))
     }
 
     async fn update_message_content(&self, id: Uuid, content: &str, status: &str) -> Result<()> {

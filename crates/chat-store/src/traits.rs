@@ -212,6 +212,17 @@ pub trait Store: Send + Sync {
         status: &str,
     ) -> Result<Message>;
 
+    /// Atomically start a chat turn: append the user's message, read the
+    /// conversation's history (including it), and create the assistant
+    /// streaming placeholder. Returns the history to send to the model and the
+    /// placeholder row. Running all three in one transaction means a failure
+    /// leaves no partial turn behind.
+    async fn begin_turn(
+        &self,
+        conversation_id: Uuid,
+        user_content: &str,
+    ) -> Result<(Vec<Message>, Message)>;
+
     /// Replace a message's content and status (used to checkpoint a stream).
     async fn update_message_content(&self, id: Uuid, content: &str, status: &str) -> Result<()>;
 

@@ -43,6 +43,17 @@ const PERSIST_EVERY_BYTES: usize = 256;
 /// request triggers a refresh from the upstream `/models` endpoint.
 const MODEL_CATALOG_TTL_SECONDS: i64 = 3600;
 
+/// System message injected whenever the `execute_code` sandbox is enabled, so
+/// the model knows when to call it and where the conversation's files live.
+const SANDBOX_SYSTEM_PROMPT: &str = "\
+You have an `execute_code` tool that runs code in an isolated Linux sandbox with no network \
+access. Prefer calling it over guessing: use it for any arithmetic, data analysis, or file \
+generation or conversion. The conversation's attached files are already present in the working \
+directory (/app). Write any file you want to hand back to the user into /app/output — those are \
+saved to the user's file library automatically; do not base64-encode file contents into your \
+reply. Supported languages include python, javascript, bash, go and rust. After each call, read \
+stdout and stderr and iterate until you have the answer.";
+
 // ---- health ---------------------------------------------------------------
 
 pub async fn health() -> &'static str {
@@ -1309,31 +1320,13 @@ pub async fn chat(
         .get_conversation(body.conversation_id, user.id)
         .await?;
 
-    state
-        .store
-        .insert_message(conversation.id, "user", Some(&body.content), None, None)
-        .await?;
-
-    let history = state.store.list_messages(conversation.id).await?;
-    let mut messages: Vec<ChatMessage> = history
-        .iter()
-        .filter(|m| m.status != message_status::STREAMING)
-        .map(|m| ChatMessage {
-            role: m.role.clone(),
-            content: m.content.clone().unwrap_or_default(),
-            tool_calls: m.tool_calls.as_ref().map(|calls| calls.0.clone()),
-            tool_call_id: m.tool_call_id.clone(),
-            name: None,
-        })
-        .collect();
-
-    let requested_model = body.model;
+    let requested_model = body.model.clone();
     let requested_provider = body.provider_id;
 
     // Route through the agent loop when the conversation has an agent attached
-    // or any tools are registered; otherwise keep the lean single-shot path.
-    // Resolve the agent *before* persisting the placeholder so a missing or
-    // foreign agent fails the request without leaving a dangling stream.
+    // or any tools are registered; otherwise use the lean single-shot path.
+    // Resolve the agent *before* writing anything so a missing or foreign agent
+    // fails the request without leaving a dangling stream.
     let use_agent = !state.tools.is_empty() || conversation.agent_id.is_some();
     let resolved = if use_agent {
         Some(
@@ -1350,80 +1343,51 @@ pub async fn chat(
         None
     };
 
-    // Build the leading system preamble(s), in order: the bound agent's
-    // instructions, then the contents of the conversation's attached
-    // documents. Attached text-like files are inlined directly so the model
-    // reads them as part of the prompt. (The agent runtime only auto-injects
-    // its system prompt when the first message is not already a system message,
-    // so the agent instructions must lead.)
-    let mut preambles: Vec<String> = Vec::new();
-    if let Some(resolved) = &resolved {
-        if let Some(system) = resolved
-            .config
-            .system
-            .clone()
-            .filter(|s| !s.trim().is_empty())
-        {
-            preambles.push(system);
-        }
-    }
+    // Resolve the plain provider/model up front too, so an unconfigured
+    // provider fails before the turn is written.
+    let plain = if resolved.is_none() {
+        let provider = match requested_provider {
+            Some(provider_id) => resolve_provider(&state, provider_id, user.id).await?,
+            None => default_provider(&state, user.id).await?,
+        };
+        let model = pick_model(provider.as_ref(), requested_model).await?;
+        Some((provider, model))
+    } else {
+        None
+    };
 
-    match state
-        .workspace
-        .attachment_context(user.id, conversation.id)
-        .await
-    {
-        Ok(Some(context)) => preambles.push(context),
-        Ok(None) => {}
-        Err(err) => tracing::warn!(error = %err, "failed to load attachment context"),
-    }
-
-    for preamble in preambles.into_iter().rev() {
-        messages.insert(0, ChatMessage::system(preamble));
-    }
-
-    // Persist an assistant placeholder first so partial output survives a
-    // client disconnect, then run generation in a detached task.
-    let assistant = state
+    // Record the turn atomically: the user message, the history to send to the
+    // model, and the assistant placeholder all land in one transaction so a
+    // crash never leaves a half-written turn.
+    let (history, assistant) = state
         .store
-        .insert_message_with_status(
-            conversation.id,
-            "assistant",
-            Some(""),
-            None,
-            None,
-            message_status::STREAMING,
-        )
+        .begin_turn(conversation.id, &body.content)
         .await?;
     let message_id = assistant.id;
+
+    let ctx = TurnContext {
+        history,
+        user_id: user.id,
+        conversation_id: conversation.id,
+        system: resolved.as_ref().and_then(|r| r.config.system.clone()),
+    };
 
     let tx = state.hub.open(message_id);
     let rx = state.hub.subscribe(message_id).expect("just opened");
 
-    match resolved {
-        Some(resolved) => spawn_agent_generation(
-            state.clone(),
-            message_id,
-            conversation.id,
-            resolved,
-            messages,
-            tx,
-        ),
-        None => {
-            let provider = match requested_provider {
-                Some(provider_id) => resolve_provider(&state, provider_id, user.id).await?,
-                None => default_provider(&state, user.id).await?,
-            };
-            let model = pick_model(provider.as_ref(), requested_model).await?;
+    match (resolved, plain) {
+        (Some(resolved), _) => spawn_agent_generation(state.clone(), message_id, ctx, resolved, tx),
+        (None, Some((provider, model))) => {
             let request = ChatRequest {
                 model,
-                messages,
+                messages: Vec::new(),
                 temperature: None,
                 max_tokens: None,
                 tools: None,
             };
-            spawn_generation(provider, state.clone(), message_id, request, tx);
+            spawn_generation(provider, state.clone(), message_id, ctx, request, tx);
         }
+        (None, None) => unreachable!("either an agent or a plain provider is resolved"),
     }
 
     let meta = json!({
@@ -1525,18 +1489,74 @@ pub async fn resume_stream(
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
 
+/// The persisted history and context needed to assemble a turn's prompt.
+///
+/// The model history, the bound agent's system prompt, and the conversation's
+/// attached-document preamble are combined inside the detached generation task
+/// (see [`build_turn_messages`]) so file parsing never blocks the HTTP response.
+struct TurnContext {
+    history: Vec<Message>,
+    user_id: Uuid,
+    conversation_id: Uuid,
+    system: Option<String>,
+}
+
+/// Assemble the leading system preamble(s) and the conversation history into
+/// the message list for a provider request.
+///
+/// Order: the bound agent's instructions, then the attached-document context,
+/// then the stored history. Attached text-like and document files are inlined;
+/// extraction runs on a blocking thread and is size-capped. (The agent runtime
+/// only auto-injects its system prompt when the first message is not already a
+/// system message, so the agent instructions must lead.)
+async fn build_turn_messages(state: &AppState, ctx: &TurnContext) -> Vec<ChatMessage> {
+    let mut messages: Vec<ChatMessage> = ctx
+        .history
+        .iter()
+        .filter(|m| m.status != message_status::STREAMING)
+        .map(|m| ChatMessage {
+            role: m.role.clone(),
+            content: m.content.clone().unwrap_or_default(),
+            tool_calls: m.tool_calls.as_ref().map(|calls| calls.0.clone()),
+            tool_call_id: m.tool_call_id.clone(),
+            name: None,
+        })
+        .collect();
+
+    let mut preambles: Vec<String> = Vec::new();
+    if let Some(system) = ctx.system.clone().filter(|s| !s.trim().is_empty()) {
+        preambles.push(system);
+    }
+    match state
+        .workspace
+        .attachment_context(ctx.user_id, ctx.conversation_id)
+        .await
+    {
+        Ok(Some(context)) => preambles.push(context),
+        Ok(None) => {}
+        Err(err) => tracing::warn!(error = %err, "failed to load attachment context"),
+    }
+
+    for preamble in preambles.into_iter().rev() {
+        messages.insert(0, ChatMessage::system(preamble));
+    }
+    messages
+}
+
 /// Spawn generation so it continues (and persists) even if the client
 /// disconnects. Terminates the watch channel with a single terminal state.
 fn spawn_generation(
     provider: Arc<dyn LlmProvider>,
     state: Arc<AppState>,
     message_id: Uuid,
-    request: ChatRequest,
+    ctx: TurnContext,
+    mut request: ChatRequest,
     tx: watch::Sender<StreamState>,
 ) {
     tokio::spawn(async move {
         let store = state.store.clone();
         let hub = state.hub.clone();
+        request.messages = build_turn_messages(&state, &ctx).await;
         match generate(provider.as_ref(), request, &tx, &store, message_id).await {
             Ok(content) => {
                 if let Err(err) = store
@@ -1611,7 +1631,10 @@ async fn resolve_agent(
 
     let mut system = None;
     let mut model = requested_model.map(str::to_string);
-    let mut tools = ToolRegistry::new();
+    // Start from the process-wide registry (populated when
+    // `SANDBOX_TOOL_ENABLED` is on), so a plain conversation still gets the code
+    // interpreter. An agent narrows this to its own tool list below.
+    let mut tools = state.tools.clone();
     let mut wants_code = false;
     if let Some(agent) = &agent {
         if let Some(agent_model) = agent.model.clone().filter(|m| !m.trim().is_empty()) {
@@ -1648,6 +1671,15 @@ async fn resolve_agent(
             user_id,
             conversation.id,
         ));
+
+        // Tell the model when and how to use the sandbox. Appended after the
+        // agent's own instructions so the agent stays in control of persona.
+        system = Some(match system.take() {
+            Some(existing) if !existing.trim().is_empty() => {
+                format!("{existing}\n\n{SANDBOX_SYSTEM_PROMPT}")
+            }
+            _ => SANDBOX_SYSTEM_PROMPT.to_string(),
+        });
     }
 
     let model = pick_model(provider.as_ref(), model).await?;
@@ -1708,14 +1740,14 @@ async fn pick_model(
 fn spawn_agent_generation(
     state: Arc<AppState>,
     message_id: Uuid,
-    conversation_id: Uuid,
+    ctx: TurnContext,
     resolved: ResolvedAgent,
-    messages: Vec<ChatMessage>,
     tx: watch::Sender<StreamState>,
 ) {
     tokio::spawn(async move {
         let store = state.store.clone();
         let hub = state.hub.clone();
+        let conversation_id = ctx.conversation_id;
         let mut events: Vec<SseEvent> = Vec::new();
         let mut accumulated = String::new();
         let mut last_persist = 0usize;
@@ -1727,6 +1759,7 @@ fn spawn_agent_generation(
             config,
             tools,
         } = resolved;
+        let messages = build_turn_messages(&state, &ctx).await;
         let mut stream = run_agent_stream(provider, tools, config, messages);
 
         while let Some(item) = stream.next().await {
