@@ -52,7 +52,14 @@ generation or conversion. The conversation's attached files are already present 
 directory (/app). Write any file you want to hand back to the user into /app/output — those are \
 saved to the user's file library automatically; do not base64-encode file contents into your \
 reply. Supported languages include python, javascript, bash, go and rust. After each call, read \
-stdout and stderr and iterate until you have the answer.";
+stdout and stderr and iterate until you have the answer.
+
+Your replies are rendered as GitHub-flavored Markdown, and mathematical LaTeX is rendered in the \
+chat itself (KaTeX). Write math directly in your reply instead of producing a file: use $...$ for \
+inline math and $$...$$ for display math, and only the LaTeX math constructs KaTeX supports (e.g. \
+aligned, array, cases, matrix — not align, equation or other full-document environments). Do not \
+compile LaTeX to PDF or images, and do not emit a full LaTeX document, unless the user explicitly \
+asks for a downloadable file; in that case put it in /app/output.";
 
 // ---- health ---------------------------------------------------------------
 
