@@ -122,6 +122,22 @@
 	.markdown :global(input[type='checkbox']) {
 		margin-right: 0.4em;
 	}
+	.markdown :global(.katex) {
+		color: inherit;
+		font-size: 1.05em;
+	}
+	.markdown :global(.katex .katex-mathml) {
+		user-select: none;
+	}
+	.markdown :global(.katex-display) {
+		margin: 0.7em 0;
+		overflow-x: auto;
+		overflow-y: hidden;
+		padding: 0.1em 0;
+	}
+	.markdown :global(.katex-display > .katex) {
+		font-size: 1.15em;
+	}
 
 	.markdown :global(.hljs-comment),
 	.markdown :global(.hljs-quote) {
