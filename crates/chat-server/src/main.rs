@@ -63,6 +63,8 @@ async fn main() -> anyhow::Result<()> {
     }
     tracing::info!(backend = ?cfg.database_backend, "relational store ready");
 
+    sync_file_providers(&store, &cfg).await?;
+
     // Uploaded-file storage: local disk (dev/single replica) or S3.
     let files: Arc<dyn FileStore> = match cfg.file_storage_kind {
         FileStorageKind::Local => Arc::new(LocalFileStore::new(&cfg.file_storage_dir)),
@@ -317,6 +319,32 @@ async fn connect_store(
             Ok(Arc::new(db))
         }
     }
+}
+
+/// Upsert global providers declared in `rustchat.yaml`. Idempotent: reruns
+/// converge, and providers absent from the file are left untouched. API keys
+/// are never read from the file (only `SecretCipher`-sealed DB credentials).
+async fn sync_file_providers(store: &Arc<dyn Store>, cfg: &Config) -> anyhow::Result<()> {
+    if cfg.file.providers.is_empty() {
+        return Ok(());
+    }
+    for provider in &cfg.file.providers {
+        store
+            .upsert_global_provider(
+                &provider.name,
+                &provider.kind,
+                &provider.base_url,
+                &provider.models,
+            )
+            .await?;
+        tracing::info!(
+            provider = %provider.name,
+            kind = %provider.kind,
+            models = provider.models.len(),
+            "synced global provider from rustchat.yaml"
+        );
+    }
+    Ok(())
 }
 
 /// Background loop that destroys idle computers and tops up the warm pool.

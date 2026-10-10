@@ -876,7 +876,8 @@ fn conflict_on_unique(err: ChatError, message: &str) -> ApiError {
 }
 
 /// The provider to use when neither the request nor an agent names one: the
-/// caller's first own provider, else the first admin-provided global one.
+/// caller's first own provider, else the file-declared default global, else the
+/// first admin-provided global one.
 async fn default_provider(
     state: &AppState,
     user_id: Uuid,
@@ -888,12 +889,35 @@ async fn default_provider(
 /// The stored row behind [`default_provider`], for callers that need the id
 /// (e.g. the cached model catalog).
 async fn default_provider_row(state: &AppState, user_id: Uuid) -> Result<Provider, ApiError> {
-    state
-        .store
-        .list_providers(user_id)
-        .await?
+    Ok(default_provider_choice(state, user_id).await?.0)
+}
+
+/// Resolve the fallback provider when neither the request nor an agent names
+/// one: the user's first own provider, else the global named by
+/// `rustchat.yaml`'s `defaults:`, else the first global. The second element is
+/// `defaults.model` when the chosen provider is the one `defaults:` names, so
+/// the caller can use it as the model fallback.
+async fn default_provider_choice(
+    state: &AppState,
+    user_id: Uuid,
+) -> Result<(Provider, Option<String>), ApiError> {
+    // `list_providers` orders own providers first, then globals oldest-first.
+    let providers = state.store.list_providers(user_id).await?;
+    if let Some(own) = providers.iter().find(|p| p.user_id == Some(user_id)) {
+        return Ok((own.clone(), None));
+    }
+    if let Some(defaults) = &state.cfg.file.defaults {
+        if let Some(global) = providers
+            .iter()
+            .find(|p| p.user_id.is_none() && p.name == defaults.provider)
+        {
+            return Ok((global.clone(), Some(defaults.model.clone())));
+        }
+    }
+    providers
         .into_iter()
-        .next()
+        .find(|p| p.user_id.is_none())
+        .map(|provider| (provider, None))
         .ok_or_else(|| ChatError::ProviderNotConfigured.into())
 }
 
@@ -1346,11 +1370,14 @@ pub async fn chat(
     // Resolve the plain provider/model up front too, so an unconfigured
     // provider fails before the turn is written.
     let plain = if resolved.is_none() {
-        let provider = match requested_provider {
-            Some(provider_id) => resolve_provider(&state, provider_id, user.id).await?,
-            None => default_provider(&state, user.id).await?,
+        let (provider, fallback_model) = match requested_provider {
+            Some(provider_id) => (resolve_provider(&state, provider_id, user.id).await?, None),
+            None => {
+                let (row, fallback) = default_provider_choice(&state, user.id).await?;
+                (build_provider(&state, &row, user.id).await?, fallback)
+            }
         };
-        let model = pick_model(provider.as_ref(), requested_model).await?;
+        let model = pick_model(provider.as_ref(), requested_model.or(fallback_model)).await?;
         Some((provider, model))
     } else {
         None
@@ -1620,12 +1647,17 @@ async fn resolve_agent(
     };
 
     // Provider: the explicitly requested one, else the agent's own, else the
-    // user's default (own, then global).
+    // default (own, then the file-declared default global, then first global).
+    let mut file_default_model: Option<String> = None;
     let provider = match requested_provider {
         Some(provider_id) => resolve_provider(state, provider_id, user_id).await?,
         None => match agent.as_ref().and_then(|agent| agent.provider_id) {
             Some(provider_id) => resolve_provider(state, provider_id, user_id).await?,
-            None => default_provider(state, user_id).await?,
+            None => {
+                let (row, fallback) = default_provider_choice(state, user_id).await?;
+                file_default_model = fallback;
+                build_provider(state, &row, user_id).await?
+            }
         },
     };
 
@@ -1682,6 +1714,9 @@ async fn resolve_agent(
         });
     }
 
+    if model.is_none() {
+        model = file_default_model;
+    }
     let model = pick_model(provider.as_ref(), model).await?;
     let config = AgentConfig {
         model,
