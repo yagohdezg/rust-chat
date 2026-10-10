@@ -1,6 +1,65 @@
 import * as api from './api';
 import { auth } from './auth.svelte';
 
+/** One tool interaction inside an assistant turn. */
+export type ToolStep =
+	| { kind: 'call'; id: string; name: string; args: string }
+	| { kind: 'result'; id: string; name: string; content: string };
+
+/** A message as held in the client, optionally carrying tool steps. */
+type ThreadMessage = api.Message & { steps?: ToolStep[] };
+
+/**
+ * Fold persisted tool turns into `steps` on the assistant message that produced
+ * them, so the view can render one bubble per assistant turn. `tool` rows and
+ * intermediate tool-call assistant rows are consumed; their content is merged
+ * into the last assistant turn.
+ */
+function withToolSteps(messages: api.Message[]): ThreadMessage[] {
+	const out: ThreadMessage[] = [];
+	let last: ThreadMessage | null = null;
+	for (const m of messages) {
+		if (m.role === 'user') {
+			out.push(m);
+			last = null;
+			continue;
+		}
+		if (m.role === 'tool') {
+			if (last) {
+				const id = m.tool_call_id ?? '';
+				const call = last.steps!.find((s) => s.kind === 'call' && s.id === id);
+				last.steps!.push({ kind: 'result', id, name: call?.name ?? '', content: m.content ?? '' });
+			}
+			continue;
+		}
+		if (m.role === 'assistant') {
+			const calls = Array.isArray(m.tool_calls) ? (m.tool_calls as api.ToolCall[]) : [];
+			if (calls.length > 0) {
+				const steps: ToolStep[] = calls.map((c) => ({
+					kind: 'call',
+					id: c.id,
+					name: c.function?.name ?? '',
+					args: c.function?.arguments ?? ''
+				}));
+				if (last) {
+					last.steps!.push(...steps);
+					last.content = (last.content ?? '') + (m.content ?? '');
+				} else {
+					last = { ...m, steps };
+					out.push(last);
+				}
+			} else {
+				if (last) last.content = (last.content ?? '') + (m.content ?? '');
+				else out.push(m);
+				last = null;
+			}
+			continue;
+		}
+		out.push(m);
+	}
+	return out;
+}
+
 /**
  * Shared chat controller. Lives in a `.svelte.ts` module so the sidebar (in the
  * root layout) and the chat page read and mutate the same runes state.
@@ -18,7 +77,7 @@ class ChatStore {
 	providerId = $state<string>('');
 	/** Agent bound to the *next* conversation; applied when a chat is created. */
 	pendingAgentId = $state<string | null>(null);
-	messages = $state<api.Message[]>([]);
+	messages = $state<ThreadMessage[]>([]);
 	/** Files attached to the selected conversation. */
 	files = $state<api.FileRecord[]>([]);
 	/** The caller's whole personal library (for the attach picker). */
@@ -198,7 +257,7 @@ class ChatStore {
 		this.notice = null;
 		try {
 			const [messages, files] = await Promise.all([api.listMessages(id), api.listFiles(id)]);
-			this.messages = messages;
+			this.messages = withToolSteps(messages);
 			this.files = files;
 			this.ensureModel();
 			this.touch();
@@ -511,10 +570,12 @@ class ChatStore {
 		this.messages = [
 			...this.messages,
 			localMessage('user', text, conversationId),
-			localMessage('assistant', '', conversationId)
+			{ ...localMessage('assistant', '', conversationId), steps: [] }
 		];
 		// Read the proxied element back so streaming mutations stay reactive.
 		const assistant = this.messages[this.messages.length - 1];
+		const steps = assistant.steps!;
+		assistant.status = 'streaming';
 		this.streaming = true;
 		this.touch();
 
@@ -530,10 +591,32 @@ class ChatStore {
 					assistant.content = (assistant.content ?? '') + delta;
 					this.touch();
 				},
+				onToolCall: (calls) => {
+					for (const call of calls) {
+						steps.push({
+							kind: 'call',
+							id: call.id,
+							name: call.function?.name ?? '',
+							args: call.function?.arguments ?? ''
+						});
+					}
+					this.touch();
+				},
+				onToolResult: (result) => {
+					steps.push({
+						kind: 'result',
+						id: result.tool_call_id,
+						name: result.name,
+						content: result.content
+					});
+					this.touch();
+				},
 				onError: (err) => {
+					assistant.status = 'error';
 					this.error = message(err);
 				},
 				onDone: () => {
+					assistant.status = 'complete';
 					this.streaming = false;
 				}
 			}

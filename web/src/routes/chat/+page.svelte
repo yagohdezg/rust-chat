@@ -232,19 +232,52 @@
 				<p>Send a message to start the conversation.</p>
 			</div>
 		{/if}
-		{#each chat.messages as msg (msg.id)}
+		{#each chat.messages as msg, i (msg.id)}
 			<div class="msg {msg.role}">
 				<div class="avatar" aria-hidden="true">{msg.role === 'user' ? userInitials : 'AI'}</div>
 				<div class="bubble">
-					{#if msg.role !== 'user' && !msg.content && chat.streaming}
-						<span class="thinking" title="Thinking…">
-							<ThinkingOrb state="reasoning" size={22} label="Thinking" />
-							<span class="thinking-label">Thinking…</span>
-						</span>
-					{:else if msg.role === 'user'}
+					{#if msg.role === 'user'}
 						<div class="content">{msg.content}</div>
 					{:else}
-						<Markdown content={msg.content} />
+						{#if msg.steps && msg.steps.length > 0}
+							<div class="steps">
+								{#each msg.steps as step, j (j)}
+									{#if step.kind === 'call'}
+										<details class="step step-call">
+											<summary>
+												<span class="step-icon" aria-hidden="true">⌘</span>
+												<span class="step-title">{step.name || 'tool'}</span>
+												<span class="step-hint">call</span>
+											</summary>
+											{#if step.args}<pre class="step-body">{step.args}</pre>{/if}
+										</details>
+									{:else}
+										<details class="step step-result">
+											<summary>
+												<span class="step-icon" aria-hidden="true">✓</span>
+												<span class="step-title">{step.name || 'result'}</span>
+												<span class="step-hint">result</span>
+											</summary>
+											<pre class="step-body">{step.content}</pre>
+										</details>
+									{/if}
+								{/each}
+							</div>
+						{/if}
+						{#if msg.content}
+							<Markdown content={msg.content} />
+						{:else if i === chat.messages.length - 1 && chat.streaming}
+							<span class="thinking" title={msg.steps?.length ? 'Working…' : 'Thinking…'}>
+								<ThinkingOrb
+									state="reasoning"
+									size={22}
+									label={msg.steps?.length ? 'Working' : 'Thinking'}
+								/>
+								<span class="thinking-label">
+									{msg.steps?.length ? 'Working…' : 'Thinking…'}
+								</span>
+							</span>
+						{/if}
 					{/if}
 				</div>
 			</div>
@@ -683,6 +716,58 @@
 	.content {
 		white-space: pre-wrap;
 		overflow-wrap: anywhere;
+	}
+	.steps {
+		display: flex;
+		flex-direction: column;
+		gap: 0.35rem;
+		margin-bottom: 0.55rem;
+	}
+	.step {
+		border: 1px solid var(--border);
+		border-radius: calc(var(--radius) - 2px);
+		background: var(--surface-active);
+		font-size: 0.82rem;
+	}
+	.step > summary {
+		display: flex;
+		align-items: center;
+		gap: 0.45rem;
+		padding: 0.35rem 0.55rem;
+		cursor: pointer;
+		list-style: none;
+		color: var(--text-muted);
+	}
+	.step > summary::-webkit-details-marker {
+		display: none;
+	}
+	.step-icon {
+		font-size: 0.75rem;
+		color: var(--primary);
+	}
+	.step-title {
+		font-weight: 600;
+		color: var(--text);
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+	.step-hint {
+		margin-left: auto;
+		font-size: 0.7rem;
+		text-transform: uppercase;
+		letter-spacing: 0.04em;
+		color: var(--text-faint);
+	}
+	.step-body {
+		margin: 0;
+		padding: 0.5rem 0.55rem;
+		border-top: 1px solid var(--border);
+		white-space: pre-wrap;
+		overflow-wrap: anywhere;
+		max-height: 16rem;
+		overflow: auto;
+		color: var(--text-muted);
 	}
 
 	.composer {

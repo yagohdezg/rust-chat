@@ -21,6 +21,7 @@ export type Message = {
 	content?: string | null;
 	tool_calls?: unknown;
 	tool_call_id?: string | null;
+	status?: string;
 	created_at: string;
 };
 
@@ -66,6 +67,20 @@ export type CreateProviderInput = {
 };
 
 export type ModelInfo = { id: string; owned_by?: string | null };
+
+/** An OpenAI-style tool call emitted by the agent loop. */
+export type ToolCall = {
+	id: string;
+	type?: string;
+	function: { name: string; arguments: string };
+};
+
+/** The result of running a tool call, keyed by the originating call id. */
+export type ToolResult = {
+	tool_call_id: string;
+	name: string;
+	content: string;
+};
 
 export type ExecResult = {
 	exit_code: number;
@@ -466,6 +481,8 @@ export async function downloadFile(file: FileRecord): Promise<void> {
 
 export type StreamHandlers = {
 	onDelta?: (text: string) => void;
+	onToolCall?: (calls: ToolCall[]) => void;
+	onToolResult?: (result: ToolResult) => void;
 	onError?: (error: unknown) => void;
 	onDone?: () => void;
 };
@@ -541,7 +558,19 @@ export async function streamChat(
 				const event = parseFrame(frame);
 				if (!event) continue;
 				if (event.event === 'delta') handlers.onDelta?.(event.data);
-				else if (event.event === 'error') handlers.onError?.(new Error(event.data));
+				else if (event.event === 'tool_call') {
+					try {
+						handlers.onToolCall?.(JSON.parse(event.data) as ToolCall[]);
+					} catch {
+						// ignore malformed tool event
+					}
+				} else if (event.event === 'tool_result') {
+					try {
+						handlers.onToolResult?.(JSON.parse(event.data) as ToolResult);
+					} catch {
+						// ignore malformed tool event
+					}
+				} else if (event.event === 'error') handlers.onError?.(new Error(event.data));
 				else if (event.event === 'done') {
 					handlers.onDone?.();
 					return;
