@@ -964,18 +964,20 @@ impl Store for PostgresStore {
         user_id: Uuid,
         node: &str,
         handle: Option<&str>,
+        volume: Option<&str>,
     ) -> Result<Computer> {
         let now = Utc::now();
         let row = sqlx::query_as::<_, Computer>(
             "insert into computers
-             (id, user_id, node, handle, state, created_at, updated_at, last_active_at)
-             values ($1, $2, $3, $4, $5, $6, $7, $8)
+             (id, user_id, node, handle, volume, state, created_at, updated_at, last_active_at)
+             values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
              returning *",
         )
         .bind(Uuid::new_v4())
         .bind(user_id)
         .bind(node)
         .bind(handle)
+        .bind(volume)
         .bind(chat_store::types::computer_state::RUNNING)
         .bind(now)
         .bind(now)

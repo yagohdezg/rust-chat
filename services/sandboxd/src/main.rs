@@ -16,7 +16,7 @@ use axum::middleware::{self, Next};
 use axum::response::Response;
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::EnvFilter;
@@ -35,6 +35,14 @@ struct AppState {
 #[derive(Serialize)]
 struct ComputerRef {
     handle: String,
+}
+
+/// Optional body for provisioning a persistent box. `workspace` names a managed
+/// volume to mount at the working directory so the workspace outlives the box.
+#[derive(Deserialize, Default)]
+struct CreateComputerBody {
+    #[serde(default)]
+    workspace: Option<String>,
 }
 
 #[tokio::main]
@@ -93,6 +101,9 @@ async fn main() -> anyhow::Result<()> {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(1.0),
+        disk_gb: std::env::var("SANDBOX_DISK_GB")
+            .ok()
+            .and_then(|v| v.parse().ok()),
         network,
         egress_allow,
     };
@@ -133,7 +144,10 @@ fn build_app(state: AppState) -> Router {
         .route("/v1/exec", post(exec))
         .route("/v1/computers", post(create_computer))
         .route("/v1/computers/{handle}/exec", post(exec_computer))
+        .route("/v1/computers/{handle}/pause", post(pause_computer))
+        .route("/v1/computers/{handle}/resume", post(resume_computer))
         .route("/v1/computers/{handle}", delete(destroy_computer))
+        .route("/v1/workspaces/{name}", delete(destroy_workspace))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             require_bearer,
@@ -184,13 +198,16 @@ async fn exec(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
 }
 
-/// Provision a persistent box for a per-user "computer".
+/// Provision a persistent box for a per-user "computer", optionally mounting a
+/// durable workspace volume.
 async fn create_computer(
     State(state): State<AppState>,
+    body: Option<Json<CreateComputerBody>>,
 ) -> Result<Json<ComputerRef>, (StatusCode, String)> {
+    let workspace = body.and_then(|Json(body)| body.workspace);
     state
         .backend
-        .create_computer()
+        .create_computer(workspace.as_deref())
         .await
         .map(|handle| Json(ComputerRef { handle }))
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
@@ -210,6 +227,32 @@ async fn exec_computer(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
 }
 
+/// Pause a persistent box: stop the VM and snapshot its disks.
+async fn pause_computer(
+    State(state): State<AppState>,
+    Path(handle): Path<String>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    state
+        .backend
+        .pause_computer(&handle)
+        .await
+        .map(|_| StatusCode::NO_CONTENT)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
+/// Resume a paused persistent box.
+async fn resume_computer(
+    State(state): State<AppState>,
+    Path(handle): Path<String>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    state
+        .backend
+        .resume_computer(&handle)
+        .await
+        .map(|_| StatusCode::NO_CONTENT)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
 /// Destroy a persistent box. Idempotent.
 async fn destroy_computer(
     State(state): State<AppState>,
@@ -218,6 +261,19 @@ async fn destroy_computer(
     state
         .backend
         .destroy_computer(&handle)
+        .await
+        .map(|_| StatusCode::NO_CONTENT)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
+/// Remove a durable workspace volume. Idempotent.
+async fn destroy_workspace(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    state
+        .backend
+        .destroy_workspace(&name)
         .await
         .map(|_| StatusCode::NO_CONTENT)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))

@@ -36,6 +36,10 @@ pub struct SandboxSpec {
     pub timeout_seconds: u64,
     pub memory_mb: u64,
     pub cpus: f64,
+    /// Cap on the box's writable disk in GiB. `None` leaves it unbounded (the
+    /// disk is sparse and grows on demand).
+    #[serde(default)]
+    pub disk_gb: Option<u32>,
     /// Whether the sandbox may reach the network. Defaults to `false`.
     #[serde(default)]
     pub network: bool,
@@ -50,6 +54,7 @@ impl Default for SandboxSpec {
             timeout_seconds: 30,
             memory_mb: 512,
             cpus: 1.0,
+            disk_gb: None,
             network: false,
             egress_allow: Vec::new(),
         }

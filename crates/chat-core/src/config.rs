@@ -165,6 +165,9 @@ pub struct Config {
     pub computer_reap_interval_seconds: u64,
     /// Blank boxes to keep warm per node, to hide box cold-start (0 disables).
     pub computer_warm_pool: usize,
+    /// Mount a durable per-user workspace volume so a computer's files survive
+    /// its box being stopped, snapshotted, reaped or re-provisioned.
+    pub computer_workspace: bool,
 
     /// Expose the sandbox as the `execute_code` tool to the agent runtime.
     /// Off by default so a plain deployment never grants model-driven code
@@ -332,6 +335,7 @@ impl Config {
             computer_warm_pool: var("COMPUTER_WARM_POOL")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(0),
+            computer_workspace: var_bool("COMPUTER_WORKSPACE", true),
 
             sandbox_tool_enabled: var_bool("SANDBOX_TOOL_ENABLED", false),
             agent_max_iterations: var("AGENT_MAX_ITERATIONS")

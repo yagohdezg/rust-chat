@@ -265,13 +265,15 @@ See [`.env.example`](.env.example).
 | `SANDBOX_NODES`           | (see below)                                          | `name=url[,...]` nodes for computers |
 | `COMPUTER_IDLE_TTL_SECONDS` | `1800`                                             | Destroy a computer idle this long   |
 | `COMPUTER_REAP_INTERVAL_SECONDS` | `60`                                        | Idle-reaper / warm-pool tick        |
-| `COMPUTER_WARM_POOL`      | `0`                                                  | Warm boxes per node (`0` disables)  |
+| `COMPUTER_WARM_POOL`      | `0`                                                  | Warm boxes per node (`0` disables; ignored when workspaces are on) |
+| `COMPUTER_WORKSPACE`      | `true`                                               | Mount a durable per-user workspace volume |
 
 `sandboxd` reads its own environment: `SANDBOXD_TOKEN` (**required**),
 `SANDBOXD_BIND_ADDR` (`0.0.0.0:3081`), `BOXLITE_URL`
 (`http://localhost:8100`), optional `BOXLITE_TOKEN`, and the sandbox spec —
 `SANDBOX_IMAGE` (`python:3.12-slim`), `SANDBOX_TIMEOUT_SECONDS` (`30`),
-`SANDBOX_MEMORY_MB` (`512`), `SANDBOX_CPUS` (`1`).
+`SANDBOX_MEMORY_MB` (`512`), `SANDBOX_CPUS` (`1`), and `SANDBOX_DISK_GB`
+(unset — caps the box's writable disk when set).
 
 Egress is denied by default. Set `SANDBOX_NETWORK=true` to allow outbound
 traffic, and optionally `SANDBOX_EGRESS_ALLOW` (comma-separated IPv4, IPv4 CIDR,
@@ -279,6 +281,13 @@ hostname or `*.wildcard`, at most 10) to restrict it to an allow-list; other
 hosts are sinkholed and the box logs the block. `SANDBOX_EGRESS_ALLOW` requires
 `SANDBOX_NETWORK=true`. The policy applies to every box `sandboxd` creates,
 including per-user computers, so it is a per-node/per-deployment control.
+
+With `COMPUTER_WORKSPACE` (default), each computer mounts a durable managed
+volume (named from the user) at the box working directory, so a workspace
+survives the box being stopped, reaped or re-provisioned on another node.
+Pausing stops the box and snapshots its disks; resuming starts it again, and a
+lost box is transparently re-created from the volume. An explicit `DELETE
+/api/computers/me` removes the volume too.
 
 ## HTTP API
 
@@ -389,5 +398,6 @@ Scaffolded and under active development. The sandbox split (`chat-server` ->
 `sandboxd` -> BoxLite) and the OpenAI-compatible streaming path are functional.
 With `COMPUTERS_ENABLED`, a user's `execute_code` tool calls run on their own
 long-lived computer (one live box per user, placed via the `computers` registry)
-rather than a shared throwaway box. The MCP integration and persistent-workspace
-snapshots are still pending.
+rather than a shared throwaway box. With `COMPUTER_WORKSPACE`, the computer
+remounts a durable workspace volume so its files outlive the box, and pausing
+snapshots it. The MCP integration and a durable warm VM pool are still pending.

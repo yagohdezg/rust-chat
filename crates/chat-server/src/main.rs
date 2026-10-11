@@ -109,6 +109,7 @@ async fn main() -> anyhow::Result<()> {
             router,
             std::time::Duration::from_secs(cfg.computer_idle_ttl_seconds.max(1)),
             cfg.computer_warm_pool,
+            cfg.computer_workspace,
         ));
         spawn_computer_reaper(
             orchestrator.clone(),
@@ -118,6 +119,7 @@ async fn main() -> anyhow::Result<()> {
             nodes = cfg.sandbox_nodes.len(),
             idle_ttl_secs = cfg.computer_idle_ttl_seconds,
             warm_pool = cfg.computer_warm_pool,
+            workspace = cfg.computer_workspace,
             "computer control plane enabled"
         );
         Some(orchestrator)

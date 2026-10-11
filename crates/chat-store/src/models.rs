@@ -166,13 +166,16 @@ pub struct AgentDraft {
 /// user's computer and its lifecycle `state`, so the control plane can route
 /// executions without a sticky load balancer and can reconstruct placement
 /// after a restart. `handle` is the backend's id for the running box (opaque
-/// to everyone above the node client).
+/// to everyone above the node client), and `volume` names the durable workspace
+/// volume remounted whenever a box is (re)provisioned.
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
 pub struct Computer {
     pub id: Uuid,
     pub user_id: Uuid,
     pub node: String,
     pub handle: Option<String>,
+    /// Name of the durable workspace volume mounted into the box, if any.
+    pub volume: Option<String>,
     /// See [`crate::types::computer_state`].
     pub state: String,
     pub created_at: DateTime<Utc>,

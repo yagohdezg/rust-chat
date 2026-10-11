@@ -286,6 +286,7 @@ pub trait Store: Send + Sync {
         user_id: Uuid,
         node: &str,
         handle: Option<&str>,
+        volume: Option<&str>,
     ) -> Result<Computer>;
 
     /// Fetch a single computer by id, regardless of owner or state.
