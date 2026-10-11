@@ -20,14 +20,25 @@ pub trait ComputerNode: Send + Sync {
     /// Stable node name, matching what is stored in the placement registry.
     fn name(&self) -> &str;
 
-    /// Provision a new blank box, returning its opaque handle.
-    async fn create(&self) -> Result<String>;
+    /// Provision a new box, returning its opaque handle. When `workspace` is
+    /// set, the named durable volume is mounted at the box's working directory.
+    async fn create(&self, workspace: Option<&str>) -> Result<String>;
 
     /// Run a request inside an existing box, leaving the box alive.
     async fn exec(&self, handle: &str, request: &ExecRequest) -> Result<ExecResult>;
 
+    /// Stop a box's VM and snapshot its disks, freeing compute while retaining
+    /// the workspace for a later [`Self::resume`].
+    async fn pause(&self, handle: &str) -> Result<()>;
+
+    /// Start a paused box's VM again.
+    async fn resume(&self, handle: &str) -> Result<()>;
+
     /// Remove a box and free its resources. Idempotent.
     async fn destroy(&self, handle: &str) -> Result<()>;
+
+    /// Remove a durable workspace volume, reclaiming its storage. Idempotent.
+    async fn destroy_workspace(&self, workspace: &str) -> Result<()>;
 
     /// Cheap reachability probe for health checks.
     async fn health(&self) -> Result<()>;
@@ -36,7 +47,8 @@ pub trait ComputerNode: Send + Sync {
 /// HTTP client for one `sandboxd` node.
 ///
 /// Speaks the node's persistent-computer endpoints: `POST /v1/computers`,
-/// `POST /v1/computers/{handle}/exec` and `DELETE /v1/computers/{handle}`.
+/// `POST /v1/computers/{handle}/exec|pause|resume`, `DELETE
+/// /v1/computers/{handle}` and `DELETE /v1/workspaces/{name}`.
 pub struct HttpComputerNode {
     name: String,
     base_url: String,
@@ -107,10 +119,11 @@ impl ComputerNode for HttpComputerNode {
         &self.name
     }
 
-    async fn create(&self) -> Result<String> {
+    async fn create(&self, workspace: Option<&str>) -> Result<String> {
         let resp = self
             .send(
-                self.auth(self.http.post(self.url("computers"))),
+                self.auth(self.http.post(self.url("computers")))
+                    .json(&serde_json::json!({ "workspace": workspace })),
                 "create computer",
             )
             .await?;
@@ -137,9 +150,30 @@ impl ComputerNode for HttpComputerNode {
         })
     }
 
+    async fn pause(&self, handle: &str) -> Result<()> {
+        let url = self.url(&format!("computers/{handle}/pause"));
+        self.send(self.auth(self.http.post(url)), "pause computer")
+            .await?;
+        Ok(())
+    }
+
+    async fn resume(&self, handle: &str) -> Result<()> {
+        let url = self.url(&format!("computers/{handle}/resume"));
+        self.send(self.auth(self.http.post(url)), "resume computer")
+            .await?;
+        Ok(())
+    }
+
     async fn destroy(&self, handle: &str) -> Result<()> {
         let url = self.url(&format!("computers/{handle}"));
         self.send(self.auth(self.http.delete(url)), "destroy computer")
+            .await?;
+        Ok(())
+    }
+
+    async fn destroy_workspace(&self, workspace: &str) -> Result<()> {
+        let url = self.url(&format!("workspaces/{workspace}"));
+        self.send(self.auth(self.http.delete(url)), "destroy workspace")
             .await?;
         Ok(())
     }

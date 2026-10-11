@@ -27,6 +27,10 @@ const MAX_OUTPUT_FILE_BYTES: u64 = 8 * 1024 * 1024;
 /// Destination directory inside the box where the source and inputs land.
 const WORK_DIR: &str = "/app";
 
+/// Stable name of the snapshot captured when a computer is paused. Reusing one
+/// name keeps a single, current snapshot per box.
+const PAUSE_SNAPSHOT: &str = "pause";
+
 /// BoxLite backend — one hardware-isolated microVM per run.
 ///
 /// Talks to a running BoxLite server (`boxlite serve`, default
@@ -110,7 +114,11 @@ impl BoxliteBackend {
         Ok(prefix.as_deref().unwrap_or(""))
     }
 
-    async fn create_box(&self, prefix: &str) -> Result<String, SandboxError> {
+    async fn create_box(
+        &self,
+        prefix: &str,
+        workspace: Option<&str>,
+    ) -> Result<String, SandboxError> {
         let url = self.endpoint(prefix, "boxes");
         let outbound = if self.spec.network {
             let mut outbound = serde_json::json!({ "mode": "enabled" });
@@ -121,7 +129,7 @@ impl BoxliteBackend {
         } else {
             serde_json::json!({ "mode": "disabled" })
         };
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "image": self.spec.image.clone(),
             "cpus": self.spec.cpus.round().max(1.0) as u32,
             "memory_mib": self.spec.memory_mb.max(128),
@@ -129,6 +137,16 @@ impl BoxliteBackend {
             "auto_delete": 0,
             "network": { "outbound": outbound },
         });
+        if let Some(disk_gb) = self.spec.disk_gb {
+            body["disk_size_gb"] = serde_json::json!(disk_gb.max(1));
+        }
+        if let Some(name) = workspace {
+            self.ensure_volume(prefix, name).await?;
+            body["volumes"] = serde_json::json!([{
+                "managed_volume": name,
+                "guest_path": WORK_DIR,
+            }]);
+        }
         let resp = self
             .auth(self.http.post(url))
             .json(&body)
@@ -141,6 +159,97 @@ impl BoxliteBackend {
             .await
             .map_err(|e| SandboxError::Transport(format!("invalid box response: {e}")))?;
         Ok(created.box_id)
+    }
+
+    /// Create the named managed volume unless it already exists.
+    ///
+    /// The durable-workspace case re-provisions a box against an existing
+    /// volume, so the name is looked up first and only created when absent.
+    async fn ensure_volume(&self, prefix: &str, name: &str) -> Result<(), SandboxError> {
+        let url = self.endpoint(prefix, "volumes");
+        let resp = self
+            .auth(self.http.get(&url))
+            .send()
+            .await
+            .map_err(|e| transport("list volumes", e))?;
+        let resp = ensure_success(resp, "list volumes").await?;
+        let listed: ListVolumes = resp
+            .json()
+            .await
+            .map_err(|e| SandboxError::Transport(format!("invalid volume list response: {e}")))?;
+        if listed.volumes.iter().any(|volume| volume.name == name) {
+            return Ok(());
+        }
+        let resp = self
+            .auth(self.http.post(url))
+            .json(&serde_json::json!({ "name": name }))
+            .send()
+            .await
+            .map_err(|e| transport("create volume", e))?;
+        ensure_success(resp, "create volume").await.map(|_| ())
+    }
+
+    async fn stop_box(&self, prefix: &str, box_id: &str) -> Result<(), SandboxError> {
+        let url = self.endpoint(prefix, &format!("boxes/{box_id}/stop"));
+        let resp = self
+            .auth(self.http.post(url))
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+            .map_err(|e| transport("stop box", e))?;
+        ensure_success(resp, "stop box").await.map(|_| ())
+    }
+
+    async fn start_box(&self, prefix: &str, box_id: &str) -> Result<(), SandboxError> {
+        let url = self.endpoint(prefix, &format!("boxes/{box_id}/start"));
+        let resp = self
+            .auth(self.http.post(url))
+            .send()
+            .await
+            .map_err(|e| transport("start box", e))?;
+        ensure_success(resp, "start box").await.map(|_| ())
+    }
+
+    /// Snapshot the stopped box's disks under a stable name, replacing any
+    /// previous snapshot of the same name.
+    async fn snapshot_box(
+        &self,
+        prefix: &str,
+        box_id: &str,
+        name: &str,
+    ) -> Result<(), SandboxError> {
+        let existing = self.endpoint(prefix, &format!("boxes/{box_id}/snapshots/{name}"));
+        let _ = self
+            .auth(self.http.delete(existing))
+            .send()
+            .await
+            .map_err(|e| transport("remove snapshot", e))?;
+        let url = self.endpoint(prefix, &format!("boxes/{box_id}/snapshots"));
+        let resp = self
+            .auth(self.http.post(url))
+            .json(&serde_json::json!({ "name": name }))
+            .send()
+            .await
+            .map_err(|e| transport("create snapshot", e))?;
+        ensure_success(resp, "create snapshot").await.map(|_| ())
+    }
+
+    async fn delete_volume(&self, prefix: &str, name: &str) -> Result<(), SandboxError> {
+        let url = self.endpoint(prefix, &format!("volumes/{name}"));
+        let resp = self
+            .auth(self.http.delete(url))
+            .query(&[("force", "true")])
+            .send()
+            .await
+            .map_err(|e| transport("delete volume", e))?;
+        if resp.status().is_success() || resp.status() == reqwest::StatusCode::NOT_FOUND {
+            Ok(())
+        } else {
+            Err(SandboxError::Unavailable(format!(
+                "delete volume failed: {}",
+                resp.status()
+            )))
+        }
     }
 
     async fn upload_files(
@@ -422,10 +531,12 @@ impl BoxliteBackend {
     ///
     /// Unlike [`SandboxBackend::run`], the box is **not** deleted; the caller
     /// owns its lifecycle and must eventually call [`Self::destroy_computer`].
-    /// This is the node-side primitive behind a per-user "computer".
-    pub async fn create_computer(&self) -> Result<String, SandboxError> {
+    /// When `workspace` is set, the named managed volume is mounted at the
+    /// working directory so the workspace outlives the box. This is the
+    /// node-side primitive behind a per-user "computer".
+    pub async fn create_computer(&self, workspace: Option<&str>) -> Result<String, SandboxError> {
         let prefix = self.prefix().await?.to_owned();
-        self.create_box(&prefix).await
+        self.create_box(&prefix, workspace).await
     }
 
     /// Run a request inside an existing persistent box, leaving the box alive.
@@ -477,6 +588,28 @@ impl BoxliteBackend {
         let prefix = self.prefix().await?.to_owned();
         self.delete_box(&prefix, box_id).await
     }
+
+    /// Pause a persistent box: stop the VM and snapshot its disks.
+    ///
+    /// Stopping frees the box's compute while both the mounted workspace volume
+    /// and the snapshot retain its state for a later [`Self::resume_computer`].
+    pub async fn pause_computer(&self, box_id: &str) -> Result<(), SandboxError> {
+        let prefix = self.prefix().await?.to_owned();
+        self.stop_box(&prefix, box_id).await?;
+        self.snapshot_box(&prefix, box_id, PAUSE_SNAPSHOT).await
+    }
+
+    /// Resume a paused persistent box by starting its VM again.
+    pub async fn resume_computer(&self, box_id: &str) -> Result<(), SandboxError> {
+        let prefix = self.prefix().await?.to_owned();
+        self.start_box(&prefix, box_id).await
+    }
+
+    /// Remove a workspace volume, reclaiming its storage. Idempotent.
+    pub async fn destroy_workspace(&self, name: &str) -> Result<(), SandboxError> {
+        let prefix = self.prefix().await?.to_owned();
+        self.delete_volume(&prefix, name).await
+    }
 }
 
 #[async_trait::async_trait]
@@ -494,7 +627,7 @@ impl SandboxBackend for BoxliteBackend {
         let program = program(&request.language)
             .ok_or_else(|| SandboxError::UnsupportedLanguage(request.language.clone()))?;
 
-        let box_id = self.create_box(&prefix).await?;
+        let box_id = self.create_box(&prefix, None).await?;
 
         let exec_id: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         let deadline = Duration::from_secs(self.spec.timeout_seconds.max(1));
@@ -541,6 +674,17 @@ struct Principal {
 #[derive(Debug, Deserialize)]
 struct BoxRef {
     box_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ListVolumes {
+    #[serde(default)]
+    volumes: Vec<VolumeSummary>,
+}
+
+#[derive(Debug, Deserialize)]
+struct VolumeSummary {
+    name: String,
 }
 
 #[derive(Debug, Deserialize)]

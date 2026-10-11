@@ -5,8 +5,11 @@
 //! persistent computer, routes executions to the node that hosts it, and
 //! destroys computers that have gone idle. A small in-memory warm pool hides
 //! box cold-start on the hot path.
+//!
+//! When workspace volumes are enabled each computer mounts a durable volume
+//! (named from its user) at the working directory, so files survive the box
+//! being stopped, snapshotted, reaped or re-provisioned on another node.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -27,7 +30,7 @@ const REAP_BATCH: i64 = 100;
 /// Pre-provisioned blank box handles, keyed by node name.
 #[derive(Default)]
 struct WarmPool {
-    ready: HashMap<String, Vec<String>>,
+    ready: std::collections::HashMap<String, Vec<String>>,
 }
 
 impl WarmPool {
@@ -52,6 +55,8 @@ pub struct ComputerOrchestrator {
     idle_ttl: ChronoDuration,
     /// Target number of pre-provisioned boxes per node (`0` disables).
     warm_pool_size: usize,
+    /// Mount a durable per-user workspace volume at the box's working directory.
+    workspace: bool,
     warm: Mutex<WarmPool>,
 }
 
@@ -61,6 +66,7 @@ impl ComputerOrchestrator {
         router: NodeRouter,
         idle_ttl: Duration,
         warm_pool_size: usize,
+        workspace: bool,
     ) -> Self {
         Self {
             store,
@@ -68,8 +74,18 @@ impl ComputerOrchestrator {
             idle_ttl: ChronoDuration::from_std(idle_ttl)
                 .unwrap_or_else(|_| ChronoDuration::seconds(i64::MAX)),
             warm_pool_size,
+            workspace,
             warm: Mutex::new(WarmPool::default()),
         }
+    }
+
+    /// Durable workspace volume name for a user, or `None` when disabled.
+    ///
+    /// Deterministic from the user id, so a reaped computer re-provisioned on
+    /// any node remounts the same volume and finds its files again.
+    fn workspace_for(&self, user_id: Uuid) -> Option<String> {
+        self.workspace
+            .then(|| format!("rustchat-{}", user_id.simple()))
     }
 
     /// The user's current computer, without provisioning one.
@@ -84,6 +100,7 @@ impl ComputerOrchestrator {
     pub async fn ensure_running(&self, user_id: Uuid) -> Result<Computer> {
         if let Some(computer) = self.store.get_live_computer_for_user(user_id).await? {
             if computer.state != computer_state::RUNNING {
+                self.activate(&computer).await?;
                 self.store
                     .set_computer_state(computer.id, computer_state::RUNNING)
                     .await?;
@@ -107,14 +124,20 @@ impl ComputerOrchestrator {
             .ok_or_else(|| ComputerError::UnknownNode(node_name.clone()))?
             .clone();
 
-        let handle = match self.warm.lock().await.take(&node_name) {
-            Some(handle) => handle,
-            None => node.create().await?,
+        let workspace = self.workspace_for(user_id);
+        let handle = match workspace {
+            // A volume-mounted box is per-user, so a blank warm box cannot be
+            // reused; always create fresh.
+            Some(ref name) => node.create(Some(name)).await?,
+            None => match self.warm.lock().await.take(&node_name) {
+                Some(handle) => handle,
+                None => node.create(None).await?,
+            },
         };
 
         match self
             .store
-            .create_computer(user_id, &node_name, Some(&handle))
+            .create_computer(user_id, &node_name, Some(&handle), workspace.as_deref())
             .await
         {
             Ok(computer) => Ok(computer),
@@ -130,6 +153,37 @@ impl ComputerOrchestrator {
                 Err(err.into())
             }
         }
+    }
+
+    /// Give an existing computer a fresh box on its node, remounting the
+    /// workspace volume. Used when the box behind a placement is gone.
+    async fn reattach(&self, computer: &Computer) -> Result<()> {
+        let node = self
+            .router
+            .get(&computer.node)
+            .ok_or_else(|| ComputerError::UnknownNode(computer.node.clone()))?;
+        let handle = node.create(computer.volume.as_deref()).await?;
+        self.store
+            .set_computer_handle(computer.id, Some(&handle))
+            .await?;
+        Ok(())
+    }
+
+    /// Bring a computer's box back to `running`, re-provisioning if it is gone.
+    async fn activate(&self, computer: &Computer) -> Result<()> {
+        if let (Some(node), Some(handle)) =
+            (self.router.get(&computer.node), computer.handle.as_deref())
+        {
+            if node.resume(handle).await.is_ok() {
+                return Ok(());
+            }
+            tracing::warn!(
+                computer = %computer.id,
+                node = %computer.node,
+                "computer box did not resume; re-provisioning from workspace"
+            );
+        }
+        self.reattach(computer).await
     }
 
     /// Choose the node with the fewest live computers (ties break by name).
@@ -156,9 +210,37 @@ impl ComputerOrchestrator {
             .router
             .get(&computer.node)
             .ok_or_else(|| ComputerError::UnknownNode(computer.node.clone()))?;
-        let result = node.exec(&handle, request).await?;
-        self.store.touch_computer(computer.id).await?;
-        Ok(result)
+
+        match node.exec(&handle, request).await {
+            Ok(result) => {
+                self.store.touch_computer(computer.id).await?;
+                Ok(result)
+            }
+            Err(err) => {
+                // The box may have been lost (node restart, eviction). Free the
+                // stale placement, re-provision from the workspace volume, and
+                // retry once so a restart is invisible to the caller.
+                tracing::warn!(
+                    error = %err,
+                    computer = %computer.id,
+                    "computer exec failed; re-provisioning and retrying"
+                );
+                self.release(&computer).await;
+                self.reattach(&computer).await?;
+                let computer = self
+                    .store
+                    .get_computer(computer.id)
+                    .await?
+                    .ok_or(ComputerError::MissingHandle)?;
+                let handle = computer
+                    .handle
+                    .clone()
+                    .ok_or(ComputerError::MissingHandle)?;
+                let result = node.exec(&handle, request).await?;
+                self.store.touch_computer(computer.id).await?;
+                Ok(result)
+            }
+        }
     }
 
     /// Pause the user's computer, keeping its placement. Idempotent.
@@ -167,6 +249,13 @@ impl ComputerOrchestrator {
             return Ok(None);
         };
         if computer.state != computer_state::PAUSED {
+            if let (Some(node), Some(handle)) =
+                (self.router.get(&computer.node), computer.handle.as_deref())
+            {
+                if let Err(e) = node.pause(handle).await {
+                    tracing::warn!(error = %e, computer = %computer.id, "failed to pause computer box");
+                }
+            }
             self.store
                 .set_computer_state(computer.id, computer_state::PAUSED)
                 .await?;
@@ -179,6 +268,7 @@ impl ComputerOrchestrator {
         let Some(computer) = self.store.get_live_computer_for_user(user_id).await? else {
             return Ok(None);
         };
+        self.activate(&computer).await?;
         if computer.state != computer_state::RUNNING {
             self.store
                 .set_computer_state(computer.id, computer_state::RUNNING)
@@ -189,12 +279,15 @@ impl ComputerOrchestrator {
     }
 
     /// Destroy the user's computer and free its box. Returns whether one
-    /// existed.
+    /// existed. Deletes the workspace volume: an explicit destroy is final.
     pub async fn destroy(&self, user_id: Uuid) -> Result<bool> {
         let Some(computer) = self.store.get_live_computer_for_user(user_id).await? else {
             return Ok(false);
         };
         self.release(&computer).await;
+        if let Some(volume) = computer.volume.as_deref() {
+            self.remove_workspace(&computer.node, volume).await;
+        }
         self.store.set_computer_handle(computer.id, None).await?;
         self.store
             .set_computer_state(computer.id, computer_state::DESTROYED)
@@ -203,6 +296,9 @@ impl ComputerOrchestrator {
     }
 
     /// Destroy computers idle for longer than the TTL. Returns how many.
+    ///
+    /// The workspace volume is retained, so a user returning after the idle
+    /// window finds their files when the computer is re-provisioned.
     pub async fn reap_idle(&self) -> Result<usize> {
         let cutoff = Utc::now() - self.idle_ttl;
         let idle = self.store.list_idle_computers(cutoff, REAP_BATCH).await?;
@@ -236,9 +332,27 @@ impl ComputerOrchestrator {
         }
     }
 
+    /// Best-effort workspace volume teardown on a node.
+    async fn remove_workspace(&self, node_name: &str, volume: &str) {
+        let Some(node) = self.router.get(node_name) else {
+            return;
+        };
+        if let Err(e) = node.destroy_workspace(volume).await {
+            tracing::warn!(
+                error = %e,
+                volume,
+                node = %node_name,
+                "failed to destroy computer workspace volume"
+            );
+        }
+    }
+
     /// Top up the warm pool to `warm_pool_size` boxes per node.
+    ///
+    /// Disabled when workspace volumes are enabled: warm boxes are blank and
+    /// have no volume, so they cannot host a per-user workspace.
     pub async fn refill_warm_pool(&self) -> Result<usize> {
-        if self.warm_pool_size == 0 {
+        if self.warm_pool_size == 0 || self.workspace {
             return Ok(0);
         }
         let mut created = 0;
@@ -249,7 +363,7 @@ impl ComputerOrchestrator {
             };
             let have = self.warm.lock().await.len(&name);
             for _ in have..self.warm_pool_size {
-                match node.create().await {
+                match node.create(None).await {
                     Ok(handle) => {
                         self.warm.lock().await.put(&name, handle);
                         created += 1;

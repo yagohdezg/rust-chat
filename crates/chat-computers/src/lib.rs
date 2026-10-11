@@ -71,7 +71,7 @@ mod tests {
             &self.name
         }
 
-        async fn create(&self) -> Result<String> {
+        async fn create(&self, _workspace: Option<&str>) -> Result<String> {
             let mut counter = self.counter.lock().unwrap();
             *counter += 1;
             *self.created.lock().unwrap() += 1;
@@ -90,8 +90,20 @@ mod tests {
             })
         }
 
+        async fn pause(&self, _handle: &str) -> Result<()> {
+            Ok(())
+        }
+
+        async fn resume(&self, _handle: &str) -> Result<()> {
+            Ok(())
+        }
+
         async fn destroy(&self, handle: &str) -> Result<()> {
             self.destroyed.lock().unwrap().push(handle.to_string());
+            Ok(())
+        }
+
+        async fn destroy_workspace(&self, _workspace: &str) -> Result<()> {
             Ok(())
         }
 
@@ -126,6 +138,7 @@ mod tests {
             NodeRouter::new().with_node(node),
             idle_ttl,
             warm_pool_size,
+            false,
         )
     }
 
@@ -247,6 +260,7 @@ mod tests {
                 .with_node(node_b.clone()),
             Duration::from_secs(1800),
             0,
+            false,
         );
 
         let first = orch.ensure_running(user_a).await.unwrap();
@@ -311,7 +325,7 @@ mod tests {
             format!("http://{addr}"),
             Some("node-token".into()),
         );
-        let handle = node.create().await.unwrap();
+        let handle = node.create(None).await.unwrap();
         assert_eq!(handle, "box-9");
 
         let result = node

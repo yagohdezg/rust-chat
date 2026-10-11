@@ -998,18 +998,20 @@ impl Store for SqliteStore {
         user_id: Uuid,
         node: &str,
         handle: Option<&str>,
+        volume: Option<&str>,
     ) -> Result<Computer> {
         let now = Utc::now();
         let row = sqlx::query_as::<_, Computer>(
             "insert into computers
-             (id, user_id, node, handle, state, created_at, updated_at, last_active_at)
-             values (?, ?, ?, ?, ?, ?, ?, ?)
+             (id, user_id, node, handle, volume, state, created_at, updated_at, last_active_at)
+             values (?, ?, ?, ?, ?, ?, ?, ?, ?)
              returning *",
         )
         .bind(Uuid::new_v4())
         .bind(user_id)
         .bind(node)
         .bind(handle)
+        .bind(volume)
         .bind(chat_store::types::computer_state::RUNNING)
         .bind(now)
         .bind(now)
