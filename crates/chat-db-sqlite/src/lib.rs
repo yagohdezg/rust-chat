@@ -9,7 +9,7 @@ use std::sync::Arc;
 use chat_core::{ChatError, Result, SecretCipher};
 use chat_store::{
     AdminUserSummary, Agent, AgentDraft, AuditEntry, AuditLog, Computer, Conversation, FileRecord,
-    Message, Provider, ProviderModel, RefreshToken, Store, User,
+    Message, PoolBox, Provider, ProviderModel, RefreshToken, Store, User,
 };
 use chrono::{DateTime, Utc};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
@@ -1104,6 +1104,60 @@ impl Store for SqliteStore {
             .bind(now)
             .bind(now)
             .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn list_live_computer_handles(&self) -> Result<Vec<String>> {
+        let rows = sqlx::query_scalar::<_, String>(
+            "select handle from computers
+             where state != 'destroyed' and handle is not null",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    async fn add_pool_box(&self, node: &str, handle: &str) -> Result<()> {
+        sqlx::query(
+            "insert or ignore into computer_pool (handle, node, created_at) values (?, ?, ?)",
+        )
+        .bind(handle)
+        .bind(node)
+        .bind(Utc::now())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn list_pool_boxes(&self) -> Result<Vec<PoolBox>> {
+        let rows = sqlx::query_as::<_, PoolBox>(
+            "select handle, node, created_at from computer_pool order by created_at asc",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    async fn take_pool_box(&self, node: &str) -> Result<Option<String>> {
+        let handle = sqlx::query_scalar::<_, String>(
+            "delete from computer_pool
+             where handle = (
+                 select handle from computer_pool
+                 where node = ? order by created_at asc limit 1
+             )
+             returning handle",
+        )
+        .bind(node)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(handle)
+    }
+
+    async fn remove_pool_box(&self, handle: &str) -> Result<()> {
+        sqlx::query("delete from computer_pool where handle = ?")
+            .bind(handle)
             .execute(&self.pool)
             .await?;
         Ok(())

@@ -2107,6 +2107,24 @@ pub async fn sandbox_run(
 
 // ---- computers (per-user persistent workspaces) ---------------------------
 
+/// Admin view of every computer placement plus the warm pool size per node.
+pub async fn admin_list_computers(
+    State(state): State<Arc<AppState>>,
+    _admin: AdminUser,
+) -> Result<Json<Value>, ApiError> {
+    let computers = state.store.list_computers(200).await?;
+    let pool = match state.computers.as_deref() {
+        Some(plane) => plane
+            .warm_pool_status()
+            .await?
+            .into_iter()
+            .map(|(node, ready)| json!({ "node": node, "ready": ready }))
+            .collect::<Vec<_>>(),
+        None => Vec::new(),
+    };
+    Ok(Json(json!({ "computers": computers, "pool": pool })))
+}
+
 /// Resolve the control plane, or fail with a clear message when disabled.
 fn computer_plane(state: &AppState) -> Result<&ComputerOrchestrator, ApiError> {
     state

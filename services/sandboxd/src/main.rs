@@ -38,11 +38,22 @@ struct ComputerRef {
 }
 
 /// Optional body for provisioning a persistent box. `workspace` names a managed
-/// volume to mount at the working directory so the workspace outlives the box.
+/// volume to mount at the working directory so the workspace outlives the box;
+/// `name` is a deployment-assigned box name used to mark ownership.
 #[derive(Deserialize, Default)]
 struct CreateComputerBody {
     #[serde(default)]
     workspace: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+}
+
+/// A box as reported by the node listing endpoint.
+#[derive(Serialize)]
+struct ComputerSummary {
+    handle: String,
+    name: Option<String>,
+    created_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 #[tokio::main]
@@ -142,7 +153,7 @@ async fn main() -> anyhow::Result<()> {
 fn build_app(state: AppState) -> Router {
     let protected = Router::new()
         .route("/v1/exec", post(exec))
-        .route("/v1/computers", post(create_computer))
+        .route("/v1/computers", post(create_computer).get(list_computers))
         .route("/v1/computers/{handle}/exec", post(exec_computer))
         .route("/v1/computers/{handle}/pause", post(pause_computer))
         .route("/v1/computers/{handle}/resume", post(resume_computer))
@@ -204,12 +215,35 @@ async fn create_computer(
     State(state): State<AppState>,
     body: Option<Json<CreateComputerBody>>,
 ) -> Result<Json<ComputerRef>, (StatusCode, String)> {
-    let workspace = body.and_then(|Json(body)| body.workspace);
+    let body = body.map(|Json(body)| body).unwrap_or_default();
     state
         .backend
-        .create_computer(workspace.as_deref())
+        .create_computer(body.workspace.as_deref(), body.name.as_deref())
         .await
         .map(|handle| Json(ComputerRef { handle }))
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
+/// List every box on this node, so the control plane can reconcile ownership.
+async fn list_computers(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<ComputerSummary>>, (StatusCode, String)> {
+    state
+        .backend
+        .list_computers()
+        .await
+        .map(|boxes| {
+            Json(
+                boxes
+                    .into_iter()
+                    .map(|box_| ComputerSummary {
+                        handle: box_.handle,
+                        name: box_.name,
+                        created_at: box_.created_at,
+                    })
+                    .collect(),
+            )
+        })
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
 }
 

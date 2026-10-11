@@ -4,7 +4,7 @@ use uuid::Uuid;
 
 use crate::models::{
     AdminUserSummary, Agent, AgentDraft, AuditEntry, AuditLog, Computer, Conversation, FileRecord,
-    Message, Provider, ProviderModel, RefreshToken, User,
+    Message, PoolBox, Provider, ProviderModel, RefreshToken, User,
 };
 /// Relational persistence, independent of the database engine.
 ///
@@ -317,4 +317,21 @@ pub trait Store: Send + Sync {
 
     /// Mark a computer active now (refreshes the idle-reaper clock).
     async fn touch_computer(&self, id: Uuid) -> Result<()>;
+
+    /// Handles of every live (non-destroyed) computer, for pool reconciliation.
+    async fn list_live_computer_handles(&self) -> Result<Vec<String>>;
+
+    // ---- warm pool (durable ownership) ---------------------------------
+    /// Record a pre-provisioned blank box as owned by this deployment.
+    async fn add_pool_box(&self, node: &str, handle: &str) -> Result<()>;
+
+    /// Every box the warm pool owns, oldest first.
+    async fn list_pool_boxes(&self) -> Result<Vec<PoolBox>>;
+
+    /// Atomically claim one pooled box for `node`, removing it from the pool
+    /// and returning its handle. `None` when the pool has no box for that node.
+    async fn take_pool_box(&self, node: &str) -> Result<Option<String>>;
+
+    /// Drop a pool box from the ownership registry.
+    async fn remove_pool_box(&self, handle: &str) -> Result<()>;
 }

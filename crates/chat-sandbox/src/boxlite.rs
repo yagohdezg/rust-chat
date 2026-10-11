@@ -11,8 +11,8 @@ use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::{
-    program, ExecRequest, ExecResult, IsolationLevel, SandboxBackend, SandboxError, SandboxFile,
-    SandboxSpec, OUTPUT_DIR,
+    box_names, program, BoxSummary, ExecRequest, ExecResult, IsolationLevel, SandboxBackend,
+    SandboxError, SandboxFile, SandboxSpec, OUTPUT_DIR,
 };
 
 /// Maximum bytes captured per stream (stdout / stderr) before clipping.
@@ -118,6 +118,7 @@ impl BoxliteBackend {
         &self,
         prefix: &str,
         workspace: Option<&str>,
+        name: Option<&str>,
     ) -> Result<String, SandboxError> {
         let url = self.endpoint(prefix, "boxes");
         let outbound = if self.spec.network {
@@ -139,6 +140,9 @@ impl BoxliteBackend {
         });
         if let Some(disk_gb) = self.spec.disk_gb {
             body["disk_size_gb"] = serde_json::json!(disk_gb.max(1));
+        }
+        if let Some(name) = name {
+            body["name"] = serde_json::json!(name);
         }
         if let Some(name) = workspace {
             self.ensure_volume(prefix, name).await?;
@@ -534,9 +538,50 @@ impl BoxliteBackend {
     /// When `workspace` is set, the named managed volume is mounted at the
     /// working directory so the workspace outlives the box. This is the
     /// node-side primitive behind a per-user "computer".
-    pub async fn create_computer(&self, workspace: Option<&str>) -> Result<String, SandboxError> {
+    pub async fn create_computer(
+        &self,
+        workspace: Option<&str>,
+        name: Option<&str>,
+    ) -> Result<String, SandboxError> {
         let prefix = self.prefix().await?.to_owned();
-        self.create_box(&prefix, workspace).await
+        self.create_box(&prefix, workspace, name).await
+    }
+
+    /// List every box on the node: handle plus optional name.
+    ///
+    /// Paginated through `next_page_token` so a large fleet is fully
+    /// enumerated. Used by the control plane to reconcile ownership and
+    /// reclaim leaked boxes.
+    pub async fn list_computers(&self) -> Result<Vec<BoxSummary>, SandboxError> {
+        let prefix = self.prefix().await?.to_owned();
+        let url = self.endpoint(&prefix, "boxes");
+        let mut out = Vec::new();
+        let mut token: Option<String> = None;
+        loop {
+            let mut request = self.auth(self.http.get(&url)).query(&[("pageSize", "100")]);
+            if let Some(token) = token.as_deref() {
+                request = request.query(&[("pageToken", token)]);
+            }
+            let resp = request
+                .send()
+                .await
+                .map_err(|e| transport("list boxes", e))?;
+            let resp = ensure_success(resp, "list boxes").await?;
+            let page: ListBoxes = resp
+                .json()
+                .await
+                .map_err(|e| SandboxError::Transport(format!("invalid box list response: {e}")))?;
+            out.extend(page.boxes.into_iter().map(|box_| BoxSummary {
+                handle: box_.box_id,
+                name: box_.name,
+                created_at: box_.created_at,
+            }));
+            match page.next_page_token.filter(|t| !t.is_empty()) {
+                Some(next) => token = Some(next),
+                None => break,
+            }
+        }
+        Ok(out)
     }
 
     /// Run a request inside an existing persistent box, leaving the box alive.
@@ -627,7 +672,9 @@ impl SandboxBackend for BoxliteBackend {
         let program = program(&request.language)
             .ok_or_else(|| SandboxError::UnsupportedLanguage(request.language.clone()))?;
 
-        let box_id = self.create_box(&prefix, None).await?;
+        let box_id = self
+            .create_box(&prefix, None, Some(&box_names::ephemeral()))
+            .await?;
 
         let exec_id: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         let deadline = Duration::from_secs(self.spec.timeout_seconds.max(1));
@@ -674,6 +721,23 @@ struct Principal {
 #[derive(Debug, Deserialize)]
 struct BoxRef {
     box_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ListBoxes {
+    #[serde(default)]
+    boxes: Vec<BoxItem>,
+    #[serde(default)]
+    next_page_token: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BoxItem {
+    box_id: String,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    created_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 #[derive(Debug, Deserialize)]

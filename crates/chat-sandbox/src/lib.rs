@@ -16,6 +16,43 @@ pub use boxlite::BoxliteBackend;
 pub use egress::{parse_egress_allow, validate_egress_allow};
 pub use http::HttpSandboxBackend;
 
+/// Name prefixes marking a BoxLite box as owned by this deployment.
+///
+/// Boxes are named on creation so the warm-pool reconciler can tell ours from
+/// foreign boxes on a shared node: a `pool`/`computer` box whose handle is no
+/// longer tracked is a leak to reclaim, while `ephemeral` boxes belong to
+/// short-lived runs and are left alone.
+pub mod box_names {
+    use uuid::Uuid;
+
+    pub const POOL_PREFIX: &str = "rustchat-pool-";
+    pub const COMPUTER_PREFIX: &str = "rustchat-computer-";
+    pub const EPHEMERAL_PREFIX: &str = "rustchat-ephemeral-";
+
+    pub fn pool() -> String {
+        format!("{POOL_PREFIX}{}", Uuid::new_v4().simple())
+    }
+
+    pub fn computer() -> String {
+        format!("{COMPUTER_PREFIX}{}", Uuid::new_v4().simple())
+    }
+
+    pub fn ephemeral() -> String {
+        format!("{EPHEMERAL_PREFIX}{}", Uuid::new_v4().simple())
+    }
+}
+
+/// A box as listed by a node: its opaque handle, optional deployment name, and
+/// creation time (used to avoid racing a just-created box during reconcile).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BoxSummary {
+    pub handle: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub created_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
 /// Strength of the isolation boundary around a sandboxed run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum IsolationLevel {
