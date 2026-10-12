@@ -85,6 +85,10 @@ pub struct ChatChunk {
     /// Incremental text delta (may be empty on tool-call-only chunks).
     #[serde(default)]
     pub delta: String,
+    /// Incremental reasoning/thinking delta (empty for models that do not emit
+    /// one).
+    #[serde(default)]
+    pub reasoning: String,
     /// Raw tool-call deltas as emitted by the provider.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Value>,

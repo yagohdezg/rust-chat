@@ -143,6 +143,12 @@ impl LlmProvider for OpenAiProvider {
                                 let choice = &json["choices"][0];
                                 let delta = &choice["delta"];
                                 let content = delta["content"].as_str().unwrap_or("").to_string();
+                                let reasoning = delta
+                                    .get("reasoning_content")
+                                    .and_then(Value::as_str)
+                                    .or_else(|| delta.get("reasoning").and_then(Value::as_str))
+                                    .unwrap_or("")
+                                    .to_string();
                                 let tool_calls = delta.get("tool_calls").filter(|v| !v.is_null()).cloned();
                                 let finish_reason = choice
                                     .get("finish_reason")
@@ -150,6 +156,7 @@ impl LlmProvider for OpenAiProvider {
                                     .map(str::to_owned);
                                 yield Ok(ChatChunk {
                                     delta: content,
+                                    reasoning,
                                     tool_calls,
                                     finish_reason,
                                     done: false,

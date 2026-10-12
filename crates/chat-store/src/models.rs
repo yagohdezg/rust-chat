@@ -59,6 +59,8 @@ pub struct Message {
     pub conversation_id: Uuid,
     pub role: String,
     pub content: Option<String>,
+    /// Reasoning/thinking text a reasoning model emitted before its answer.
+    pub reasoning: Option<String>,
     pub tool_calls: Option<Json<serde_json::Value>>,
     pub tool_call_id: Option<String>,
     /// Generation state for assistant messages: see [`crate::types::message_status`].

@@ -1592,19 +1592,16 @@ fn spawn_generation(
         let hub = state.hub.clone();
         request.messages = build_turn_messages(&state, &ctx).await;
         match generate(provider.as_ref(), request, &tx, &store, message_id).await {
-            Ok(content) => {
+            Ok((content, events)) => {
                 if let Err(err) = store
                     .update_message_content(message_id, &content, message_status::COMPLETE)
                     .await
                 {
                     tracing::error!(error = %err, "failed to persist assistant message");
                 }
-                let _ = tx.send(StreamState::Completed {
-                    content,
-                    events: Vec::new(),
-                });
+                let _ = tx.send(StreamState::Completed { content, events });
             }
-            Err((partial, error)) => {
+            Err((partial, error, events)) => {
                 if let Err(err) = store
                     .update_message_content(message_id, &partial, message_status::ERROR)
                     .await
@@ -1614,7 +1611,7 @@ fn spawn_generation(
                 let _ = tx.send(StreamState::Failed {
                     content: partial,
                     error,
-                    events: Vec::new(),
+                    events,
                 });
             }
         }
@@ -1792,6 +1789,7 @@ fn spawn_agent_generation(
         let conversation_id = ctx.conversation_id;
         let mut events: Vec<SseEvent> = Vec::new();
         let mut accumulated = String::new();
+        let mut reasoning = String::new();
         let mut last_persist = 0usize;
         let mut used_tools = false;
         let mut failure: Option<String> = None;
@@ -1806,6 +1804,14 @@ fn spawn_agent_generation(
 
         while let Some(item) = stream.next().await {
             match item {
+                Ok(AgentEvent::Thinking(text)) => {
+                    reasoning.push_str(&text);
+                    events.push(SseEvent::new("thinking", json!({ "text": text })));
+                    let _ = tx.send(StreamState::Streaming {
+                        content: accumulated.clone(),
+                        events: events.clone(),
+                    });
+                }
                 Ok(AgentEvent::Delta(text)) => {
                     accumulated.push_str(&text);
                     let _ = tx.send(StreamState::Streaming {
@@ -1872,6 +1878,8 @@ fn spawn_agent_generation(
             }
         }
 
+        persist_reasoning(&store, message_id, &reasoning).await;
+
         match failure {
             Some(error) => {
                 if let Err(err) = store
@@ -1912,30 +1920,43 @@ fn spawn_agent_generation(
 }
 
 /// Consume the provider stream, checkpointing and broadcasting as it goes.
-/// Returns the full content on success, or `(partial_content, error)`.
+/// Returns the full content and events on success, or `(partial_content, error, events)`.
 async fn generate(
     provider: &dyn LlmProvider,
     request: ChatRequest,
     tx: &watch::Sender<StreamState>,
     store: &Arc<dyn Store>,
     message_id: Uuid,
-) -> Result<String, (String, String)> {
+) -> Result<(String, Vec<SseEvent>), (String, String, Vec<SseEvent>)> {
     let mut upstream = match provider.stream(request).await {
         Ok(stream) => stream,
-        Err(err) => return Err((String::new(), err.to_string())),
+        Err(err) => return Err((String::new(), err.to_string(), Vec::new())),
     };
 
     let mut accumulated = String::new();
+    let mut reasoning = String::new();
+    let mut events: Vec<SseEvent> = Vec::new();
     let mut last_persist = 0usize;
 
     while let Some(chunk) = upstream.next().await {
         match chunk {
             Ok(chunk) => {
+                if !chunk.reasoning.is_empty() {
+                    reasoning.push_str(&chunk.reasoning);
+                    events.push(SseEvent::new(
+                        "thinking",
+                        json!({ "text": chunk.reasoning }),
+                    ));
+                    let _ = tx.send(StreamState::Streaming {
+                        content: accumulated.clone(),
+                        events: events.clone(),
+                    });
+                }
                 if !chunk.delta.is_empty() {
                     accumulated.push_str(&chunk.delta);
                     let _ = tx.send(StreamState::Streaming {
                         content: accumulated.clone(),
-                        events: Vec::new(),
+                        events: events.clone(),
                     });
                     if accumulated.len().saturating_sub(last_persist) >= PERSIST_EVERY_BYTES {
                         if let Err(err) = store
@@ -1955,10 +1976,24 @@ async fn generate(
                     break;
                 }
             }
-            Err(err) => return Err((accumulated, err.to_string())),
+            Err(err) => {
+                persist_reasoning(store, message_id, &reasoning).await;
+                return Err((accumulated, err.to_string(), events));
+            }
         }
     }
-    Ok(accumulated)
+    persist_reasoning(store, message_id, &reasoning).await;
+    Ok((accumulated, events))
+}
+
+/// Persist a generation's accumulated reasoning text on its assistant message.
+async fn persist_reasoning(store: &Arc<dyn Store>, message_id: Uuid, reasoning: &str) {
+    if reasoning.is_empty() {
+        return;
+    }
+    if let Err(err) = store.update_message_reasoning(message_id, reasoning).await {
+        tracing::warn!(error = %err, "failed to persist reasoning");
+    }
 }
 
 /// Adapt a live generation into an SSE event stream, emitting only content the

@@ -350,8 +350,9 @@ size per node is exposed to admins at `GET /api/admin/computers`.
 
 `/api/chat` streams `text/event-stream` events: `meta` (the assistant
 `message_id` and a `resume_path`), `delta` (incremental text, with the byte
-offset as the SSE event `id`), `error`, and a terminal `done`. Agent turns also
-emit `tool_call` and `tool_result` events.
+offset as the SSE event `id`), `thinking` (reasoning/thinking text from a
+reasoning model, as `{"text": ...}`), `error`, and a terminal `done`. Agent
+turns also emit `tool_call` and `tool_result` events.
 
 The assistant reply is streamed and checkpointed to the database as it is
 generated, and generation runs in a detached task, so a client disconnect does
