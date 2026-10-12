@@ -116,7 +116,7 @@ async fn conversations_are_isolated_between_users() {
 }
 
 #[tokio::test]
-async fn postgres_backend_runs_same_suite() {
+async fn conversations_are_isolated_between_users_runs_on_postgres() {
     if !common::postgres_available() {
         eprintln!("skipping: no container runtime available");
         return;
@@ -126,14 +126,44 @@ async fn postgres_backend_runs_same_suite() {
         .start()
         .await
         .unwrap();
-    let session = Session::register(&env.base_url, "a@example.com", "password123")
+
+    let admin = Session::register(&env.base_url, "admin@example.com", "password123")
         .await
         .unwrap();
-    assert_eq!(session.role, "admin");
-    let id = session.create_conversation("pg chat").await.unwrap();
-    let messages = session
+    assert_eq!(admin.role, "admin");
+    let user = Session::register(&env.base_url, "user@example.com", "password123")
+        .await
+        .unwrap();
+    assert_eq!(user.role, "user");
+
+    let logged_in = Session::login(&env.base_url, "admin@example.com", "password123")
+        .await
+        .unwrap();
+    assert_eq!(admin.user_id, logged_in.user_id);
+
+    let provider_id = admin
+        .create_provider("fake", &env.provider_url)
+        .await
+        .unwrap();
+    let providers = admin.get_expect("/api/providers").await.unwrap();
+    assert_eq!(providers.as_array().unwrap().len(), 1);
+    assert_eq!(providers[0]["id"], json!(provider_id));
+
+    let id = admin.create_conversation("pg chat").await.unwrap();
+    let list = admin.get_expect("/api/conversations").await.unwrap();
+    assert_eq!(list.as_array().unwrap().len(), 1);
+    assert_eq!(list[0]["title"], "pg chat");
+    let messages = admin
         .get_expect(&format!("/api/conversations/{id}/messages"))
         .await
         .unwrap();
     assert!(messages.as_array().unwrap().is_empty());
+
+    let resp = env
+        .http
+        .get(format!("{}/health", env.base_url))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success());
 }
