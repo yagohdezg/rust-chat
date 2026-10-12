@@ -1,0 +1,111 @@
+# Release publishing is intentionally MANUAL for now: this workflow only runs on
+# `workflow_dispatch`, never automatically on tags or pushes. Re-enable tag
+# publishing when the release process is ready.
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Image tag (and release artifact version) to publish.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  images:
+    name: Build and push images to GHCR
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push chat-server
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/docker/rust.Dockerfile
+          build-args: |
+            SERVICE=chat-server
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}/chat-server:${{ inputs.tag }}
+            ghcr.io/${{ github.repository }}/chat-server:latest
+
+      - name: Build and push sandboxd
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/docker/rust.Dockerfile
+          build-args: |
+            SERVICE=sandboxd
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}/sandboxd:${{ inputs.tag }}
+            ghcr.io/${{ github.repository }}/sandboxd:latest
+
+      - name: Build and push web
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/docker/web.Dockerfile
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}/web:${{ inputs.tag }}
+            ghcr.io/${{ github.repository }}/web:latest
+
+  artifacts:
+    name: Build release artifacts
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: rustup toolchain install --profile minimal
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-release-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-release-
+
+      - name: Build workspace binaries
+        run: cargo build --workspace --release
+
+      - name: Package binaries
+        run: |
+          mkdir -p dist
+          for bin in chat-server sandboxd; do
+            if [ -f "target/release/$bin" ]; then
+              tar -czf "dist/$bin-${{ inputs.tag }}-x86_64-unknown-linux-gnu.tar.gz" -C target/release "$bin"
+            fi
+          done
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-artifacts-${{ inputs.tag }}
+          path: dist/*.tar.gz
+          if-no-files-found: error

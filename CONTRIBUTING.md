@@ -54,6 +54,46 @@ The default backend is SQLite; `--profile postgres` opts into Postgres.
 Do not add new unit or integration tests unless explicitly instructed.
 End-to-end and system-level tests are welcome. See [`AGENTS.md`](AGENTS.md).
 
+| Task | Command |
+| --- | --- |
+| Everything (`cargo test --workspace`) | `just test` |
+| End-to-end suites on SQLite | `just e2e` |
+| The same suites against Postgres | `just e2e-postgres` |
+| Load/soak test (ignored by default) | `just e2e-load` |
+
+The end-to-end suites live in `crates/chat-server/tests/`; they spawn the real
+`chat-server` binary (plus a fake provider and a fake `sandboxd`) and drive it
+over HTTP/SSE. Postgres cases use `testcontainers` (`pgvector/pgvector:pg16`)
+and are skipped when no Docker/Podman runtime is reachable. Setting
+`RUSTCHAT_E2E_BACKEND=postgres` runs the *entire* suite against Postgres.
+
+`just e2e-load` opens `RUSTCHAT_LOAD_STREAMS` (default 50, or 4 on SQLite)
+concurrent `POST /api/chat` streams, samples the server's `/proc/<pid>/status`
+`VmRSS` at peak, and prints the peak RSS and per-stream bytes. It is not part of
+blocking CI; record its numbers in the PR body.
+
+## Continuous integration
+
+GitHub Actions runs on every pull request and on pushes to `main`
+(`.github/workflows/ci.yml`):
+
+- **Rust** — installs the pinned toolchain from `rust-toolchain.toml`, caches
+  cargo, then runs `just ci` (`cargo fmt --check`, `cargo clippy -D warnings`,
+  `cargo test --workspace`).
+- **Web** — installs Bun and runs `just web-install`, `just web-check` and
+  `just web-build`.
+- Docker is available on the runner, so the Postgres end-to-end cases in the
+  Rust job run via testcontainers.
+
+The load/soak test is not part of blocking CI.
+
+Publishing is manual for now: `.github/workflows/release.yml` only runs on
+`workflow_dispatch`. It builds and pushes the `chat-server`, `sandboxd` and
+`web` images to GHCR (tagged with the supplied tag and `latest`) and uploads
+release artifacts.
+
+See issue #74 (epic #12).
+
 ## Style
 
 - Match the surrounding code and existing libraries; prefer editing existing
