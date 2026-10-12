@@ -128,6 +128,7 @@ function convertTexDelimiters(content: string): string {
 const inlineKatexRule =
 	/^(\${1,2})(?!\$)((?:\\.|[^\\\n])*?(?:\\.|[^\\\n$]))\1(?=[\s?!.,:;)\]}"'%？！。，：]|$)/;
 const blockKatexRule = /^(\${1,2})\n((?:\\[^]|[^\\])+?)\n\1(?:\n|$)/;
+const displayKatexRule = /^\$\$(?!\$)[ \t]*\n?((?:\\[^]|[^\\])+?)\n?[ \t]*\$\$(?:\n|$)/;
 
 function renderKatex(tex: string, displayMode: boolean): string {
 	return katex.renderToString(tex, { throwOnError: false, displayMode });
@@ -178,6 +179,25 @@ const blockKatex = {
 	}
 };
 
+const displayKatex = {
+	name: 'displayKatex',
+	level: 'block' as const,
+	tokenizer(src: string) {
+		const match = displayKatexRule.exec(src);
+		if (match) {
+			return {
+				type: 'displayKatex',
+				raw: match[0],
+				text: match[1].trim(),
+				displayMode: true
+			};
+		}
+	},
+	renderer(token: Tokens.Generic) {
+		return renderKatex(String(token.text), true) + '\n';
+	}
+};
+
 marked.use(
 	markedHighlight({
 		emptyLangClass: 'hljs',
@@ -187,7 +207,7 @@ marked.use(
 			return hljs.highlight(code, { language }).value;
 		}
 	}),
-	{ extensions: [inlineKatex, blockKatex] },
+	{ extensions: [inlineKatex, blockKatex, displayKatex] },
 	{ gfm: true, breaks: true }
 );
 
