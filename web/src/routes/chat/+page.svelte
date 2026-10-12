@@ -239,6 +239,15 @@
 					{#if msg.role === 'user'}
 						<div class="content">{msg.content}</div>
 					{:else}
+						{#if msg.thinking}
+							<details class="thinking-block">
+								<summary>
+									<span class="thinking-icon" aria-hidden="true">✳</span>
+									<span class="thinking-title">Thinking</span>
+								</summary>
+								<div class="thinking-body">{msg.thinking}</div>
+							</details>
+						{/if}
 						{#if msg.steps && msg.steps.length > 0}
 							<div class="steps">
 								{#each msg.steps as step, j (j)}
@@ -761,6 +770,42 @@
 	}
 	.step-body {
 		margin: 0;
+		padding: 0.5rem 0.55rem;
+		border-top: 1px solid var(--border);
+		white-space: pre-wrap;
+		overflow-wrap: anywhere;
+		max-height: 16rem;
+		overflow: auto;
+		color: var(--text-muted);
+	}
+	.thinking-block {
+		border: 1px solid var(--border);
+		border-radius: calc(var(--radius) - 2px);
+		background: var(--surface-active);
+		font-size: 0.82rem;
+		margin-bottom: 0.55rem;
+	}
+	.thinking-block > summary {
+		display: flex;
+		align-items: center;
+		gap: 0.45rem;
+		padding: 0.35rem 0.55rem;
+		cursor: pointer;
+		list-style: none;
+		color: var(--text-muted);
+	}
+	.thinking-block > summary::-webkit-details-marker {
+		display: none;
+	}
+	.thinking-icon {
+		font-size: 0.75rem;
+		color: var(--primary);
+	}
+	.thinking-title {
+		font-weight: 600;
+		color: var(--text);
+	}
+	.thinking-body {
 		padding: 0.5rem 0.55rem;
 		border-top: 1px solid var(--border);
 		white-space: pre-wrap;

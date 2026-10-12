@@ -19,6 +19,7 @@ export type Message = {
 	conversation_id: string;
 	role: string;
 	content?: string | null;
+	reasoning?: string | null;
 	tool_calls?: unknown;
 	tool_call_id?: string | null;
 	status?: string;
@@ -481,6 +482,7 @@ export async function downloadFile(file: FileRecord): Promise<void> {
 
 export type StreamHandlers = {
 	onDelta?: (text: string) => void;
+	onThinking?: (text: string) => void;
 	onToolCall?: (calls: ToolCall[]) => void;
 	onToolResult?: (result: ToolResult) => void;
 	onError?: (error: unknown) => void;
@@ -558,7 +560,11 @@ export async function streamChat(
 				const event = parseFrame(frame);
 				if (!event) continue;
 				if (event.event === 'delta') handlers.onDelta?.(event.data);
-				else if (event.event === 'tool_call') {
+				else if (event.event === 'thinking') {
+					try {
+						handlers.onThinking?.((JSON.parse(event.data) as { text: string }).text);
+					} catch {}
+				} else if (event.event === 'tool_call') {
 					try {
 						handlers.onToolCall?.(JSON.parse(event.data) as ToolCall[]);
 					} catch {
