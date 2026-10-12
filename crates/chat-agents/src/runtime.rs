@@ -24,6 +24,8 @@ pub struct AgentConfig {
 /// [`AgentEvent::Delta`] so the caller can stream it.
 #[derive(Debug, Clone)]
 pub enum AgentEvent {
+    /// Incremental reasoning/thinking text from a reasoning model.
+    Thinking(String),
     /// Incremental text of the final assistant answer.
     Delta(String),
     /// The model finished an assistant turn that requested tool calls.
@@ -215,6 +217,9 @@ pub fn run_agent_stream(
             while let Some(chunk) = stream.next().await {
                 match chunk {
                     Ok(chunk) => {
+                        if !chunk.reasoning.is_empty() {
+                            yield Ok(AgentEvent::Thinking(chunk.reasoning.clone()));
+                        }
                         if !chunk.delta.is_empty() {
                             content.push_str(&chunk.delta);
                         }
@@ -390,6 +395,7 @@ mod tests {
         let mut final_text = String::new();
         while let Some(event) = stream.next().await {
             match event.unwrap() {
+                AgentEvent::Thinking(_) => {}
                 AgentEvent::Delta(text) => final_text.push_str(&text),
                 AgentEvent::ToolCalls { tool_calls, .. } => {
                     assert!(tool_calls.to_string().contains("echo"));

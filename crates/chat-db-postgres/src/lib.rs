@@ -420,8 +420,8 @@ impl Store for PostgresStore {
         .await?;
 
         sqlx::query(
-            "insert into messages (id, conversation_id, role, content, tool_calls, tool_call_id, status, created_at)
-             select gen_random_uuid(), $1, role, content, tool_calls, tool_call_id, status, created_at
+            "insert into messages (id, conversation_id, role, content, reasoning, tool_calls, tool_call_id, status, created_at)
+             select gen_random_uuid(), $1, role, content, reasoning, tool_calls, tool_call_id, status, created_at
              from messages where conversation_id = $2 order by created_at",
         )
         .bind(new_id)
@@ -827,6 +827,15 @@ impl Store for PostgresStore {
             .bind(id)
             .bind(content)
             .bind(status)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn update_message_reasoning(&self, id: Uuid, reasoning: &str) -> Result<()> {
+        sqlx::query("update messages set reasoning = $2 where id = $1")
+            .bind(id)
+            .bind(reasoning)
             .execute(&self.pool)
             .await?;
         Ok(())

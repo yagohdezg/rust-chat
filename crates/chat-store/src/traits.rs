@@ -239,6 +239,9 @@ pub trait Store: Send + Sync {
     /// Replace a message's content and status (used to checkpoint a stream).
     async fn update_message_content(&self, id: Uuid, content: &str, status: &str) -> Result<()>;
 
+    /// Replace a message's persisted reasoning/thinking text.
+    async fn update_message_reasoning(&self, id: Uuid, reasoning: &str) -> Result<()>;
+
     /// Replace a message's content and status and move it to the end of its
     /// conversation. Used to finalize an agent answer whose placeholder was
     /// created before the tool turns that logically precede it.

@@ -447,13 +447,14 @@ impl Store for SqliteStore {
 
         for message in messages {
             sqlx::query(
-                "insert into messages (id, conversation_id, role, content, tool_calls, tool_call_id, status, created_at)
-                 values (?, ?, ?, ?, ?, ?, ?, ?)",
+                "insert into messages (id, conversation_id, role, content, reasoning, tool_calls, tool_call_id, status, created_at)
+                 values (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(Uuid::new_v4())
             .bind(new_id)
             .bind(&message.role)
             .bind(&message.content)
+            .bind(&message.reasoning)
             .bind(&message.tool_calls)
             .bind(&message.tool_call_id)
             .bind(&message.status)
@@ -860,6 +861,15 @@ impl Store for SqliteStore {
         sqlx::query("update messages set content = ?, status = ? where id = ?")
             .bind(content)
             .bind(status)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn update_message_reasoning(&self, id: Uuid, reasoning: &str) -> Result<()> {
+        sqlx::query("update messages set reasoning = ? where id = ?")
+            .bind(reasoning)
             .bind(id)
             .execute(&self.pool)
             .await?;
