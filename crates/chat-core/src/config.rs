@@ -164,6 +164,8 @@ pub struct Config {
     /// How often the idle reaper (and warm-pool refill) runs.
     pub computer_reap_interval_seconds: u64,
     /// Blank boxes to keep warm per node, to hide box cold-start (0 disables).
+    /// Ownership is durable: the pool is recorded in the store and reconciled
+    /// against the nodes each reaper tick, so leaked boxes are reclaimed.
     pub computer_warm_pool: usize,
     /// Mount a durable per-user workspace volume so a computer's files survive
     /// its box being stopped, snapshotted, reaped or re-provisioned.

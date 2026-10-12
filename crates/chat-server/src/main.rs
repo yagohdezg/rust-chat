@@ -182,6 +182,7 @@ async fn main() -> anyhow::Result<()> {
             patch(routes::admin_update_user).delete(routes::admin_delete_user),
         )
         .route("/api/admin/audit", get(routes::admin_list_audit))
+        .route("/api/admin/computers", get(routes::admin_list_computers))
         .route(
             "/api/admin/providers",
             post(routes::admin_bulk_create_providers),
@@ -365,8 +366,16 @@ fn spawn_computer_reaper(orchestrator: Arc<ComputerOrchestrator>, interval: std:
                 Ok(count) => tracing::info!(count, "reaped idle computers"),
                 Err(err) => tracing::warn!(error = %err, "idle computer reaper failed"),
             }
+            match orchestrator.reconcile().await {
+                Ok(0) => {}
+                Ok(count) => tracing::info!(count, "reclaimed leaked computer boxes"),
+                Err(err) => tracing::warn!(error = %err, "warm pool reconcile failed"),
+            }
             if let Err(err) = orchestrator.refill_warm_pool().await {
                 tracing::warn!(error = %err, "warm pool refill failed");
+            }
+            if let Ok(status) = orchestrator.warm_pool_status().await {
+                tracing::debug!(?status, "warm pool status");
             }
         }
     });

@@ -183,6 +183,18 @@ pub struct Computer {
     pub last_active_at: DateTime<Utc>,
 }
 
+/// A blank, pre-provisioned box kept warm to hide BoxLite cold start.
+///
+/// The pool is durable ownership: the row records which node hosts the box, so
+/// a restarted control plane can reconcile its warm pool against what a node
+/// actually runs and reclaim anything it no longer owns.
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+pub struct PoolBox {
+    pub handle: String,
+    pub node: String,
+    pub created_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
 pub struct FileRecord {
     pub id: Uuid,

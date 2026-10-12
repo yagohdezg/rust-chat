@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use chat_sandbox::{ExecRequest, ExecResult, SandboxError};
+use chat_sandbox::{BoxSummary, ExecRequest, ExecResult, SandboxError};
 
 use crate::error::{ComputerError, Result};
 
@@ -21,8 +21,12 @@ pub trait ComputerNode: Send + Sync {
     fn name(&self) -> &str;
 
     /// Provision a new box, returning its opaque handle. When `workspace` is
-    /// set, the named durable volume is mounted at the box's working directory.
-    async fn create(&self, workspace: Option<&str>) -> Result<String>;
+    /// set, the named durable volume is mounted at the box's working directory;
+    /// `name` is the deployment-assigned box name (ownership marker).
+    async fn create(&self, workspace: Option<&str>, name: Option<&str>) -> Result<String>;
+
+    /// List every box on the node (handle + optional name), for reconciliation.
+    async fn list_boxes(&self) -> Result<Vec<BoxSummary>>;
 
     /// Run a request inside an existing box, leaving the box alive.
     async fn exec(&self, handle: &str, request: &ExecRequest) -> Result<ExecResult>;
@@ -46,9 +50,10 @@ pub trait ComputerNode: Send + Sync {
 
 /// HTTP client for one `sandboxd` node.
 ///
-/// Speaks the node's persistent-computer endpoints: `POST /v1/computers`,
-/// `POST /v1/computers/{handle}/exec|pause|resume`, `DELETE
-/// /v1/computers/{handle}` and `DELETE /v1/workspaces/{name}`.
+/// Speaks the node's persistent-computer endpoints: `POST /v1/computers`
+/// (create), `GET /v1/computers` (list), `POST
+/// /v1/computers/{handle}/exec|pause|resume`, `DELETE /v1/computers/{handle}`
+/// and `DELETE /v1/workspaces/{name}`.
 pub struct HttpComputerNode {
     name: String,
     base_url: String,
@@ -119,11 +124,11 @@ impl ComputerNode for HttpComputerNode {
         &self.name
     }
 
-    async fn create(&self, workspace: Option<&str>) -> Result<String> {
+    async fn create(&self, workspace: Option<&str>, name: Option<&str>) -> Result<String> {
         let resp = self
             .send(
                 self.auth(self.http.post(self.url("computers")))
-                    .json(&serde_json::json!({ "workspace": workspace })),
+                    .json(&serde_json::json!({ "workspace": workspace, "name": name })),
                 "create computer",
             )
             .await?;
@@ -133,6 +138,20 @@ impl ComputerNode for HttpComputerNode {
             )))
         })?;
         Ok(body.handle)
+    }
+
+    async fn list_boxes(&self) -> Result<Vec<BoxSummary>> {
+        let resp = self
+            .send(
+                self.auth(self.http.get(self.url("computers"))),
+                "list computers",
+            )
+            .await?;
+        resp.json::<Vec<BoxSummary>>().await.map_err(|e| {
+            ComputerError::Node(SandboxError::Transport(format!(
+                "invalid list response: {e}"
+            )))
+        })
     }
 
     async fn exec(&self, handle: &str, request: &ExecRequest) -> Result<ExecResult> {

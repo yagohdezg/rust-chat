@@ -265,7 +265,7 @@ See [`.env.example`](.env.example).
 | `SANDBOX_NODES`           | (see below)                                          | `name=url[,...]` nodes for computers |
 | `COMPUTER_IDLE_TTL_SECONDS` | `1800`                                             | Destroy a computer idle this long   |
 | `COMPUTER_REAP_INTERVAL_SECONDS` | `60`                                        | Idle-reaper / warm-pool tick        |
-| `COMPUTER_WARM_POOL`      | `0`                                                  | Warm boxes per node (`0` disables; ignored when workspaces are on) |
+| `COMPUTER_WARM_POOL`      | `0`                                                  | Warm boxes per node, durably owned (`0` disables; ignored when workspaces are on) |
 | `COMPUTER_WORKSPACE`      | `true`                                               | Mount a durable per-user workspace volume |
 
 `sandboxd` reads its own environment: `SANDBOXD_TOKEN` (**required**),
@@ -289,6 +289,14 @@ Pausing stops the box and snapshots its disks; resuming starts it again, and a
 lost box is transparently re-created from the volume. An explicit `DELETE
 /api/computers/me` removes the volume too.
 
+With `COMPUTER_WARM_POOL`, blank boxes are pre-provisioned per node to hide
+BoxLite cold start; a new computer takes a warm box instead of booting one.
+Pool ownership is recorded in the `computer_pool` table and every box is named
+`rustchat-pool-*`/`rustchat-computer-*`, so the reaper's reconciliation pass can
+list each node's boxes and reclaim any box this deployment no longer owns — a
+box orphaned by a crash, a lost placement race, or a pool turned off. The pool
+size per node is exposed to admins at `GET /api/admin/computers`.
+
 ## HTTP API
 
 | Method | Path                                | Auth | Description                          |
@@ -304,6 +312,7 @@ lost box is transparently re-created from the volume. An explicit `DELETE
 | `PATCH`| `/api/admin/users/{id}`             | admin | Change role / enable-disable an account |
 | `DELETE`| `/api/admin/users/{id}`            | admin | Delete an account (not self/last admin) |
 | `GET`  | `/api/admin/audit`                  | admin | Recent security audit events         |
+| `GET`  | `/api/admin/computers`              | admin | Computer placements and warm-pool size per node |
 | `POST` | `/api/admin/providers`              | admin | Bulk-create instance-wide providers  |
 | `GET`  | `/api/providers`                    | JWT  | List providers visible to the caller, with `has_key` |
 | `POST` | `/api/providers`                    | JWT  | Create a personal provider (admin: `global`) |
@@ -400,4 +409,6 @@ With `COMPUTERS_ENABLED`, a user's `execute_code` tool calls run on their own
 long-lived computer (one live box per user, placed via the `computers` registry)
 rather than a shared throwaway box. With `COMPUTER_WORKSPACE`, the computer
 remounts a durable workspace volume so its files outlive the box, and pausing
-snapshots it. The MCP integration and a durable warm VM pool are still pending.
+snapshots it. `COMPUTER_WARM_POOL` pre-provisions blank boxes to hide cold
+start; ownership is durable and reconciled against each node, so boxes orphaned
+by a crash are reclaimed. The MCP integration is still pending.

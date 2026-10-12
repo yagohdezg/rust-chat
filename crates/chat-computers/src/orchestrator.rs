@@ -3,21 +3,22 @@
 //! [`ComputerOrchestrator`] ties the placement registry ([`Store`]) to the
 //! sandbox [`NodeRouter`]. Given a user it provisions (or resumes) their
 //! persistent computer, routes executions to the node that hosts it, and
-//! destroys computers that have gone idle. A small in-memory warm pool hides
-//! box cold-start on the hot path.
+//! destroys computers that have gone idle. A durable warm pool (ownership
+//! recorded in the store, reconciled against the nodes) hides box cold-start on
+//! the hot path and reclaims leaked boxes after a crash.
 //!
 //! When workspace volumes are enabled each computer mounts a durable volume
 //! (named from its user) at the working directory, so files survive the box
 //! being stopped, snapshotted, reaped or re-provisioned on another node.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{Duration as ChronoDuration, Utc};
-use tokio::sync::Mutex;
 use uuid::Uuid;
 
-use chat_sandbox::{ExecRequest, ExecResult};
+use chat_sandbox::{box_names, ExecRequest, ExecResult};
 use chat_store::types::computer_state;
 use chat_store::{Computer, Store};
 
@@ -27,25 +28,9 @@ use crate::node::NodeRouter;
 /// Idle computers destroyed per reaper pass, bounding node calls per tick.
 const REAP_BATCH: i64 = 100;
 
-/// Pre-provisioned blank box handles, keyed by node name.
-#[derive(Default)]
-struct WarmPool {
-    ready: std::collections::HashMap<String, Vec<String>>,
-}
-
-impl WarmPool {
-    fn take(&mut self, node: &str) -> Option<String> {
-        self.ready.get_mut(node).and_then(Vec::pop)
-    }
-
-    fn put(&mut self, node: &str, handle: String) {
-        self.ready.entry(node.to_string()).or_default().push(handle);
-    }
-
-    fn len(&self, node: &str) -> usize {
-        self.ready.get(node).map_or(0, Vec::len)
-    }
-}
+/// A box younger than this is never reclaimed: it may be mid-creation by
+/// another replica that has not yet recorded ownership.
+const RECONCILE_GRACE: ChronoDuration = ChronoDuration::seconds(60);
 
 /// Per-user persistent "computer" control plane.
 pub struct ComputerOrchestrator {
@@ -57,7 +42,6 @@ pub struct ComputerOrchestrator {
     warm_pool_size: usize,
     /// Mount a durable per-user workspace volume at the box's working directory.
     workspace: bool,
-    warm: Mutex<WarmPool>,
 }
 
 impl ComputerOrchestrator {
@@ -75,8 +59,13 @@ impl ComputerOrchestrator {
                 .unwrap_or_else(|_| ChronoDuration::seconds(i64::MAX)),
             warm_pool_size,
             workspace,
-            warm: Mutex::new(WarmPool::default()),
         }
+    }
+
+    /// Whether the warm pool is active: it is disabled by size `0`, and when
+    /// workspace volumes are on a blank warm box cannot mount a user's volume.
+    fn warm_pool_active(&self) -> bool {
+        self.warm_pool_size > 0 && !self.workspace
     }
 
     /// Durable workspace volume name for a user, or `None` when disabled.
@@ -128,10 +117,13 @@ impl ComputerOrchestrator {
         let handle = match workspace {
             // A volume-mounted box is per-user, so a blank warm box cannot be
             // reused; always create fresh.
-            Some(ref name) => node.create(Some(name)).await?,
-            None => match self.warm.lock().await.take(&node_name) {
+            Some(ref name) => {
+                node.create(Some(name), Some(&box_names::computer()))
+                    .await?
+            }
+            None => match self.store.take_pool_box(&node_name).await? {
                 Some(handle) => handle,
-                None => node.create(None).await?,
+                None => node.create(None, Some(&box_names::computer())).await?,
             },
         };
 
@@ -162,7 +154,9 @@ impl ComputerOrchestrator {
             .router
             .get(&computer.node)
             .ok_or_else(|| ComputerError::UnknownNode(computer.node.clone()))?;
-        let handle = node.create(computer.volume.as_deref()).await?;
+        let handle = node
+            .create(computer.volume.as_deref(), Some(&box_names::computer()))
+            .await?;
         self.store
             .set_computer_handle(computer.id, Some(&handle))
             .await?;
@@ -349,23 +343,31 @@ impl ComputerOrchestrator {
 
     /// Top up the warm pool to `warm_pool_size` boxes per node.
     ///
-    /// Disabled when workspace volumes are enabled: warm boxes are blank and
-    /// have no volume, so they cannot host a per-user workspace.
+    /// Ownership is durable: every box is recorded in the store as it is
+    /// created, so a restart or crash can reconcile the pool instead of leaking
+    /// boxes. Disabled when workspace volumes are enabled: warm boxes are blank
+    /// and have no volume, so they cannot host a per-user workspace.
     pub async fn refill_warm_pool(&self) -> Result<usize> {
-        if self.warm_pool_size == 0 || self.workspace {
+        if !self.warm_pool_active() {
             return Ok(0);
         }
+        let pool = self.store.list_pool_boxes().await?;
         let mut created = 0;
         for name in self.router.names() {
             let node = match self.router.get(&name) {
                 Some(node) => node.clone(),
                 None => continue,
             };
-            let have = self.warm.lock().await.len(&name);
+            let have = pool.iter().filter(|box_| box_.node == name).count();
             for _ in have..self.warm_pool_size {
-                match node.create(None).await {
+                match node.create(None, Some(&box_names::pool())).await {
                     Ok(handle) => {
-                        self.warm.lock().await.put(&name, handle);
+                        if let Err(e) = self.store.add_pool_box(&name, &handle).await {
+                            // Don't leak a box we failed to record ownership of.
+                            tracing::warn!(error = %e, node = %name, "failed to record warm box; destroying it");
+                            let _ = node.destroy(&handle).await;
+                            break;
+                        }
                         created += 1;
                     }
                     Err(e) => {
@@ -376,6 +378,93 @@ impl ComputerOrchestrator {
             }
         }
         Ok(created)
+    }
+
+    /// Reconcile ownership with what the nodes actually run, reclaiming leaks.
+    ///
+    /// A box named as ours (pool/computer prefix) whose handle is no longer
+    /// tracked is an orphan — from a crash, a lost placement race, or a pool
+    /// disabled after boxes were created — and is destroyed. Pool rows whose
+    /// box has vanished are pruned. A node that cannot be listed is skipped
+    /// rather than treated as empty. Returns the number of boxes reclaimed.
+    pub async fn reconcile(&self) -> Result<usize> {
+        let pool = self.store.list_pool_boxes().await?;
+        let pool_handles: HashSet<String> = if self.warm_pool_active() {
+            pool.iter().map(|box_| box_.handle.clone()).collect()
+        } else {
+            HashSet::new()
+        };
+        let computer_handles: HashSet<String> = self
+            .store
+            .list_live_computer_handles()
+            .await?
+            .into_iter()
+            .collect();
+
+        let cutoff = Utc::now() - RECONCILE_GRACE;
+        let mut reclaimed = 0;
+        for name in self.router.names() {
+            let Some(node) = self.router.get(&name) else {
+                continue;
+            };
+            let boxes = match node.list_boxes().await {
+                Ok(boxes) => boxes,
+                Err(e) => {
+                    tracing::warn!(error = %e, node = %name, "node listing failed; skipping reconcile");
+                    continue;
+                }
+            };
+            let on_node: HashSet<&str> = boxes.iter().map(|box_| box_.handle.as_str()).collect();
+            for box_ in &boxes {
+                let leaked = match box_.name.as_deref() {
+                    Some(n) if n.starts_with(box_names::POOL_PREFIX) => {
+                        !pool_handles.contains(&box_.handle)
+                    }
+                    Some(n) if n.starts_with(box_names::COMPUTER_PREFIX) => {
+                        !computer_handles.contains(&box_.handle)
+                    }
+                    _ => false,
+                };
+                // Only reclaim once it is old enough that it cannot be a
+                // creation still in flight on another replica.
+                let stale = box_.created_at.is_some_and(|created| created <= cutoff);
+                if leaked && stale {
+                    match node.destroy(&box_.handle).await {
+                        Ok(()) => {
+                            reclaimed += 1;
+                            tracing::info!(
+                                node = %name,
+                                handle = %box_.handle,
+                                "reclaimed leaked computer box"
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, node = %name, handle = %box_.handle, "failed to reclaim leaked box");
+                        }
+                    }
+                }
+            }
+            for row in pool.iter().filter(|row| row.node == name) {
+                if !on_node.contains(row.handle.as_str()) {
+                    self.store.remove_pool_box(&row.handle).await?;
+                }
+            }
+        }
+        Ok(reclaimed)
+    }
+
+    /// The warm pool's current size per node, for observability.
+    pub async fn warm_pool_status(&self) -> Result<Vec<(String, usize)>> {
+        let pool = self.store.list_pool_boxes().await?;
+        Ok(self
+            .router
+            .names()
+            .into_iter()
+            .map(|name| {
+                let ready = pool.iter().filter(|box_| box_.node == name).count();
+                (name, ready)
+            })
+            .collect())
     }
 
     /// Probe every node's health, for readiness reporting.

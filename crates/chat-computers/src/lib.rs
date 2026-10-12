@@ -7,7 +7,7 @@
 //! * [`NodeRouter`] / [`ComputerNode`] — resolving a placement to a callable
 //!   sandbox node (no sticky load balancer).
 //! * [`ComputerOrchestrator`] — create / pause / resume / destroy, idle-TTL
-//!   reaping, and a small warm pool.
+//!   reaping, and a durable, reconciled warm pool.
 //!
 //! Placement is persisted through `chat_store::Store`, so routing survives
 //! process restarts. The node protocol is spoken by `sandboxd`
@@ -71,11 +71,15 @@ mod tests {
             &self.name
         }
 
-        async fn create(&self, _workspace: Option<&str>) -> Result<String> {
+        async fn create(&self, _workspace: Option<&str>, _name: Option<&str>) -> Result<String> {
             let mut counter = self.counter.lock().unwrap();
             *counter += 1;
             *self.created.lock().unwrap() += 1;
             Ok(format!("{}-box-{}", self.name, *counter))
+        }
+
+        async fn list_boxes(&self) -> Result<Vec<chat_sandbox::BoxSummary>> {
+            Ok(Vec::new())
         }
 
         async fn exec(&self, _handle: &str, _request: &ExecRequest) -> Result<ExecResult> {
@@ -325,7 +329,7 @@ mod tests {
             format!("http://{addr}"),
             Some("node-token".into()),
         );
-        let handle = node.create(None).await.unwrap();
+        let handle = node.create(None, None).await.unwrap();
         assert_eq!(handle, "box-9");
 
         let result = node
