@@ -32,6 +32,18 @@ fmt-check:
 test:
     cargo test --workspace
 
+# Run the end-to-end HTTP/SSE suites (real server + fake provider/sandboxd).
+e2e:
+    cargo test -p chat-server --test e2e_api --test e2e_streaming --test e2e_sandbox
+
+# Run the whole e2e suite against Postgres (testcontainers) instead of SQLite.
+e2e-postgres:
+    RUSTCHAT_E2E_BACKEND=postgres cargo test -p chat-server --test e2e_api --test e2e_streaming --test e2e_sandbox
+
+# Run the ignored SSE load/soak test (prints peak RSS and bytes-per-stream).
+e2e-load:
+    cargo test -p chat-server --test e2e_load -- --ignored --nocapture
+
 # Run every quality gate the way CI does.
 ci: fmt-check lint test
     @echo "all checks passed"

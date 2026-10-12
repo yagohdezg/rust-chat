@@ -56,6 +56,13 @@ impl Backend {
         [Backend::Sqlite, Backend::Postgres]
     }
 
+    fn from_env() -> Backend {
+        match std::env::var("RUSTCHAT_E2E_BACKEND").as_deref() {
+            Ok("postgres") => Backend::Postgres,
+            _ => Backend::Sqlite,
+        }
+    }
+
     fn env_value(self) -> &'static str {
         match self {
             Backend::Sqlite => "sqlite",
@@ -147,6 +154,12 @@ pub struct TestEnv {
     _pg: Option<ContainerAsync<PgVector>>,
 }
 
+impl TestEnv {
+    pub fn server_pid(&self) -> u32 {
+        self._server.child.id()
+    }
+}
+
 #[derive(Clone)]
 pub struct TestEnvBuilder {
     backend: Backend,
@@ -158,7 +171,7 @@ pub struct TestEnvBuilder {
 impl TestEnvBuilder {
     pub fn new() -> Self {
         Self {
-            backend: Backend::Sqlite,
+            backend: Backend::from_env(),
             script: Script::text("Hello from the fake provider"),
             sandbox_tool: false,
             extra_env: Vec::new(),
@@ -196,6 +209,11 @@ impl TestEnvBuilder {
                 (format!("sqlite://{}", db.display()), None)
             }
             Backend::Postgres => {
+                if !postgres_available() {
+                    return Err(anyhow!(
+                        "RUSTCHAT_E2E_BACKEND=postgres was requested but no container runtime is                          reachable (Docker/Podman socket not found)"
+                    ));
+                }
                 configure_container_env();
                 let container = PgVector
                     .start()
