@@ -7,7 +7,7 @@ export type ToolStep =
 	| { kind: 'result'; id: string; name: string; content: string };
 
 /** A message as held in the client, optionally carrying tool steps. */
-type ThreadMessage = api.Message & { steps?: ToolStep[] };
+type ThreadMessage = api.Message & { steps?: ToolStep[]; thinking?: string };
 
 /**
  * Fold persisted tool turns into `steps` on the assistant message that produced
@@ -44,13 +44,16 @@ function withToolSteps(messages: api.Message[]): ThreadMessage[] {
 				if (last) {
 					last.steps!.push(...steps);
 					last.content = (last.content ?? '') + (m.content ?? '');
+					last.thinking = (last.thinking ?? '') + (m.reasoning ?? '');
 				} else {
-					last = { ...m, steps };
+					last = { ...m, steps, thinking: m.reasoning ?? '' };
 					out.push(last);
 				}
 			} else {
-				if (last) last.content = (last.content ?? '') + (m.content ?? '');
-				else out.push(m);
+				if (last) {
+					last.content = (last.content ?? '') + (m.content ?? '');
+					last.thinking = (last.thinking ?? '') + (m.reasoning ?? '');
+				} else out.push({ ...m, thinking: m.reasoning ?? '' });
 				last = null;
 			}
 			continue;
@@ -570,7 +573,7 @@ class ChatStore {
 		this.messages = [
 			...this.messages,
 			localMessage('user', text, conversationId),
-			{ ...localMessage('assistant', '', conversationId), steps: [] }
+			{ ...localMessage('assistant', '', conversationId), steps: [], thinking: '' }
 		];
 		// Read the proxied element back so streaming mutations stay reactive.
 		const assistant = this.messages[this.messages.length - 1];
@@ -589,6 +592,10 @@ class ChatStore {
 			{
 				onDelta: (delta) => {
 					assistant.content = (assistant.content ?? '') + delta;
+					this.touch();
+				},
+				onThinking: (text) => {
+					assistant.thinking = (assistant.thinking ?? '') + text;
 					this.touch();
 				},
 				onToolCall: (calls) => {
