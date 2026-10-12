@@ -6,6 +6,7 @@ use chat_core::Config;
 use chat_sandbox::SandboxBackend;
 use chat_store::{FileStore, Store};
 
+use crate::mcp::McpRegistry;
 use crate::rate_limit::RateLimiter;
 use crate::stream::StreamHub;
 use crate::workspace::FileWorkspace;
@@ -24,6 +25,8 @@ pub struct AppState {
     pub computers: Option<Arc<ComputerOrchestrator>>,
     /// Tools available to the agent runtime. Empty disables the agent path.
     pub tools: ToolRegistry,
+    /// Live MCP clients whose tools the agent runtime can call.
+    pub mcp: Arc<McpRegistry>,
     /// Registry of in-flight assistant generations, for resumable SSE.
     pub hub: Arc<StreamHub>,
     /// Process-local per-IP rate limiter for the auth and chat routes.

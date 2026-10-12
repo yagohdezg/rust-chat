@@ -1,6 +1,7 @@
 mod doctext;
 mod error;
 mod extract;
+mod mcp;
 mod rate_limit;
 mod routes;
 mod state;
@@ -148,9 +149,16 @@ async fn main() -> anyhow::Result<()> {
         sandbox,
         computers,
         tools,
+        // MCP clients whose tools the agent runtime can call. Empty for now:
+        // no server is spawned until MCP configuration and lifecycle land.
+        mcp: Arc::new(mcp::McpRegistry::new()),
         hub: Arc::new(StreamHub::new()),
         rate_limit: Arc::new(rate_limit::RateLimiter::new()),
     });
+    tracing::debug!(
+        servers = state.mcp.server_count().await,
+        "mcp registry ready"
+    );
 
     // Auth and chat get their own per-IP rate limiters; everything else is
     // unlimited at this layer.
