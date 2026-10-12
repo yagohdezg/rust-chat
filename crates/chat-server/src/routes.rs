@@ -1502,7 +1502,7 @@ pub async fn resume_stream(
             }
             match status.as_str() {
                 message_status::COMPLETE => {
-                    yield Ok(Event::default().event("done").data(""));
+                    yield Ok(Event::default().event("done").data("done"));
                 }
                 message_status::STREAMING => {
                     // Generation is gone (e.g. restart / different replica).
@@ -1510,11 +1510,11 @@ pub async fn resume_stream(
                         .update_message_content(message_id, &persisted, message_status::INTERRUPTED)
                         .await;
                     yield Ok(Event::default().event("error").data("generation was interrupted"));
-                    yield Ok(Event::default().event("done").data(""));
+                    yield Ok(Event::default().event("done").data("done"));
                 }
                 _ => {
                     yield Ok(Event::default().event("error").data("generation failed"));
-                    yield Ok(Event::default().event("done").data(""));
+                    yield Ok(Event::default().event("done").data("done"));
                 }
             }
         }
@@ -1991,7 +1991,7 @@ fn live_stream(
                     }
                     if rx.changed().await.is_err() {
                         // Producer vanished without a terminal state.
-                        yield Ok(Event::default().event("done").data(""));
+                        yield Ok(Event::default().event("done").data("done"));
                         break;
                     }
                 }
@@ -2001,7 +2001,7 @@ fn live_stream(
                         offset = next;
                         yield Ok(Event::default().id(offset.to_string()).event("delta").data(chunk));
                     }
-                    yield Ok(Event::default().event("done").data(""));
+                    yield Ok(Event::default().event("done").data("done"));
                     break;
                 }
                 StreamState::Failed { content, error, .. } => {
@@ -2011,7 +2011,7 @@ fn live_stream(
                         yield Ok(Event::default().id(offset.to_string()).event("delta").data(chunk));
                     }
                     yield Ok(Event::default().event("error").data(error));
-                    yield Ok(Event::default().event("done").data(""));
+                    yield Ok(Event::default().event("done").data("done"));
                     break;
                 }
             }
