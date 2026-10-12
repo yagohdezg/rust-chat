@@ -42,3 +42,8 @@ base64.workspace = true
 quick-xml.workspace = true
 zip.workspace = true
 pdf-extract.workspace = true
+
+[dev-dependencies]
+testcontainers-modules = { version = "0.13.0", features = ["postgres"] }
+reqwest.workspace = true
+eventsource-stream.workspace = true
