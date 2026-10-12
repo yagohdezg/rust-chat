@@ -195,7 +195,7 @@ pub fn delta_text(events: &[SseEvent]) -> String {
     events
         .iter()
         .filter(|event| event.event == "delta")
-        .map(|event| event.text())
+        .map(|event| event.data.clone())
         .collect()
 }
 
