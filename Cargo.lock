@@ -572,6 +572,7 @@ dependencies = [
  "chat-db-postgres",
  "chat-db-sqlite",
  "chat-files-s3",
+ "chat-mcp",
  "chat-providers",
  "chat-sandbox",
  "chat-store",
