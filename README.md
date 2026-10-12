@@ -227,9 +227,19 @@ unqualified-search registry. Override the compose provider with
 ```bash
 just fmt-check     # rustfmt
 just lint          # clippy -- -D warnings
-just test
-just ci            # all of the above
+just test          # unit + end-to-end tests
+just e2e           # end-to-end HTTP/SSE suites only (SQLite)
+just e2e-postgres  # the same e2e suites against Postgres (testcontainers)
+just e2e-load      # ignored SSE load/soak test (prints peak RSS)
+just ci            # fmt-check + lint + test, the way CI runs
 ```
+
+The end-to-end suites (`crates/chat-server/tests/`) spawn the real `chat-server`
+binary against a throwaway SQLite database or a Postgres testcontainer and drive
+it over HTTP/SSE. Postgres cases are skipped when no Docker/Podman runtime is
+reachable; they run in CI. `.github/workflows/ci.yml` runs `just ci` plus the
+frontend checks on every pull request, and `release.yml` builds and publishes
+container images (manual, `workflow_dispatch` only).
 
 ## Configuration
 
