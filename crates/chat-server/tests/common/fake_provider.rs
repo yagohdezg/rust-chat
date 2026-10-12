@@ -14,6 +14,7 @@ use tokio::net::TcpListener;
 #[derive(Clone, Debug)]
 pub enum Turn {
     Text(String),
+    Reasoning(String),
     ToolCall { name: String, arguments: String },
     Raw(String),
     Finish,
@@ -105,6 +106,9 @@ async fn chat_completions(State(p): State<FakeProvider>, Json(body): Json<Value>
             let event: Result<Event, Infallible> = match turn {
                 Turn::Text(text) => Ok(Event::default()
                     .data(json!({"choices": [{"delta": {"content": text}}]}).to_string())),
+                Turn::Reasoning(text) => Ok(Event::default().data(
+                    json!({"choices": [{"delta": {"reasoning_content": text}}]}).to_string(),
+                )),
                 Turn::ToolCall { name, arguments } => Ok(Event::default().data(
                     json!({"choices": [{"delta": {"tool_calls": [{
                         "index": 0, "id": "call_1", "type": "function",

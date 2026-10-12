@@ -305,3 +305,126 @@ async fn stream_runs_on_postgres() {
     assert_eq!(delta_text(&replayed), ANSWER);
     assert_eq!(event_count(&replayed, "done"), 1);
 }
+
+const REASONING: &str = "let me think";
+
+fn reasoning_script() -> Script {
+    Script {
+        model: "fake-model".into(),
+        responses: vec![vec![
+            Turn::Reasoning(REASONING.into()),
+            Turn::Text(ANSWER.into()),
+            Turn::Finish,
+        ]],
+        delay_ms: 0,
+    }
+}
+
+fn assistant_message(messages: &serde_json::Value) -> &serde_json::Value {
+    messages
+        .as_array()
+        .expect("messages must be an array")
+        .iter()
+        .find(|message| message["role"] == json!("assistant"))
+        .expect("expected an assistant message")
+}
+
+#[tokio::test]
+async fn plain_stream_emits_thinking_before_delta_and_persists_reasoning() {
+    let env = env_with(reasoning_script()).await;
+    let (session, conversation_id, _message_id, events) = one_turn(&env, "hi").await;
+
+    let thinking = events_named(&events, "thinking");
+    assert!(!thinking.is_empty(), "expected at least one thinking event");
+    let reasoning: String = thinking.iter().map(|event| event.text()).collect();
+    assert_eq!(reasoning, REASONING);
+
+    let first_thinking = index_of(&events, "thinking").unwrap();
+    let first_delta = index_of(&events, "delta").unwrap();
+    assert!(
+        first_thinking < first_delta,
+        "thinking must precede the first delta"
+    );
+
+    assert_eq!(delta_text(&events), ANSWER);
+    assert_eq!(event_count(&events, "done"), 1, "exactly one done");
+    assert_eq!(events.last().unwrap().event, "done", "done must be last");
+
+    let messages = session
+        .get_expect(&format!("/api/conversations/{conversation_id}/messages"))
+        .await
+        .unwrap();
+    assert_eq!(assistant_message(&messages)["reasoning"], json!(REASONING));
+}
+
+#[tokio::test]
+async fn non_reasoning_stream_emits_no_thinking() {
+    let env = env_with(Script::text(ANSWER)).await;
+    let (session, conversation_id, _message_id, events) = one_turn(&env, "hi").await;
+
+    assert_eq!(
+        event_count(&events, "thinking"),
+        0,
+        "a non-reasoning model must emit no thinking events"
+    );
+    assert_eq!(delta_text(&events), ANSWER);
+
+    let messages = session
+        .get_expect(&format!("/api/conversations/{conversation_id}/messages"))
+        .await
+        .unwrap();
+    let reasoning = &assistant_message(&messages)["reasoning"];
+    assert!(
+        reasoning.is_null() || reasoning == &json!(""),
+        "expected no reasoning, got {reasoning}"
+    );
+}
+
+#[tokio::test]
+async fn agent_stream_emits_thinking_and_persists_reasoning() {
+    let env = env_with(reasoning_script()).await;
+    let session = Session::register(&env.base_url, "a@example.com", "password123")
+        .await
+        .unwrap();
+    let provider_id = session
+        .create_provider("fake", &env.provider_url)
+        .await
+        .unwrap();
+    let agent = session
+        .post_expect(
+            "/api/agents",
+            &json!({"name": "reasoner", "provider_id": provider_id, "model": "fake-model"}),
+        )
+        .await
+        .unwrap();
+    let agent_id: Uuid = agent["id"].as_str().unwrap().parse().unwrap();
+    let conversation_id: Uuid = session
+        .post_expect(
+            "/api/conversations",
+            &json!({"title": "t", "agent_id": agent_id}),
+        )
+        .await
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+
+    let events = session
+        .chat_sse(conversation_id, "hi", None, None)
+        .await
+        .unwrap();
+
+    let thinking = events_named(&events, "thinking");
+    assert!(!thinking.is_empty(), "expected at least one thinking event");
+    let reasoning: String = thinking.iter().map(|event| event.text()).collect();
+    assert_eq!(reasoning, REASONING);
+    assert_eq!(event_count(&events, "done"), 1, "exactly one done");
+    assert_eq!(events.last().unwrap().event, "done", "done must be last");
+
+    let messages = session
+        .get_expect(&format!("/api/conversations/{conversation_id}/messages"))
+        .await
+        .unwrap();
+    assert_eq!(assistant_message(&messages)["reasoning"], json!(REASONING));
+}
