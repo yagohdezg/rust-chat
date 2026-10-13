@@ -4,17 +4,20 @@
 //! - `stdio`: spawns a server process and exchanges newline-delimited messages.
 //! - `http`: Streamable HTTP — POSTs JSON-RPC and reads a JSON or SSE response.
 //!
-//! `StdioMcpClient` requests are single-flight; a correlation queue for
-//! concurrent calls can be layered on later.
+//! Both clients accept concurrent requests: each is correlated to its response
+//! by JSON-RPC id, so one slow call never blocks the others.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::{Arc, Mutex as StdMutex};
 
 use eventsource_stream::Eventsource;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStdin, ChildStdout, Command};
+use tokio::process::{Child, ChildStdin, Command};
+use tokio::sync::{oneshot, Mutex};
 
 pub const PROTOCOL_VERSION: &str = "2025-06-18";
 
@@ -95,28 +98,28 @@ impl McpClient {
 
     /// Whether the connection is still usable. HTTP has no process to watch, so
     /// it always reports `true` and lets a failed request surface the error.
-    pub fn is_running(&mut self) -> bool {
+    pub fn is_running(&self) -> bool {
         match self {
             Self::Stdio(client) => client.is_running(),
             Self::Http(client) => client.is_running(),
         }
     }
 
-    pub async fn initialize(&mut self) -> Result<Value, McpError> {
+    pub async fn initialize(&self) -> Result<Value, McpError> {
         match self {
             Self::Stdio(client) => client.initialize().await,
             Self::Http(client) => client.initialize().await,
         }
     }
 
-    pub async fn list_tools(&mut self) -> Result<Vec<McpTool>, McpError> {
+    pub async fn list_tools(&self) -> Result<Vec<McpTool>, McpError> {
         match self {
             Self::Stdio(client) => client.list_tools().await,
             Self::Http(client) => client.list_tools().await,
         }
     }
 
-    pub async fn call_tool(&mut self, name: &str, arguments: Value) -> Result<Value, McpError> {
+    pub async fn call_tool(&self, name: &str, arguments: Value) -> Result<Value, McpError> {
         match self {
             Self::Stdio(client) => client.call_tool(name, arguments).await,
             Self::Http(client) => client.call_tool(name, arguments).await,
@@ -161,12 +164,33 @@ fn parse_message(value: Value, id: i64) -> Result<Option<Value>, McpError> {
     Ok(Some(value.get("result").cloned().unwrap_or(Value::Null)))
 }
 
-/// A single-flight MCP client over stdio.
+/// Callers waiting on a response, keyed by JSON-RPC id.
+type Pending = Arc<StdMutex<HashMap<i64, oneshot::Sender<Result<Value, McpError>>>>>;
+
+/// Removes a pending entry when the waiting future is dropped (e.g. on
+/// timeout), so a request that never gets a response cannot leak.
+struct PendingGuard {
+    pending: Pending,
+    id: i64,
+}
+
+impl Drop for PendingGuard {
+    fn drop(&mut self) {
+        self.pending.lock().unwrap().remove(&self.id);
+    }
+}
+
+/// An MCP client over stdio.
+///
+/// A background task reads the server's stdout and routes each JSON-RPC response
+/// to the caller waiting on that id, so many requests can be in flight at once
+/// and one slow call never blocks the others.
 pub struct StdioMcpClient {
-    child: Child,
-    stdin: ChildStdin,
-    stdout: BufReader<ChildStdout>,
-    next_id: i64,
+    child: StdMutex<Child>,
+    stdin: Mutex<ChildStdin>,
+    pending: Pending,
+    next_id: AtomicI64,
+    reader: tokio::task::JoinHandle<()>,
 }
 
 impl StdioMcpClient {
@@ -193,73 +217,98 @@ impl StdioMcpClient {
             .take()
             .ok_or_else(|| McpError::Protocol("no stdout".into()))?;
 
+        let pending: Pending = Arc::new(StdMutex::new(HashMap::new()));
+        let reader_pending = pending.clone();
+        let reader = tokio::spawn(async move {
+            let mut lines = BufReader::new(stdout).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                let Ok(value) = serde_json::from_str::<Value>(trimmed) else {
+                    continue;
+                };
+                let Some(id) = value.get("id").and_then(Value::as_i64) else {
+                    continue;
+                };
+                let result = parse_message(value, id).map(|result| result.unwrap_or(Value::Null));
+                if let Some(sender) = reader_pending.lock().unwrap().remove(&id) {
+                    let _ = sender.send(result);
+                }
+            }
+            // The server closed stdout: wake every waiter with a closed error.
+            reader_pending.lock().unwrap().clear();
+        });
+
         Ok(Self {
-            child,
-            stdin,
-            stdout: BufReader::new(stdout),
-            next_id: 1,
+            child: StdMutex::new(child),
+            stdin: Mutex::new(stdin),
+            pending,
+            next_id: AtomicI64::new(1),
+            reader,
         })
     }
 
     /// Whether the server process is still running. A child that has exited (or
     /// was killed) reports `false`, so the caller can reconnect.
-    pub fn is_running(&mut self) -> bool {
-        matches!(self.child.try_wait(), Ok(None))
+    pub fn is_running(&self) -> bool {
+        matches!(self.child.lock().unwrap().try_wait(), Ok(None))
     }
 
-    async fn request(&mut self, method: &str, params: Value) -> Result<Value, McpError> {
-        let id = self.next_id;
-        self.next_id += 1;
-        let msg = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
+    async fn request(&self, method: &str, params: Value) -> Result<Value, McpError> {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let (sender, receiver) = oneshot::channel();
+        self.pending.lock().unwrap().insert(id, sender);
+        let _guard = PendingGuard {
+            pending: self.pending.clone(),
+            id,
+        };
 
-        let mut line = serde_json::to_string(&msg).unwrap();
+        let message = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
+        let mut line = serde_json::to_string(&message).unwrap();
         line.push('\n');
-        self.stdin.write_all(line.as_bytes()).await?;
-        self.stdin.flush().await?;
-
-        // Read until we see our response id, skipping notifications.
-        loop {
-            let mut buf = String::new();
-            let n = self.stdout.read_line(&mut buf).await?;
-            if n == 0 {
-                return Err(McpError::Protocol("server closed the connection".into()));
-            }
-            let trimmed = buf.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-            let value: Value = serde_json::from_str(trimmed)
-                .map_err(|e| McpError::Protocol(format!("invalid json: {e}")))?;
-
-            if let Some(result) = parse_message(value, id)? {
-                return Ok(result);
-            }
+        {
+            let mut stdin = self.stdin.lock().await;
+            stdin.write_all(line.as_bytes()).await?;
+            stdin.flush().await?;
         }
+
+        receiver
+            .await
+            .map_err(|_| McpError::Protocol("server closed the connection".into()))?
     }
 
-    async fn notify(&mut self, method: &str, params: Value) -> Result<(), McpError> {
-        let msg = json!({ "jsonrpc": "2.0", "method": method, "params": params });
-        let mut line = serde_json::to_string(&msg).unwrap();
+    async fn notify(&self, method: &str, params: Value) -> Result<(), McpError> {
+        let message = json!({ "jsonrpc": "2.0", "method": method, "params": params });
+        let mut line = serde_json::to_string(&message).unwrap();
         line.push('\n');
-        self.stdin.write_all(line.as_bytes()).await?;
-        self.stdin.flush().await?;
+        let mut stdin = self.stdin.lock().await;
+        stdin.write_all(line.as_bytes()).await?;
+        stdin.flush().await?;
         Ok(())
     }
 
-    pub async fn initialize(&mut self) -> Result<Value, McpError> {
+    pub async fn initialize(&self) -> Result<Value, McpError> {
         let result = self.request("initialize", initialize_params()).await?;
         self.notify("notifications/initialized", json!({})).await?;
         Ok(result)
     }
 
-    pub async fn list_tools(&mut self) -> Result<Vec<McpTool>, McpError> {
+    pub async fn list_tools(&self) -> Result<Vec<McpTool>, McpError> {
         let result = self.request("tools/list", json!({})).await?;
         tools_from(result)
     }
 
-    pub async fn call_tool(&mut self, name: &str, args: Value) -> Result<Value, McpError> {
+    pub async fn call_tool(&self, name: &str, args: Value) -> Result<Value, McpError> {
         self.request("tools/call", json!({ "name": name, "arguments": args }))
             .await
+    }
+}
+
+impl Drop for StdioMcpClient {
+    fn drop(&mut self) {
+        self.reader.abort();
     }
 }
 
@@ -268,8 +317,8 @@ impl StdioMcpClient {
 pub struct HttpMcpClient {
     http: reqwest::Client,
     url: String,
-    session_id: Option<String>,
-    next_id: i64,
+    session_id: StdMutex<Option<String>>,
+    next_id: AtomicI64,
 }
 
 impl HttpMcpClient {
@@ -280,8 +329,8 @@ impl HttpMcpClient {
         Ok(Self {
             http: reqwest::Client::builder().build()?,
             url: url.to_string(),
-            session_id: None,
-            next_id: 1,
+            session_id: StdMutex::new(None),
+            next_id: AtomicI64::new(1),
         })
     }
 
@@ -291,7 +340,8 @@ impl HttpMcpClient {
 
     /// POST a JSON-RPC message, capturing any `Mcp-Session-Id` the server hands
     /// back so later requests can echo it.
-    async fn post(&mut self, body: &Value) -> Result<reqwest::Response, McpError> {
+    async fn post(&self, body: &Value) -> Result<reqwest::Response, McpError> {
+        let session = self.session_id.lock().unwrap().clone();
         let mut request = self
             .http
             .post(&self.url)
@@ -300,7 +350,7 @@ impl HttpMcpClient {
                 "application/json, text/event-stream",
             )
             .json(body);
-        if let Some(session) = &self.session_id {
+        if let Some(session) = session {
             request = request.header("mcp-session-id", session);
         }
 
@@ -310,14 +360,13 @@ impl HttpMcpClient {
             .get("mcp-session-id")
             .and_then(|value| value.to_str().ok())
         {
-            self.session_id = Some(session.to_string());
+            *self.session_id.lock().unwrap() = Some(session.to_string());
         }
         Ok(response)
     }
 
-    async fn request(&mut self, method: &str, params: Value) -> Result<Value, McpError> {
-        let id = self.next_id;
-        self.next_id += 1;
+    async fn request(&self, method: &str, params: Value) -> Result<Value, McpError> {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let body = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
         let response = self.post(&body).await?;
 
@@ -357,7 +406,7 @@ impl HttpMcpClient {
             .ok_or_else(|| McpError::Protocol("response id did not match the request".into()))
     }
 
-    async fn notify(&mut self, method: &str, params: Value) -> Result<(), McpError> {
+    async fn notify(&self, method: &str, params: Value) -> Result<(), McpError> {
         let body = json!({ "jsonrpc": "2.0", "method": method, "params": params });
         let response = self.post(&body).await?;
         let status = response.status();
@@ -368,18 +417,18 @@ impl HttpMcpClient {
         Ok(())
     }
 
-    pub async fn initialize(&mut self) -> Result<Value, McpError> {
+    pub async fn initialize(&self) -> Result<Value, McpError> {
         let result = self.request("initialize", initialize_params()).await?;
         self.notify("notifications/initialized", json!({})).await?;
         Ok(result)
     }
 
-    pub async fn list_tools(&mut self) -> Result<Vec<McpTool>, McpError> {
+    pub async fn list_tools(&self) -> Result<Vec<McpTool>, McpError> {
         let result = self.request("tools/list", json!({})).await?;
         tools_from(result)
     }
 
-    pub async fn call_tool(&mut self, name: &str, args: Value) -> Result<Value, McpError> {
+    pub async fn call_tool(&self, name: &str, args: Value) -> Result<Value, McpError> {
         self.request("tools/call", json!({ "name": name, "arguments": args }))
             .await
     }
