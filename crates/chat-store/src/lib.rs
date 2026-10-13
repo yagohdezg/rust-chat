@@ -15,6 +15,6 @@ pub mod types;
 pub use files::{FileStore, LocalFileStore};
 pub use models::{
     AdminUserSummary, Agent, AgentDraft, AuditEntry, AuditLog, Computer, Conversation, FileRecord,
-    Message, PoolBox, Provider, ProviderModel, RefreshToken, User,
+    McpServer, McpServerDraft, Message, PoolBox, Provider, ProviderModel, RefreshToken, User,
 };
 pub use traits::Store;

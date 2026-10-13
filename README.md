@@ -277,6 +277,8 @@ See [`.env.example`](.env.example).
 | `COMPUTER_REAP_INTERVAL_SECONDS` | `60`                                        | Idle-reaper / warm-pool tick        |
 | `COMPUTER_WARM_POOL`      | `0`                                                  | Warm boxes per node, durably owned (`0` disables; ignored when workspaces are on) |
 | `COMPUTER_WORKSPACE`      | `true`                                               | Mount a durable per-user workspace volume |
+| `MCP_ENABLED`             | `false`                                              | Expose users' MCP server tools to the agent runtime |
+| `MCP_IDLE_TTL_SECONDS`    | `300`                                                | Shut down an MCP server idle this long |
 
 `sandboxd` reads its own environment: `SANDBOXD_TOKEN` (**required**),
 `SANDBOXD_BIND_ADDR` (`0.0.0.0:3081`), `BOXLITE_URL`
@@ -323,6 +325,9 @@ size per node is exposed to admins at `GET /api/admin/computers`.
 | `DELETE`| `/api/admin/users/{id}`            | admin | Delete an account (not self/last admin) |
 | `GET`  | `/api/admin/audit`                  | admin | Recent security audit events         |
 | `GET`  | `/api/admin/computers`              | admin | Computer placements and warm-pool size per node |
+| `GET`  | `/api/mcp-servers`                  | JWT  | List the caller's MCP servers        |
+| `POST` | `/api/mcp-servers`                  | JWT  | Register a user-scoped MCP server    |
+| `DELETE`| `/api/mcp-servers/{id}`            | JWT  | Delete an MCP server                 |
 | `POST` | `/api/admin/providers`              | admin | Bulk-create instance-wide providers  |
 | `GET`  | `/api/providers`                    | JWT  | List providers visible to the caller, with `has_key` |
 | `POST` | `/api/providers`                    | JWT  | Create a personal provider (admin: `global`) |
@@ -422,4 +427,11 @@ rather than a shared throwaway box. With `COMPUTER_WORKSPACE`, the computer
 remounts a durable workspace volume so its files outlive the box, and pausing
 snapshots it. `COMPUTER_WARM_POOL` pre-provisions blank boxes to hide cold
 start; ownership is durable and reconciled against each node, so boxes orphaned
-by a crash are reclaimed. The MCP integration is still pending.
+by a crash are reclaimed.
+
+With `MCP_ENABLED`, each user can register Model Context Protocol servers
+(`POST /api/mcp-servers`) and their tools are exposed to the agent runtime,
+namespaced `mcp__<server>__<tool>`. Servers are spawned on demand over stdio,
+cached across turns, reconnected if their process dies, and shut down after
+`MCP_IDLE_TTL_SECONDS` idle. Only the stdio transport exists today; an HTTP/SSE
+transport and running untrusted servers inside the sandbox are follow-ups.

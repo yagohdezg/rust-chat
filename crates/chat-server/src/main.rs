@@ -140,6 +140,8 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let bind_addr = cfg.bind_addr.clone();
+    let mcp_idle_ttl = std::time::Duration::from_secs(cfg.mcp_idle_ttl_seconds.max(1));
+    let mcp_reap_interval = (mcp_idle_ttl / 2).max(std::time::Duration::from_secs(5));
     let workspace = Arc::new(workspace::FileWorkspace::new(files.clone(), store.clone()));
     let state = Arc::new(AppState {
         cfg: Arc::new(cfg),
@@ -149,9 +151,9 @@ async fn main() -> anyhow::Result<()> {
         sandbox,
         computers,
         tools,
-        // MCP clients whose tools the agent runtime can call. Empty for now:
-        // no server is spawned until MCP configuration and lifecycle land.
-        mcp: Arc::new(mcp::McpRegistry::new()),
+        // MCP clients whose tools the agent runtime can call, spawned on demand
+        // from each user's stored server config.
+        mcp: Arc::new(mcp::McpRegistry::new(mcp_idle_ttl)),
         hub: Arc::new(StreamHub::new()),
         rate_limit: Arc::new(rate_limit::RateLimiter::new()),
     });
@@ -159,6 +161,7 @@ async fn main() -> anyhow::Result<()> {
         servers = state.mcp.server_count().await,
         "mcp registry ready"
     );
+    spawn_mcp_reaper(state.mcp.clone(), mcp_reap_interval);
 
     // Auth and chat get their own per-IP rate limiters; everything else is
     // unlimited at this layer.
@@ -213,6 +216,11 @@ async fn main() -> anyhow::Result<()> {
             get(routes::list_agents).post(routes::create_agent),
         )
         .route("/api/agents/{id}", delete(routes::delete_agent))
+        .route(
+            "/api/mcp-servers",
+            get(routes::list_mcp_servers).post(routes::create_mcp_server),
+        )
+        .route("/api/mcp-servers/{id}", delete(routes::delete_mcp_server))
         .route(
             "/api/providers",
             get(routes::list_providers).post(routes::create_provider),
@@ -385,6 +393,20 @@ fn spawn_computer_reaper(orchestrator: Arc<ComputerOrchestrator>, interval: std:
             if let Ok(status) = orchestrator.warm_pool_status().await {
                 tracing::debug!(?status, "warm pool status");
             }
+        }
+    });
+}
+
+/// Background loop that shuts down MCP servers idle past their TTL, killing the
+/// child processes. Each process runs its own reaper; the registry is
+/// process-local, so there is nothing to reconcile across replicas.
+fn spawn_mcp_reaper(registry: Arc<mcp::McpRegistry>, interval: std::time::Duration) {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(interval);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            ticker.tick().await;
+            registry.shutdown_idle().await;
         }
     });
 }

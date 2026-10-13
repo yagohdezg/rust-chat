@@ -9,7 +9,8 @@ use std::sync::Arc;
 use chat_core::{ChatError, Result, SecretCipher};
 use chat_store::{
     AdminUserSummary, Agent, AgentDraft, AuditEntry, AuditLog, Computer, Conversation, FileRecord,
-    Message, PoolBox, Provider, ProviderModel, RefreshToken, Store, User,
+    McpServer, McpServerDraft, Message, PoolBox, Provider, ProviderModel, RefreshToken, Store,
+    User,
 };
 use chrono::{DateTime, Utc};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
@@ -511,6 +512,58 @@ impl Store for SqliteStore {
 
     async fn delete_agent(&self, id: Uuid, user_id: Uuid) -> Result<()> {
         sqlx::query("delete from agents where id = ? and user_id = ?")
+            .bind(id)
+            .bind(user_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn create_mcp_server(&self, user_id: Uuid, draft: McpServerDraft) -> Result<McpServer> {
+        let row = sqlx::query_as::<_, McpServer>(
+            "insert into mcp_servers
+             (id, user_id, name, transport, command, url, args, env, enabled, created_at)
+             values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             returning *",
+        )
+        .bind(Uuid::new_v4())
+        .bind(user_id)
+        .bind(draft.name)
+        .bind(draft.transport)
+        .bind(draft.command)
+        .bind(draft.url)
+        .bind(Json(draft.args))
+        .bind(Json(draft.env))
+        .bind(draft.enabled)
+        .bind(Utc::now())
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row)
+    }
+
+    async fn list_mcp_servers(&self, user_id: Uuid) -> Result<Vec<McpServer>> {
+        let rows = sqlx::query_as::<_, McpServer>(
+            "select * from mcp_servers where user_id = ? order by created_at asc limit 200",
+        )
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    async fn get_mcp_server(&self, id: Uuid, user_id: Uuid) -> Result<Option<McpServer>> {
+        let row = sqlx::query_as::<_, McpServer>(
+            "select * from mcp_servers where id = ? and user_id = ?",
+        )
+        .bind(id)
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row)
+    }
+
+    async fn delete_mcp_server(&self, id: Uuid, user_id: Uuid) -> Result<()> {
+        sqlx::query("delete from mcp_servers where id = ? and user_id = ?")
             .bind(id)
             .bind(user_id)
             .execute(&self.pool)

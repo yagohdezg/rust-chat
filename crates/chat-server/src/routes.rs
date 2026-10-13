@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -25,8 +26,8 @@ use chat_providers::{ChatMessage, ChatRequest, LlmProvider, ModelInfo, OpenAiPro
 use chat_sandbox::{ExecRequest, ExecResult, SandboxFile};
 use chat_store::types::message_status;
 use chat_store::{
-    AdminUserSummary, AuditEntry, AuditLog, Computer, Conversation, FileRecord, Message, Provider,
-    ProviderModel, Store,
+    AdminUserSummary, AuditEntry, AuditLog, Computer, Conversation, FileRecord, McpServer,
+    McpServerDraft, Message, Provider, ProviderModel, Store,
 };
 
 use crate::error::ApiError;
@@ -805,6 +806,93 @@ pub async fn delete_agent(
     Ok(StatusCode::NO_CONTENT)
 }
 
+// ---- MCP servers ----------------------------------------------------------
+
+pub async fn list_mcp_servers(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+) -> Result<Json<Vec<McpServer>>, ApiError> {
+    Ok(Json(state.store.list_mcp_servers(user.id).await?))
+}
+
+#[derive(Deserialize)]
+pub struct CreateMcpServerBody {
+    pub name: String,
+    #[serde(default)]
+    pub transport: Option<String>,
+    #[serde(default)]
+    pub command: Option<String>,
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+}
+
+fn default_enabled() -> bool {
+    true
+}
+
+pub async fn create_mcp_server(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Json(body): Json<CreateMcpServerBody>,
+) -> Result<Json<McpServer>, ApiError> {
+    let name = body.name.trim();
+    if name.is_empty() {
+        return Err(ChatError::BadRequest("mcp server name is required".into()).into());
+    }
+
+    let transport = body
+        .transport
+        .as_deref()
+        .unwrap_or("stdio")
+        .trim()
+        .to_ascii_lowercase();
+    if transport != "stdio" && transport != "http" {
+        return Err(ChatError::BadRequest("transport must be `stdio` or `http`".into()).into());
+    }
+
+    let blank_to_none = |value: Option<String>| value.filter(|v| !v.trim().is_empty());
+    let command = blank_to_none(body.command);
+    let url = blank_to_none(body.url);
+    if transport == "stdio" && command.is_none() {
+        return Err(ChatError::BadRequest("stdio servers require a command".into()).into());
+    }
+    if transport == "http" && url.is_none() {
+        return Err(ChatError::BadRequest("http servers require a url".into()).into());
+    }
+
+    let server = state
+        .store
+        .create_mcp_server(
+            user.id,
+            McpServerDraft {
+                name: name.to_string(),
+                transport,
+                command,
+                url,
+                args: body.args,
+                env: body.env,
+                enabled: body.enabled,
+            },
+        )
+        .await?;
+    Ok(Json(server))
+}
+
+pub async fn delete_mcp_server(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path(server_id): Path<Uuid>,
+) -> Result<StatusCode, ApiError> {
+    state.store.delete_mcp_server(server_id, user.id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 // ---- providers ------------------------------------------------------------
 
 /// A provider as seen by the calling user, with whether that user has a usable
@@ -1354,11 +1442,27 @@ pub async fn chat(
     let requested_model = body.model.clone();
     let requested_provider = body.provider_id;
 
-    // Route through the agent loop when the conversation has an agent attached
-    // or any tools are registered; otherwise use the lean single-shot path.
-    // Resolve the agent *before* writing anything so a missing or foreign agent
-    // fails the request without leaving a dangling stream.
-    let use_agent = !state.tools.is_empty() || conversation.agent_id.is_some();
+    // Enabled MCP servers contribute tools to the agent runtime, so they also
+    // force the agent path. Off (or none configured) leaves the lean path.
+    let mcp_servers: Vec<McpServer> = if state.cfg.mcp_enabled {
+        state
+            .store
+            .list_mcp_servers(user.id)
+            .await?
+            .into_iter()
+            .filter(|server| server.enabled)
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    // Route through the agent loop when the conversation has an agent attached,
+    // any tools are registered, or the user has enabled MCP servers; otherwise
+    // use the lean single-shot path. Resolve the agent *before* writing anything
+    // so a missing or foreign agent fails the request without leaving a dangling
+    // stream.
+    let use_agent =
+        !state.tools.is_empty() || conversation.agent_id.is_some() || !mcp_servers.is_empty();
     let resolved = if use_agent {
         Some(
             resolve_agent(
@@ -1367,6 +1471,7 @@ pub async fn chat(
                 &conversation,
                 requested_model.as_deref(),
                 requested_provider,
+                &mcp_servers,
             )
             .await?,
         )
@@ -1638,6 +1743,7 @@ async fn resolve_agent(
     conversation: &Conversation,
     requested_model: Option<&str>,
     requested_provider: Option<Uuid>,
+    mcp_servers: &[McpServer],
 ) -> Result<ResolvedAgent, ApiError> {
     let agent = match conversation.agent_id {
         Some(agent_id) => Some(
@@ -1716,6 +1822,13 @@ async fn resolve_agent(
             }
             _ => SANDBOX_SYSTEM_PROMPT.to_string(),
         });
+    }
+
+    // Expose the user's enabled MCP servers' tools. The registry connects on
+    // demand and skips (with a warning) any server that fails to start, so a
+    // bad server never fails the whole turn.
+    for tool in state.mcp.tools_for(mcp_servers).await {
+        tools.register(tool);
     }
 
     if model.is_none() {
