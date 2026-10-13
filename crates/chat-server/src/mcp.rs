@@ -1,11 +1,11 @@
 //! MCP server registry and tool adapter.
 //!
 //! Owns the live `chat-mcp` clients, keyed by server id, so the agent runtime
-//! can list and call their tools. Clients are spawned on demand from stored
-//! user config, cached across turns, reconnected when the child process dies,
-//! and shut down after an idle timeout.
+//! can list and call their tools. Clients are connected on demand from stored
+//! user config, cached across turns, reconnected when the connection dies, and
+//! shut down after an idle timeout.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -14,49 +14,47 @@ use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use chat_agents::Tool;
-use chat_mcp::{McpError, McpTool, StdioMcpClient};
+use chat_mcp::{McpClient, McpError, McpServerConfig, McpTool, Transport};
 use chat_store::McpServer;
 
 /// How long a single MCP request (initialize, list, call) may take before it is
 /// treated as a failure.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 
-/// A connected stdio MCP server plus its cached tool catalog.
+/// A connected MCP server plus its cached tool catalog.
 struct McpClientHandle {
     name: String,
-    command: String,
-    args: Vec<String>,
-    env: BTreeMap<String, String>,
-    client: Mutex<StdioMcpClient>,
+    config: McpServerConfig,
+    client: Mutex<McpClient>,
     tools: Vec<McpTool>,
     last_used: Mutex<Instant>,
 }
 
-impl McpClientHandle {
-    /// Spawn, initialize and enumerate the tools of `server`.
-    async fn spawn(server: &McpServer) -> Result<Self, McpError> {
-        if server.transport != "stdio" {
-            return Err(McpError::Protocol(format!(
-                "transport `{}` is not supported yet",
-                server.transport
-            )));
-        }
-        let command = server
-            .command
-            .clone()
-            .ok_or_else(|| McpError::Protocol("stdio server has no command".into()))?;
-        let args = server.args.0.clone();
-        let env = server.env.0.clone();
+/// Translate stored config into a transport-agnostic connect config.
+fn config_for(server: &McpServer) -> Result<McpServerConfig, McpError> {
+    let transport = Transport::parse(&server.transport)
+        .ok_or_else(|| McpError::Protocol(format!("unknown transport `{}`", server.transport)))?;
+    Ok(McpServerConfig {
+        name: server.name.clone(),
+        transport,
+        command: server.command.clone(),
+        url: server.url.clone(),
+        args: server.args.0.clone(),
+        env: server.env.0.clone(),
+    })
+}
 
-        let mut client = StdioMcpClient::spawn(&command, &args, &env).await?;
+impl McpClientHandle {
+    /// Connect, initialize and enumerate the tools of `server`.
+    async fn spawn(server: &McpServer) -> Result<Self, McpError> {
+        let config = config_for(server)?;
+        let mut client = McpClient::connect(&config).await?;
         request(client.initialize()).await?;
         let tools = request(client.list_tools()).await?;
 
         Ok(Self {
-            name: server.name.clone(),
-            command,
-            args,
-            env,
+            name: config.name.clone(),
+            config,
             client: Mutex::new(client),
             tools,
             last_used: Mutex::new(Instant::now()),
@@ -82,8 +80,8 @@ impl McpClientHandle {
         if client.is_running() {
             return Ok(());
         }
-        tracing::warn!(server = %self.name, "MCP server process died; reconnecting");
-        *client = StdioMcpClient::spawn(&self.command, &self.args, &self.env).await?;
+        tracing::warn!(server = %self.name, "MCP server connection died; reconnecting");
+        *client = McpClient::connect(&self.config).await?;
         request(client.initialize()).await?;
         Ok(())
     }

@@ -431,7 +431,8 @@ by a crash are reclaimed.
 
 With `MCP_ENABLED`, each user can register Model Context Protocol servers
 (`POST /api/mcp-servers`) and their tools are exposed to the agent runtime,
-namespaced `mcp__<server>__<tool>`. Servers are spawned on demand over stdio,
-cached across turns, reconnected if their process dies, and shut down after
-`MCP_IDLE_TTL_SECONDS` idle. Only the stdio transport exists today; an HTTP/SSE
-transport and running untrusted servers inside the sandbox are follow-ups.
+namespaced `mcp__<server>__<tool>`. Both transports are supported: `stdio`
+spawns a local command, while `http` speaks Streamable HTTP (JSON or SSE
+responses) to a URL. Connections are opened on demand, cached across turns,
+reconnected if they drop, and shut down after `MCP_IDLE_TTL_SECONDS` idle.
+Running untrusted servers inside the sandbox is still a follow-up.

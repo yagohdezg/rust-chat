@@ -1,11 +1,16 @@
 //! Model Context Protocol (MCP) client.
 //!
-//! v0 implements the JSON-RPC 2.0 `stdio` transport: it spawns a server process
-//! and exchanges newline-delimited messages. Requests are single-flight; a
-//! correlation queue for concurrent calls can be layered on later.
+//! Implements JSON-RPC 2.0 over two transports:
+//! - `stdio`: spawns a server process and exchanges newline-delimited messages.
+//! - `http`: Streamable HTTP — POSTs JSON-RPC and reads a JSON or SSE response.
+//!
+//! `StdioMcpClient` requests are single-flight; a correlation queue for
+//! concurrent calls can be layered on later.
 
 use std::collections::BTreeMap;
 
+use eventsource_stream::Eventsource;
+use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -26,10 +31,134 @@ pub struct McpTool {
 pub enum McpError {
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+    #[error("http error: {0}")]
+    Http(#[from] reqwest::Error),
     #[error("server returned error {code}: {message}")]
     Rpc { code: i64, message: String },
     #[error("protocol error: {0}")]
     Protocol(String),
+}
+
+/// MCP transport.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Transport {
+    Stdio,
+    Http,
+}
+
+impl Transport {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "stdio" => Some(Self::Stdio),
+            "http" => Some(Self::Http),
+            _ => None,
+        }
+    }
+}
+
+/// Everything needed to (re)connect an MCP server, independent of transport.
+#[derive(Debug, Clone)]
+pub struct McpServerConfig {
+    pub name: String,
+    pub transport: Transport,
+    pub command: Option<String>,
+    pub url: Option<String>,
+    pub args: Vec<String>,
+    pub env: BTreeMap<String, String>,
+}
+
+/// A connected MCP server over either transport, with a uniform interface.
+pub enum McpClient {
+    Stdio(Box<StdioMcpClient>),
+    Http(HttpMcpClient),
+}
+
+impl McpClient {
+    pub async fn connect(config: &McpServerConfig) -> Result<Self, McpError> {
+        match config.transport {
+            Transport::Stdio => {
+                let command = config.command.as_deref().ok_or_else(|| {
+                    McpError::Protocol(format!("stdio server `{}` has no command", config.name))
+                })?;
+                Ok(Self::Stdio(Box::new(
+                    StdioMcpClient::spawn(command, &config.args, &config.env).await?,
+                )))
+            }
+            Transport::Http => {
+                let url = config.url.as_deref().ok_or_else(|| {
+                    McpError::Protocol(format!("http server `{}` has no url", config.name))
+                })?;
+                Ok(Self::Http(HttpMcpClient::connect(url)?))
+            }
+        }
+    }
+
+    /// Whether the connection is still usable. HTTP has no process to watch, so
+    /// it always reports `true` and lets a failed request surface the error.
+    pub fn is_running(&mut self) -> bool {
+        match self {
+            Self::Stdio(client) => client.is_running(),
+            Self::Http(client) => client.is_running(),
+        }
+    }
+
+    pub async fn initialize(&mut self) -> Result<Value, McpError> {
+        match self {
+            Self::Stdio(client) => client.initialize().await,
+            Self::Http(client) => client.initialize().await,
+        }
+    }
+
+    pub async fn list_tools(&mut self) -> Result<Vec<McpTool>, McpError> {
+        match self {
+            Self::Stdio(client) => client.list_tools().await,
+            Self::Http(client) => client.list_tools().await,
+        }
+    }
+
+    pub async fn call_tool(&mut self, name: &str, arguments: Value) -> Result<Value, McpError> {
+        match self {
+            Self::Stdio(client) => client.call_tool(name, arguments).await,
+            Self::Http(client) => client.call_tool(name, arguments).await,
+        }
+    }
+}
+
+/// The `initialize` request params shared by both transports.
+fn initialize_params() -> Value {
+    json!({
+        "protocolVersion": PROTOCOL_VERSION,
+        "capabilities": {},
+        "clientInfo": { "name": "rust-chat", "version": env!("CARGO_PKG_VERSION") }
+    })
+}
+
+/// Extract the tool list from a `tools/list` result.
+fn tools_from(result: Value) -> Result<Vec<McpTool>, McpError> {
+    let tools = result
+        .get("tools")
+        .cloned()
+        .unwrap_or_else(|| Value::Array(vec![]));
+    serde_json::from_value(tools).map_err(|e| McpError::Protocol(e.to_string()))
+}
+
+/// Interpret a JSON-RPC message for request `id`. Returns `Ok(None)` when the
+/// message is a notification or a response to a different request.
+fn parse_message(value: Value, id: i64) -> Result<Option<Value>, McpError> {
+    if value.get("id").and_then(Value::as_i64) != Some(id) {
+        return Ok(None);
+    }
+    if let Some(err) = value.get("error") {
+        return Err(McpError::Rpc {
+            code: err.get("code").and_then(Value::as_i64).unwrap_or(-1),
+            message: err
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+                .to_string(),
+        });
+    }
+    Ok(Some(value.get("result").cloned().unwrap_or(Value::Null)))
 }
 
 /// A single-flight MCP client over stdio.
@@ -102,20 +231,9 @@ impl StdioMcpClient {
             let value: Value = serde_json::from_str(trimmed)
                 .map_err(|e| McpError::Protocol(format!("invalid json: {e}")))?;
 
-            if value.get("id").and_then(Value::as_i64) != Some(id) {
-                continue; // notification or unrelated response
+            if let Some(result) = parse_message(value, id)? {
+                return Ok(result);
             }
-            if let Some(err) = value.get("error") {
-                return Err(McpError::Rpc {
-                    code: err.get("code").and_then(Value::as_i64).unwrap_or(-1),
-                    message: err
-                        .get("message")
-                        .and_then(Value::as_str)
-                        .unwrap_or("unknown")
-                        .to_string(),
-                });
-            }
-            return Ok(value.get("result").cloned().unwrap_or(Value::Null));
         }
     }
 
@@ -129,27 +247,136 @@ impl StdioMcpClient {
     }
 
     pub async fn initialize(&mut self) -> Result<Value, McpError> {
-        let result = self
-            .request(
-                "initialize",
-                json!({
-                    "protocolVersion": PROTOCOL_VERSION,
-                    "capabilities": {},
-                    "clientInfo": { "name": "rust-chat", "version": env!("CARGO_PKG_VERSION") }
-                }),
-            )
-            .await?;
+        let result = self.request("initialize", initialize_params()).await?;
         self.notify("notifications/initialized", json!({})).await?;
         Ok(result)
     }
 
     pub async fn list_tools(&mut self) -> Result<Vec<McpTool>, McpError> {
         let result = self.request("tools/list", json!({})).await?;
-        let tools = result
-            .get("tools")
-            .cloned()
-            .unwrap_or_else(|| Value::Array(vec![]));
-        serde_json::from_value(tools).map_err(|e| McpError::Protocol(e.to_string()))
+        tools_from(result)
+    }
+
+    pub async fn call_tool(&mut self, name: &str, args: Value) -> Result<Value, McpError> {
+        self.request("tools/call", json!({ "name": name, "arguments": args }))
+            .await
+    }
+}
+
+/// A Streamable HTTP MCP client: each JSON-RPC message is POSTed to the endpoint
+/// and the response is read as either `application/json` or an SSE stream.
+pub struct HttpMcpClient {
+    http: reqwest::Client,
+    url: String,
+    session_id: Option<String>,
+    next_id: i64,
+}
+
+impl HttpMcpClient {
+    pub fn connect(url: &str) -> Result<Self, McpError> {
+        if url.trim().is_empty() {
+            return Err(McpError::Protocol("http server has no url".into()));
+        }
+        Ok(Self {
+            http: reqwest::Client::builder().build()?,
+            url: url.to_string(),
+            session_id: None,
+            next_id: 1,
+        })
+    }
+
+    pub fn is_running(&self) -> bool {
+        true
+    }
+
+    /// POST a JSON-RPC message, capturing any `Mcp-Session-Id` the server hands
+    /// back so later requests can echo it.
+    async fn post(&mut self, body: &Value) -> Result<reqwest::Response, McpError> {
+        let mut request = self
+            .http
+            .post(&self.url)
+            .header(
+                reqwest::header::ACCEPT,
+                "application/json, text/event-stream",
+            )
+            .json(body);
+        if let Some(session) = &self.session_id {
+            request = request.header("mcp-session-id", session);
+        }
+
+        let response = request.send().await?;
+        if let Some(session) = response
+            .headers()
+            .get("mcp-session-id")
+            .and_then(|value| value.to_str().ok())
+        {
+            self.session_id = Some(session.to_string());
+        }
+        Ok(response)
+    }
+
+    async fn request(&mut self, method: &str, params: Value) -> Result<Value, McpError> {
+        let id = self.next_id;
+        self.next_id += 1;
+        let body = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
+        let response = self.post(&body).await?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let text = response.text().await.unwrap_or_default();
+            return Err(McpError::Protocol(format!("http {status}: {text}")));
+        }
+
+        let is_sse = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(|value| value.starts_with("text/event-stream"))
+            .unwrap_or(false);
+
+        if is_sse {
+            let mut stream = response.bytes_stream().eventsource();
+            while let Some(event) = stream.next().await {
+                let event = event.map_err(|e| McpError::Protocol(format!("sse error: {e}")))?;
+                if event.data.is_empty() {
+                    continue;
+                }
+                let value: Value = serde_json::from_str(&event.data)
+                    .map_err(|e| McpError::Protocol(format!("invalid json: {e}")))?;
+                if let Some(result) = parse_message(value, id)? {
+                    return Ok(result);
+                }
+            }
+            return Err(McpError::Protocol(
+                "sse stream ended without a response".into(),
+            ));
+        }
+
+        let value: Value = response.json().await?;
+        parse_message(value, id)?
+            .ok_or_else(|| McpError::Protocol("response id did not match the request".into()))
+    }
+
+    async fn notify(&mut self, method: &str, params: Value) -> Result<(), McpError> {
+        let body = json!({ "jsonrpc": "2.0", "method": method, "params": params });
+        let response = self.post(&body).await?;
+        let status = response.status();
+        if !status.is_success() {
+            let text = response.text().await.unwrap_or_default();
+            return Err(McpError::Protocol(format!("http {status}: {text}")));
+        }
+        Ok(())
+    }
+
+    pub async fn initialize(&mut self) -> Result<Value, McpError> {
+        let result = self.request("initialize", initialize_params()).await?;
+        self.notify("notifications/initialized", json!({})).await?;
+        Ok(result)
+    }
+
+    pub async fn list_tools(&mut self) -> Result<Vec<McpTool>, McpError> {
+        let result = self.request("tools/list", json!({})).await?;
+        tools_from(result)
     }
 
     pub async fn call_tool(&mut self, name: &str, args: Value) -> Result<Value, McpError> {
