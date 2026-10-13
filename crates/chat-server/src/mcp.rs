@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 use uuid::Uuid;
 
 use chat_agents::Tool;
@@ -22,10 +22,14 @@ use chat_store::McpServer;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// A connected MCP server plus its cached tool catalog.
+///
+/// The live client is shared behind an `Arc` so concurrent tool calls can run in
+/// parallel; `reconnect` serializes respawning when the connection dies.
 struct McpClientHandle {
     name: String,
     config: McpServerConfig,
-    client: Mutex<McpClient>,
+    client: RwLock<Arc<McpClient>>,
+    reconnect: Mutex<()>,
     tools: Vec<McpTool>,
     last_used: Mutex<Instant>,
 }
@@ -48,14 +52,15 @@ impl McpClientHandle {
     /// Connect, initialize and enumerate the tools of `server`.
     async fn spawn(server: &McpServer) -> Result<Self, McpError> {
         let config = config_for(server)?;
-        let mut client = McpClient::connect(&config).await?;
+        let client = Arc::new(McpClient::connect(&config).await?);
         request(client.initialize()).await?;
         let tools = request(client.list_tools()).await?;
 
         Ok(Self {
             name: config.name.clone(),
             config,
-            client: Mutex::new(client),
+            client: RwLock::new(client),
+            reconnect: Mutex::new(()),
             tools,
             last_used: Mutex::new(Instant::now()),
         })
@@ -73,31 +78,35 @@ impl McpClientHandle {
         self.last_used.lock().await.elapsed()
     }
 
-    /// Ensure the server process is alive, re-spawning and re-initializing it
-    /// if it died.
-    async fn ensure_alive(&self) -> Result<(), McpError> {
-        let mut client = self.client.lock().await;
-        if client.is_running() {
-            return Ok(());
+    /// Return the live client, reconnecting and re-initializing it if the
+    /// connection died. Concurrent callers share one reconnect attempt.
+    async fn ensure_alive(&self) -> Result<Arc<McpClient>, McpError> {
+        let current = self.client.read().await.clone();
+        if current.is_running() {
+            return Ok(current);
         }
+
+        let _guard = self.reconnect.lock().await;
+        let current = self.client.read().await.clone();
+        if current.is_running() {
+            return Ok(current);
+        }
+
         tracing::warn!(server = %self.name, "MCP server connection died; reconnecting");
-        *client = McpClient::connect(&self.config).await?;
-        request(client.initialize()).await?;
-        Ok(())
+        let fresh = Arc::new(McpClient::connect(&self.config).await?);
+        request(fresh.initialize()).await?;
+        *self.client.write().await = fresh.clone();
+        Ok(fresh)
     }
 
-    /// Call a tool, reconnecting and retrying once if the process died.
+    /// Call a tool, reconnecting and retrying once if the connection died.
     async fn call_tool(&self, name: &str, arguments: Value) -> Result<Value, McpError> {
-        self.ensure_alive().await?;
-        let mut client = self.client.lock().await;
+        let client = self.ensure_alive().await?;
         let first = request(client.call_tool(name, arguments.clone())).await;
-        let dead = !client.is_running();
-        drop(client);
-        if first.is_ok() || !dead {
+        if first.is_ok() || client.is_running() {
             return first;
         }
-        self.ensure_alive().await?;
-        let mut client = self.client.lock().await;
+        let client = self.ensure_alive().await?;
         request(client.call_tool(name, arguments)).await
     }
 }
