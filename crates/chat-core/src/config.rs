@@ -178,6 +178,14 @@ pub struct Config {
     /// Maximum tool iterations the agent loop may run per chat turn.
     pub agent_max_iterations: usize,
 
+    /// Expose user-configured MCP servers' tools to the agent runtime. Off by
+    /// default: a stdio server is an arbitrary executable spawned on the host,
+    /// so this is opt-in until sandboxed execution lands.
+    pub mcp_enabled: bool,
+    /// A connected MCP server idle for this long is shut down (its process
+    /// killed) and reconnected on demand.
+    pub mcp_idle_ttl_seconds: u64,
+
     /// Parsed `rustchat.yaml` (path from `RUSTCHAT_CONFIG`). This is the base
     /// layer: environment variables and runtime/DB state override it.
     pub file: FileConfig,
@@ -343,6 +351,11 @@ impl Config {
             agent_max_iterations: var("AGENT_MAX_ITERATIONS")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(6),
+
+            mcp_enabled: var_bool("MCP_ENABLED", false),
+            mcp_idle_ttl_seconds: var("MCP_IDLE_TTL_SECONDS")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(300),
 
             file,
         })

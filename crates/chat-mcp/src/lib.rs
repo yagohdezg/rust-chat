@@ -4,6 +4,8 @@
 //! and exchanges newline-delimited messages. Requests are single-flight; a
 //! correlation queue for concurrent calls can be layered on later.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -32,19 +34,25 @@ pub enum McpError {
 
 /// A single-flight MCP client over stdio.
 pub struct StdioMcpClient {
-    _child: Child,
+    child: Child,
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
     next_id: i64,
 }
 
 impl StdioMcpClient {
-    pub async fn spawn(command: &str, args: &[String]) -> Result<Self, McpError> {
+    pub async fn spawn(
+        command: &str,
+        args: &[String],
+        env: &BTreeMap<String, String>,
+    ) -> Result<Self, McpError> {
         let mut child = Command::new(command)
             .args(args)
+            .envs(env)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::inherit())
+            .kill_on_drop(true)
             .spawn()?;
 
         let stdin = child
@@ -57,11 +65,17 @@ impl StdioMcpClient {
             .ok_or_else(|| McpError::Protocol("no stdout".into()))?;
 
         Ok(Self {
-            _child: child,
+            child,
             stdin,
             stdout: BufReader::new(stdout),
             next_id: 1,
         })
+    }
+
+    /// Whether the server process is still running. A child that has exited (or
+    /// was killed) reports `false`, so the caller can reconnect.
+    pub fn is_running(&mut self) -> bool {
+        matches!(self.child.try_wait(), Ok(None))
     }
 
     async fn request(&mut self, method: &str, params: Value) -> Result<Value, McpError> {

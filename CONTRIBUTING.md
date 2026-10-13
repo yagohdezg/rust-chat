@@ -111,15 +111,19 @@ See issue #74 (epic #12).
 - Branch off `main` with a short, kebab-case name (e.g. `m4-computer-egress-allowlist`).
 - Run `just ci` (and `just web-check` / `just web-build` for frontend changes)
   before opening the PR.
-- Reference the issue in the PR body so it is tracked, ideally so it closes
-  automatically:
+- Every PR that completes an issue **must** reference it with a GitHub closing
+  keyword in the PR body, so the issue is linked and auto-closes on merge. Use
+  one line per issue:
 
   ```
   Closes #123
+  Closes #124
   ```
 
-  `Closes`/`Fixes` auto-close the issue on merge; `Implements #123` does not,
-  so the issue has to be closed by hand. Prefer `Closes` when the PR completes
-  the issue.
+  GitHub recognizes `close`, `closes`, `closed`, `fix`, `fixes`, `fixed`,
+  `resolve`, `resolves` and `resolved` (case-insensitive), each followed by
+  `#<issue>` or a full issue URL. `Implements #123` does **not** auto-close, so
+  prefer a closing keyword whenever the PR finishes the issue; only fall back to
+  a plain reference when the issue should stay open.
 - Include a short **Summary** of the change and how you verified it (the exact
   commands you ran).

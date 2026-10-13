@@ -32,13 +32,13 @@ fmt-check:
 test:
     cargo test --workspace
 
-# Run the end-to-end HTTP/SSE suites (real server + fake provider/sandboxd).
+# Run the end-to-end HTTP/SSE suites (real server + fake provider/sandboxd/mcp).
 e2e:
-    cargo test -p chat-server --test e2e_api --test e2e_streaming --test e2e_sandbox
+    cargo test -p chat-server --test e2e_api --test e2e_streaming --test e2e_sandbox --test e2e_mcp
 
 # Run the whole e2e suite against Postgres (testcontainers) instead of SQLite.
 e2e-postgres:
-    RUSTCHAT_E2E_BACKEND=postgres cargo test -p chat-server --test e2e_api --test e2e_streaming --test e2e_sandbox
+    RUSTCHAT_E2E_BACKEND=postgres cargo test -p chat-server --test e2e_api --test e2e_streaming --test e2e_sandbox --test e2e_mcp
 
 # Run the ignored SSE load/soak test (prints peak RSS and bytes-per-stream).
 e2e-load:

@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::types::Json;
@@ -84,6 +86,38 @@ pub struct Agent {
     pub sandbox_enabled: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+/// A user-configured Model Context Protocol server.
+///
+/// A `stdio` server is spawned from `command` plus `args`/`env`; an `http`
+/// server is reached at `url`. `enabled` gates whether its tools are exposed to
+/// the agent runtime. `user_id` is `None` for a future admin-provided global.
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+pub struct McpServer {
+    pub id: Uuid,
+    pub user_id: Option<Uuid>,
+    pub name: String,
+    /// `stdio` | `http`.
+    pub transport: String,
+    pub command: Option<String>,
+    pub url: Option<String>,
+    pub args: Json<Vec<String>>,
+    pub env: Json<BTreeMap<String, String>>,
+    pub enabled: bool,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Fields for creating an [`McpServer`].
+#[derive(Debug, Clone, Default)]
+pub struct McpServerDraft {
+    pub name: String,
+    pub transport: String,
+    pub command: Option<String>,
+    pub url: Option<String>,
+    pub args: Vec<String>,
+    pub env: BTreeMap<String, String>,
+    pub enabled: bool,
 }
 
 /// An OpenAI-compatible (or, later, Anthropic) model provider.

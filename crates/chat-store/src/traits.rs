@@ -4,7 +4,7 @@ use uuid::Uuid;
 
 use crate::models::{
     AdminUserSummary, Agent, AgentDraft, AuditEntry, AuditLog, Computer, Conversation, FileRecord,
-    Message, PoolBox, Provider, ProviderModel, RefreshToken, User,
+    McpServer, McpServerDraft, Message, PoolBox, Provider, ProviderModel, RefreshToken, User,
 };
 /// Relational persistence, independent of the database engine.
 ///
@@ -127,6 +127,19 @@ pub trait Store: Send + Sync {
 
     /// Delete an agent owned by `user_id`.
     async fn delete_agent(&self, id: Uuid, user_id: Uuid) -> Result<()>;
+
+    // ---- MCP servers ---------------------------------------------------
+    /// Create an MCP server owned by `user_id`.
+    async fn create_mcp_server(&self, user_id: Uuid, draft: McpServerDraft) -> Result<McpServer>;
+
+    /// List the calling user's MCP servers, oldest first.
+    async fn list_mcp_servers(&self, user_id: Uuid) -> Result<Vec<McpServer>>;
+
+    /// Fetch an MCP server owned by `user_id` (ownership-checked).
+    async fn get_mcp_server(&self, id: Uuid, user_id: Uuid) -> Result<Option<McpServer>>;
+
+    /// Delete an MCP server owned by `user_id`.
+    async fn delete_mcp_server(&self, id: Uuid, user_id: Uuid) -> Result<()>;
 
     /// Fetch a provider visible to `user_id`: their own or a global
     /// (admin-provided) one. Returns `None` when the id is unknown to them.
