@@ -16,6 +16,7 @@ pub enum Scope {
     Sandbox,
     Computers,
     Models,
+    ApiKeys,
     AdminUsers,
     AdminAudit,
     AdminComputers,
@@ -23,7 +24,7 @@ pub enum Scope {
 }
 
 impl Scope {
-    pub const ALL: [Scope; 14] = [
+    pub const ALL: [Scope; 15] = [
         Scope::Conversations,
         Scope::Messages,
         Scope::Agents,
@@ -34,11 +35,41 @@ impl Scope {
         Scope::Sandbox,
         Scope::Computers,
         Scope::Models,
+        Scope::ApiKeys,
         Scope::AdminUsers,
         Scope::AdminAudit,
         Scope::AdminComputers,
         Scope::AdminProviders,
     ];
+
+    /// Canonical wire name, matching the serde representation.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Scope::Conversations => "conversations",
+            Scope::Messages => "messages",
+            Scope::Agents => "agents",
+            Scope::McpServers => "mcp_servers",
+            Scope::Providers => "providers",
+            Scope::Files => "files",
+            Scope::Chat => "chat",
+            Scope::Sandbox => "sandbox",
+            Scope::Computers => "computers",
+            Scope::Models => "models",
+            Scope::ApiKeys => "api_keys",
+            Scope::AdminUsers => "admin_users",
+            Scope::AdminAudit => "admin_audit",
+            Scope::AdminComputers => "admin_computers",
+            Scope::AdminProviders => "admin_providers",
+        }
+    }
+
+    /// Parse a canonical wire name back into a scope.
+    pub fn parse(value: &str) -> Option<Scope> {
+        use serde::de::value::{Error, StrDeserializer};
+        use serde::de::IntoDeserializer;
+        let de: StrDeserializer<Error> = value.into_deserializer();
+        Scope::deserialize(de).ok()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

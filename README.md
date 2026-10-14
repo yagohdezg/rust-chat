@@ -320,6 +320,9 @@ size per node is exposed to admins at `GET /api/admin/computers`.
 | `POST` | `/api/auth/refresh`                 | —    | Rotate a refresh token for a new pair |
 | `POST` | `/api/auth/logout`                  | —    | Revoke a refresh token               |
 | `GET`  | `/api/me`                           | JWT  | Current user                         |
+| `GET`  | `/api/api-keys`                     | JWT  | List the caller's API keys           |
+| `POST` | `/api/api-keys`                     | JWT  | Mint a scoped API key (plaintext shown once) |
+| `DELETE`| `/api/api-keys/{id}`               | JWT  | Revoke an API key                    |
 | `GET`  | `/api/admin/users`                  | admin | List accounts with role/state/counts |
 | `POST` | `/api/admin/users`                  | admin | Create an account (explicit role)    |
 | `PATCH`| `/api/admin/users/{id}`             | admin | Change role / enable-disable an account |
@@ -399,12 +402,20 @@ the whole user's session family. `/api/auth/*` and `/api/chat` are per-IP rate
 limited; admin actions and auth/sandbox events are written to an audit trail
 shown in the `/admin` console.
 
+Programmatic clients can use an API key instead of a session token: mint one at
+`POST /api/api-keys` (the plaintext is returned once and only its SHA-256 hash
+is stored) and send it as `Authorization: Bearer rck_...`. A key is limited to a
+subset of its owner's permissions through `scopes`, may carry an expiry, and
+authenticates the same routes as a session token. `GET /api/api-keys` lists the
+caller's keys, `DELETE /api/api-keys/{id}` revokes one, and both creation and
+revocation are audited while `last_used_at` tracks use.
+
 ### Permissions
 
 Authorization is scope-based. Each route requires a `(scope, action)` pair where
 the action is `view`, `use` or `manage`, and the scopes cover `conversations`,
 `messages`, `agents`, `mcp_servers`, `providers`, `files`, `chat`, `sandbox`,
-`computers`, `models`, plus the admin-only `admin_users`, `admin_audit`,
+`computers`, `models`, `api_keys`, plus the admin-only `admin_users`, `admin_audit`,
 `admin_computers` and `admin_providers`. Roles map onto that model: `admin`
 holds every permission, while `user` holds `view`/`use`/`manage` on their own
 resources and `use` on `chat`/`sandbox`. Ownership is still checked per row, so

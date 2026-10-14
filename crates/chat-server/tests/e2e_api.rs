@@ -440,3 +440,111 @@ async fn upload_runs_the_scanner_hook() {
         "the scanner hook should reject a flagged upload"
     );
 }
+
+#[tokio::test]
+async fn api_key_lifecycle() {
+    let env = TestEnvBuilder::new().start().await.unwrap();
+    let session = Session::register(&env.base_url, "a@example.com", "password123")
+        .await
+        .unwrap();
+
+    let created = session
+        .post_expect("/api/api-keys", &json!({"name": "ci"}))
+        .await
+        .unwrap();
+    let key = created["key"].as_str().unwrap().to_string();
+    assert!(key.starts_with("rck_"), "unexpected key format: {key}");
+    let id = created["api_key"]["id"].as_str().unwrap().to_string();
+    assert_eq!(created["api_key"]["name"], json!("ci"));
+    assert!(
+        created["api_key"]["key_hash"].is_null(),
+        "the stored hash must not be serialized"
+    );
+
+    // The key authenticates the same routes as a bearer token.
+    let http = reqwest::Client::new();
+    let resp = http
+        .get(format!("{}/api/me", session.base))
+        .bearer_auth(&key)
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success());
+
+    let listed = session.get_expect("/api/api-keys").await.unwrap();
+    assert_eq!(listed.as_array().unwrap().len(), 1);
+    assert!(listed[0]["key_hash"].is_null());
+
+    let resp = http
+        .delete(format!("{}/api/api-keys/{id}", session.base))
+        .bearer_auth(&session.token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::NO_CONTENT);
+
+    // A revoked key is rejected.
+    let resp = http
+        .get(format!("{}/api/me", session.base))
+        .bearer_auth(&key)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+    // Both lifecycle events are auditable.
+    let audit = session
+        .get_expect("/api/admin/audit?limit=50")
+        .await
+        .unwrap();
+    let actions: Vec<&str> = audit
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|entry| entry["action"].as_str())
+        .collect();
+    assert!(actions.contains(&"api_key.create"), "audit: {actions:?}");
+    assert!(actions.contains(&"api_key.revoke"), "audit: {actions:?}");
+}
+
+#[tokio::test]
+async fn api_keys_are_scoped() {
+    let env = TestEnvBuilder::new().start().await.unwrap();
+    let session = Session::register(&env.base_url, "a@example.com", "password123")
+        .await
+        .unwrap();
+
+    let created = session
+        .post_expect(
+            "/api/api-keys",
+            &json!({"name": "conversations only", "scopes": ["conversations"]}),
+        )
+        .await
+        .unwrap();
+    let key = created["key"].as_str().unwrap().to_string();
+    assert_eq!(created["api_key"]["scopes"], json!(["conversations"]));
+
+    let http = reqwest::Client::new();
+    let resp = http
+        .get(format!("{}/api/conversations", session.base))
+        .bearer_auth(&key)
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success());
+
+    // A scope the key does not carry is forbidden, even though the role allows it.
+    let resp = http
+        .get(format!("{}/api/files", session.base))
+        .bearer_auth(&key)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::FORBIDDEN);
+
+    let resp = session
+        .post("/api/api-keys", &json!({"name": "bad", "scopes": ["nope"]}))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
+}

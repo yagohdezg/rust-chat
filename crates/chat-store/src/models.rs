@@ -168,6 +168,35 @@ pub struct RefreshToken {
     pub revoked_at: Option<DateTime<Utc>>,
 }
 
+/// A hashed, scoped API key for programmatic clients. The plaintext is shown
+/// once at creation; only the SHA-256 `key_hash` is persisted, and `prefix`
+/// stays visible so a key can be identified later.
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+pub struct ApiKey {
+    pub id: Uuid,
+    pub user_id: Uuid,
+    pub name: String,
+    pub prefix: String,
+    #[serde(skip_serializing)]
+    pub key_hash: String,
+    pub scopes: Json<Vec<String>>,
+    pub created_at: DateTime<Utc>,
+    pub last_used_at: Option<DateTime<Utc>>,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub revoked_at: Option<DateTime<Utc>>,
+}
+
+/// Fields for creating an [`ApiKey`]. The id and timestamps are assigned by
+/// the store.
+#[derive(Debug, Clone, Default)]
+pub struct ApiKeyDraft {
+    pub name: String,
+    pub prefix: String,
+    pub key_hash: String,
+    pub scopes: Vec<String>,
+    pub expires_at: Option<DateTime<Utc>>,
+}
+
 /// One append-only entry in the security audit trail.
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
 pub struct AuditLog {

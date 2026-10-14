@@ -7,9 +7,9 @@ use std::sync::Arc;
 
 use chat_core::{ChatError, Result, SecretCipher};
 use chat_store::{
-    AdminUserSummary, Agent, AgentDraft, AuditEntry, AuditLog, Computer, Conversation, FileRecord,
-    McpServer, McpServerDraft, Message, PoolBox, Provider, ProviderModel, RefreshToken, Store,
-    User,
+    AdminUserSummary, Agent, AgentDraft, ApiKey, ApiKeyDraft, AuditEntry, AuditLog, Computer,
+    Conversation, FileRecord, McpServer, McpServerDraft, Message, PoolBox, Provider, ProviderModel,
+    RefreshToken, Store, User,
 };
 use chrono::{DateTime, Utc};
 use sqlx::postgres::PgPoolOptions;
@@ -247,6 +247,75 @@ impl Store for PostgresStore {
         .bind(user_id)
         .execute(&self.pool)
         .await?;
+        Ok(())
+    }
+
+    async fn create_api_key(&self, user_id: Uuid, draft: &ApiKeyDraft) -> Result<ApiKey> {
+        let key = ApiKey {
+            id: Uuid::new_v4(),
+            user_id,
+            name: draft.name.clone(),
+            prefix: draft.prefix.clone(),
+            key_hash: draft.key_hash.clone(),
+            scopes: Json(draft.scopes.clone()),
+            created_at: Utc::now(),
+            last_used_at: None,
+            expires_at: draft.expires_at,
+            revoked_at: None,
+        };
+        sqlx::query(
+            "insert into api_keys (id, user_id, name, prefix, key_hash, scopes, created_at, expires_at)
+             values ($1, $2, $3, $4, $5, $6, $7, $8)",
+        )
+        .bind(key.id)
+        .bind(key.user_id)
+        .bind(&key.name)
+        .bind(&key.prefix)
+        .bind(&key.key_hash)
+        .bind(key.scopes.clone())
+        .bind(key.created_at)
+        .bind(key.expires_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(key)
+    }
+
+    async fn list_api_keys(&self, user_id: Uuid) -> Result<Vec<ApiKey>> {
+        let rows = sqlx::query_as::<_, ApiKey>(
+            "select * from api_keys where user_id = $1 order by created_at desc",
+        )
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    async fn get_api_key_by_hash(&self, key_hash: &str) -> Result<Option<ApiKey>> {
+        let row = sqlx::query_as::<_, ApiKey>("select * from api_keys where key_hash = $1")
+            .bind(key_hash)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row)
+    }
+
+    async fn revoke_api_key(&self, id: Uuid, user_id: Uuid) -> Result<()> {
+        sqlx::query(
+            "update api_keys set revoked_at = $1 where id = $2 and user_id = $3 and revoked_at is null",
+        )
+        .bind(Utc::now())
+        .bind(id)
+        .bind(user_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn touch_api_key_last_used(&self, id: Uuid) -> Result<()> {
+        sqlx::query("update api_keys set last_used_at = $1 where id = $2")
+            .bind(Utc::now())
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 

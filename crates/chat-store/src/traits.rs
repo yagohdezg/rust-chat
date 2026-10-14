@@ -3,8 +3,9 @@ use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use crate::models::{
-    AdminUserSummary, Agent, AgentDraft, AuditEntry, AuditLog, Computer, Conversation, FileRecord,
-    McpServer, McpServerDraft, Message, PoolBox, Provider, ProviderModel, RefreshToken, User,
+    AdminUserSummary, Agent, AgentDraft, ApiKey, ApiKeyDraft, AuditEntry, AuditLog, Computer,
+    Conversation, FileRecord, McpServer, McpServerDraft, Message, PoolBox, Provider, ProviderModel,
+    RefreshToken, User,
 };
 /// Relational persistence, independent of the database engine.
 ///
@@ -64,6 +65,23 @@ pub trait Store: Send + Sync {
     /// Revoke every outstanding refresh token for a user (sign-out everywhere,
     /// or a precaution when a revoked token is replayed).
     async fn revoke_user_refresh_tokens(&self, user_id: Uuid) -> Result<()>;
+
+    // ---- api keys ------------------------------------------------------
+    /// Persist a new API key by its hash (the plaintext never reaches the DB).
+    async fn create_api_key(&self, user_id: Uuid, draft: &ApiKeyDraft) -> Result<ApiKey>;
+
+    /// A user's API keys, newest first. Revoked keys are included so the caller
+    /// can show history.
+    async fn list_api_keys(&self, user_id: Uuid) -> Result<Vec<ApiKey>>;
+
+    /// Look up an API key by hash, revoked or not.
+    async fn get_api_key_by_hash(&self, key_hash: &str) -> Result<Option<ApiKey>>;
+
+    /// Revoke one API key owned by `user_id` (idempotent).
+    async fn revoke_api_key(&self, id: Uuid, user_id: Uuid) -> Result<()>;
+
+    /// Record that an API key authenticated a request.
+    async fn touch_api_key_last_used(&self, id: Uuid) -> Result<()>;
 
     /// Append an entry to the security audit trail.
     async fn record_audit(&self, entry: &AuditEntry) -> Result<()>;

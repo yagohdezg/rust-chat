@@ -77,15 +77,40 @@ pub fn generate_refresh_token() -> Result<String> {
     Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes))
 }
 
-/// Hash a refresh token for storage: SHA-256, lowercase hex. Storing only the
-/// hash means a database leak does not yield usable tokens, and lookup stays a
-/// direct unique-index hit.
-pub fn hash_refresh_token(token: &str) -> String {
-    digest(&SHA256, token.as_bytes())
+/// Prefix on every API key, so a bearer token can be told from a JWT.
+pub const API_KEY_PREFIX: &str = "rck_";
+
+fn sha256_hex(value: &str) -> String {
+    digest(&SHA256, value.as_bytes())
         .as_ref()
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect()
+}
+
+/// Hash a refresh token for storage: SHA-256, lowercase hex. Storing only the
+/// hash means a database leak does not yield usable tokens, and lookup stays a
+/// direct unique-index hit.
+pub fn hash_refresh_token(token: &str) -> String {
+    sha256_hex(token)
+}
+
+/// Generate an opaque API key. The plaintext is returned to the client once and
+/// stored (hashed) server-side.
+pub fn generate_api_key() -> Result<String> {
+    let mut bytes = [0u8; 32];
+    SystemRandom::new()
+        .fill(&mut bytes)
+        .map_err(|_| ChatError::Internal(anyhow::anyhow!("failed to generate API key")))?;
+    Ok(format!(
+        "{API_KEY_PREFIX}{}",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+    ))
+}
+
+/// Hash an API key for storage, using the same SHA-256 scheme as refresh tokens.
+pub fn hash_api_key(key: &str) -> String {
+    sha256_hex(key)
 }
 
 #[cfg(test)]

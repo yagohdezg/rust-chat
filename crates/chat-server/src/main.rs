@@ -200,6 +200,11 @@ async fn main() -> anyhow::Result<()> {
         .route("/health", get(routes::health))
         .route("/api/me", get(routes::me))
         .route(
+            "/api/api-keys",
+            get(routes::list_api_keys).post(routes::create_api_key),
+        )
+        .route("/api/api-keys/{id}", delete(routes::revoke_api_key))
+        .route(
             "/api/admin/users",
             get(routes::admin_list_users).post(routes::admin_create_user),
         )

@@ -18,8 +18,8 @@ use uuid::Uuid;
 
 use chat_agents::{run_agent_stream, AgentConfig, AgentEvent, ToolRegistry};
 use chat_auth::{
-    generate_refresh_token, hash_password, hash_refresh_token, issue_token, permissions_for_role,
-    role_allows, verify_password, Action, Scope,
+    generate_api_key, generate_refresh_token, hash_api_key, hash_password, hash_refresh_token,
+    issue_token, permissions_for_role, verify_password, Action, Scope, API_KEY_PREFIX,
 };
 use chat_computers::ComputerOrchestrator;
 use chat_core::ChatError;
@@ -27,16 +27,17 @@ use chat_providers::{ChatMessage, ChatRequest, LlmProvider, ModelInfo, OpenAiPro
 use chat_sandbox::{ExecRequest, ExecResult, SandboxFile};
 use chat_store::types::message_status;
 use chat_store::{
-    AdminUserSummary, AuditEntry, AuditLog, Computer, Conversation, FileRecord, McpServer,
-    McpServerDraft, Message, Provider, ProviderModel, Store,
+    AdminUserSummary, ApiKey, ApiKeyDraft, AuditEntry, AuditLog, Computer, Conversation,
+    FileRecord, McpServer, McpServerDraft, Message, Provider, ProviderModel, Store,
 };
 
 use crate::error::ApiError;
 use crate::extract::{
     AdminAuditView, AdminComputersView, AdminProvidersManage, AdminUsersManage, AdminUsersView,
-    AgentsManage, AgentsView, AuthUser, ChatUse, ComputersManage, ComputersUse, ComputersView,
-    ConversationsManage, ConversationsView, FilesManage, FilesView, McpServersManage,
-    McpServersView, MessagesView, ModelsView, ProvidersManage, ProvidersView, Require, SandboxUse,
+    AgentsManage, AgentsView, ApiKeysManage, ApiKeysView, AuthUser, ChatUse, ComputersManage,
+    ComputersUse, ComputersView, ConversationsManage, ConversationsView, FilesManage, FilesView,
+    McpServersManage, McpServersView, MessagesView, ModelsView, ProvidersManage, ProvidersView,
+    Require, SandboxUse,
 };
 use crate::file_policy::detect_mime;
 use crate::state::AppState;
@@ -294,6 +295,131 @@ fn session_json(user: &chat_store::User, token: &str, refresh_token: &str) -> Va
         "refresh_token": refresh_token,
         "user": { "id": user.id, "email": user.email, "name": user.name, "role": user.role }
     })
+}
+
+// ---- api keys -------------------------------------------------------------
+
+#[derive(Deserialize)]
+pub struct CreateApiKeyBody {
+    pub name: String,
+    /// Scopes to grant, from `Scope::ALL`. Omitted grants every scope the
+    /// caller's role allows.
+    #[serde(default)]
+    pub scopes: Option<Vec<String>>,
+    /// Lifetime in days. Omitted keys never expire.
+    #[serde(default)]
+    pub expires_in_days: Option<i64>,
+}
+
+/// `POST /api/api-keys` — mint an API key for the caller. The plaintext is
+/// returned once; only its hash is stored.
+pub async fn create_api_key(
+    State(state): State<Arc<AppState>>,
+    user: Require<ApiKeysManage>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    Json(body): Json<CreateApiKeyBody>,
+) -> Result<Json<Value>, ApiError> {
+    let name = body.name.trim();
+    if name.is_empty() {
+        return Err(ChatError::BadRequest("name is required".into()).into());
+    }
+
+    let scopes = match body.scopes {
+        Some(requested) => requested
+            .iter()
+            .map(|name| {
+                Scope::parse(name)
+                    .ok_or_else(|| ChatError::BadRequest(format!("unknown scope: {name}")))
+            })
+            .collect::<Result<Vec<Scope>, _>>()?,
+        None => Scope::ALL
+            .iter()
+            .copied()
+            .filter(|scope| {
+                Action::ALL
+                    .iter()
+                    .any(|action| user.allows(*scope, *action))
+            })
+            .collect(),
+    };
+    for scope in &scopes {
+        if !Action::ALL
+            .iter()
+            .any(|action| user.allows(*scope, *action))
+        {
+            return Err(
+                ChatError::BadRequest(format!("scope not permitted: {}", scope.as_str())).into(),
+            );
+        }
+    }
+
+    let key = generate_api_key()?;
+    let prefix: String = key.chars().take(API_KEY_PREFIX.len() + 8).collect();
+    let expires_at = body
+        .expires_in_days
+        .map(|days| Utc::now() + Duration::days(days.clamp(1, 3650)));
+    let record = state
+        .store
+        .create_api_key(
+            user.id,
+            &ApiKeyDraft {
+                name: name.to_string(),
+                prefix,
+                key_hash: hash_api_key(&key),
+                scopes: scopes
+                    .iter()
+                    .map(|scope| scope.as_str().to_string())
+                    .collect(),
+                expires_at,
+            },
+        )
+        .await?;
+
+    audit(
+        &state,
+        AuditEntry {
+            actor_id: Some(user.id),
+            action: "api_key.create".into(),
+            target_type: Some("api_key".into()),
+            target_id: Some(record.id.to_string()),
+            metadata: Some(json!({ "name": name, "scopes": scopes })),
+            ip: Some(addr.ip().to_string()),
+        },
+    )
+    .await;
+
+    Ok(Json(json!({ "key": key, "api_key": record })))
+}
+
+/// `GET /api/api-keys` — the caller's API keys, newest first.
+pub async fn list_api_keys(
+    State(state): State<Arc<AppState>>,
+    user: Require<ApiKeysView>,
+) -> Result<Json<Vec<ApiKey>>, ApiError> {
+    Ok(Json(state.store.list_api_keys(user.id).await?))
+}
+
+/// `DELETE /api/api-keys/{id}` — revoke one of the caller's API keys.
+pub async fn revoke_api_key(
+    State(state): State<Arc<AppState>>,
+    user: Require<ApiKeysManage>,
+    Path(id): Path<Uuid>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+) -> Result<StatusCode, ApiError> {
+    state.store.revoke_api_key(id, user.id).await?;
+    audit(
+        &state,
+        AuditEntry {
+            actor_id: Some(user.id),
+            action: "api_key.revoke".into(),
+            target_type: Some("api_key".into()),
+            target_id: Some(id.to_string()),
+            metadata: None,
+            ip: Some(addr.ip().to_string()),
+        },
+    )
+    .await;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 // ---- admin ----------------------------------------------------------------
@@ -1137,7 +1263,7 @@ pub async fn create_provider(
     if name.is_empty() || base_url.is_empty() {
         return Err(ChatError::BadRequest("provider name and base_url are required".into()).into());
     }
-    if body.global && !role_allows(&user.role, Scope::AdminProviders, Action::Manage) {
+    if body.global && !user.allows(Scope::AdminProviders, Action::Manage) {
         return Err(ChatError::Forbidden.into());
     }
     let owner = if body.global { None } else { Some(user.id) };
@@ -1161,7 +1287,7 @@ pub async fn create_provider(
 fn can_manage_provider(provider: &Provider, user: &AuthUser) -> bool {
     match provider.user_id {
         Some(owner) => owner == user.id,
-        None => role_allows(&user.role, Scope::AdminProviders, Action::Manage),
+        None => user.allows(Scope::AdminProviders, Action::Manage),
     }
 }
 
