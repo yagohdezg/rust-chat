@@ -631,16 +631,51 @@ pub async fn create_conversation(
     ))
 }
 
+#[derive(Deserialize)]
+pub struct ListMessagesQuery {
+    /// Page size; defaults to [`MESSAGE_PAGE_DEFAULT`] and is clamped to
+    /// [`MESSAGE_PAGE_MAX`].
+    #[serde(default)]
+    pub limit: Option<i64>,
+    /// Return the page of messages older than this message id.
+    #[serde(default)]
+    pub before: Option<Uuid>,
+    /// Return the page of messages newer than this message id.
+    #[serde(default)]
+    pub after: Option<Uuid>,
+}
+
+/// Default page size for `GET /api/conversations/{id}/messages`.
+const MESSAGE_PAGE_DEFAULT: i64 = 50;
+/// Upper bound on the page size, so a single request cannot pull a whole
+/// conversation into memory.
+const MESSAGE_PAGE_MAX: i64 = 200;
+
 pub async fn list_messages(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
     Path(conversation_id): Path<Uuid>,
+    Query(query): Query<ListMessagesQuery>,
 ) -> Result<Json<Vec<Message>>, ApiError> {
     state
         .store
         .get_conversation(conversation_id, user.id)
         .await?;
-    Ok(Json(state.store.list_messages(conversation_id).await?))
+    if query.before.is_some() && query.after.is_some() {
+        return Err(
+            ChatError::BadRequest("`before` and `after` are mutually exclusive".into()).into(),
+        );
+    }
+    let limit = query
+        .limit
+        .unwrap_or(MESSAGE_PAGE_DEFAULT)
+        .clamp(1, MESSAGE_PAGE_MAX);
+    Ok(Json(
+        state
+            .store
+            .list_messages(conversation_id, query.before, query.after, limit)
+            .await?,
+    ))
 }
 
 pub async fn delete_conversation(

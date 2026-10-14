@@ -6,6 +6,9 @@ export type ToolStep =
 	| { kind: 'call'; id: string; name: string; args: string }
 	| { kind: 'result'; id: string; name: string; content: string };
 
+/** How many messages to load per page. */
+const MESSAGE_PAGE = 50;
+
 /** A message as held in the client, optionally carrying tool steps. */
 type ThreadMessage = api.Message & { steps?: ToolStep[]; thinking?: string };
 
@@ -81,6 +84,9 @@ class ChatStore {
 	/** Agent bound to the *next* conversation; applied when a chat is created. */
 	pendingAgentId = $state<string | null>(null);
 	messages = $state<ThreadMessage[]>([]);
+	/** True when older messages exist before the first loaded one. */
+	hasOlder = $state(false);
+	loadingOlder = $state(false);
 	/** Files attached to the selected conversation. */
 	files = $state<api.FileRecord[]>([]);
 	/** The caller's whole personal library (for the attach picker). */
@@ -246,6 +252,7 @@ class ChatStore {
 		this.selectedId = null;
 		this.pendingAgentId = null;
 		this.messages = [];
+		this.hasOlder = false;
 		this.files = [];
 		this.library = [];
 		this.libraryLoaded = false;
@@ -259,13 +266,38 @@ class ChatStore {
 		this.error = null;
 		this.notice = null;
 		try {
-			const [messages, files] = await Promise.all([api.listMessages(id), api.listFiles(id)]);
+			const [messages, files] = await Promise.all([
+				api.listMessages(id, { limit: MESSAGE_PAGE }),
+				api.listFiles(id)
+			]);
 			this.messages = withToolSteps(messages);
+			this.hasOlder = messages.length === MESSAGE_PAGE;
 			this.files = files;
 			this.ensureModel();
 			this.touch();
 		} catch (err) {
 			this.error = message(err);
+		}
+	}
+
+	/** Prepend the previous page of messages, preserving the scroll position. */
+	async loadOlder() {
+		if (!this.selectedId || !this.hasOlder || this.loadingOlder) return;
+		const oldest = this.messages[0];
+		if (!oldest) return;
+		this.loadingOlder = true;
+		try {
+			const older = await api.listMessages(this.selectedId, {
+				before: oldest.id,
+				limit: MESSAGE_PAGE
+			});
+			this.hasOlder = older.length === MESSAGE_PAGE;
+			this.messages = [...withToolSteps(older), ...this.messages];
+			this.touch();
+		} catch (err) {
+			this.error = message(err);
+		} finally {
+			this.loadingOlder = false;
 		}
 	}
 
@@ -283,6 +315,7 @@ class ChatStore {
 		this.sortConversations();
 		this.selectedId = conversation.id;
 		this.messages = [];
+		this.hasOlder = false;
 		this.files = [];
 		this.touch();
 		return conversation;
@@ -449,6 +482,7 @@ class ChatStore {
 		if (wasSelected) {
 			this.selectedId = null;
 			this.messages = [];
+			this.hasOlder = false;
 			this.files = [];
 			const next = this.conversations[0];
 			if (next) await this.select(next.id);

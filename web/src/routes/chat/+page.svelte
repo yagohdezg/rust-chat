@@ -153,13 +153,29 @@
 		if (!auth.session) goto('/login');
 	});
 
+	// Whether the view is scrolled to (near) the newest message. Used to keep
+	// auto-scroll from yanking the view down when older pages are prepended.
+	let atBottom = $state(true);
+	let lastSelected: string | null = null;
+
 	$effect(() => {
 		// Re-run on any message mutation so the view stays pinned to the bottom.
 		chat.revision;
-		chat.selectedId;
+		const selectedId = chat.selectedId;
 		for (const msg of chat.messages) void msg.content;
-		void scrollToBottom();
+		// Switching conversations always jumps to the newest messages.
+		if (selectedId !== lastSelected) {
+			lastSelected = selectedId;
+			atBottom = true;
+		}
+		if (atBottom) void scrollToBottom();
 	});
+
+	function onScroll() {
+		const el = scroller;
+		if (!el) return;
+		atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+	}
 
 	async function send() {
 		const content = input;
@@ -225,7 +241,12 @@
 		{/if}
 	</header>
 
-	<div class="messages" bind:this={scroller}>
+	<div class="messages" bind:this={scroller} onscroll={onScroll}>
+		{#if chat.hasOlder}
+			<button class="load-older" onclick={() => chat.loadOlder()} disabled={chat.loadingOlder}>
+				{chat.loadingOlder ? 'Loading…' : 'Load earlier messages'}
+			</button>
+		{/if}
 		{#if chat.messages.length === 0 && !chat.loading}
 			<div class="empty">
 				<span class="mark"></span>
@@ -678,6 +699,20 @@
 		display: flex;
 		flex-direction: column;
 		gap: 1.1rem;
+	}
+	.load-older {
+		align-self: center;
+		padding: 0.4rem 0.9rem;
+		border-radius: var(--radius-full);
+		border: 1px solid var(--border);
+		background: var(--surface-active);
+		color: var(--text-muted);
+		font-size: 0.8rem;
+		cursor: pointer;
+	}
+	.load-older:disabled {
+		opacity: 0.6;
+		cursor: default;
 	}
 	.msg {
 		display: flex;

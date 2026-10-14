@@ -49,7 +49,10 @@ async fn relational_crud_roundtrip() {
         .await
         .expect("insert message");
 
-    let messages = store.list_messages(conversation.id).await.unwrap();
+    let messages = store
+        .list_messages(conversation.id, None, None, 100)
+        .await
+        .unwrap();
     assert_eq!(messages.len(), 2);
     assert_eq!(messages[0].content.as_deref(), Some("hi there"));
 
@@ -110,7 +113,7 @@ async fn conversations_pin_and_duplicate() {
     assert_ne!(copy.id, older.id);
     assert_eq!(copy.title, "older (copy)");
     assert!(!copy.pinned, "copies start unpinned");
-    let copied = store.list_messages(copy.id).await.unwrap();
+    let copied = store.list_messages(copy.id, None, None, 100).await.unwrap();
     assert_eq!(copied.len(), 2);
     assert_eq!(copied[0].content.as_deref(), Some("hi"));
     assert_eq!(copied[1].content.as_deref(), Some("hello"));

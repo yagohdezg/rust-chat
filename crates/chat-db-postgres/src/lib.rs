@@ -883,7 +883,11 @@ impl Store for PostgresStore {
         .execute(&mut *tx)
         .await?;
         let history = sqlx::query_as::<_, Message>(
-            "select * from messages where conversation_id = $1 order by created_at asc limit 1000",
+            "select * from (
+                 select * from messages where conversation_id = $1
+                 order by created_at desc, id desc limit 1000
+             ) recent
+             order by created_at asc, id asc",
         )
         .bind(conversation_id)
         .fetch_all(&mut *tx)
@@ -947,13 +951,58 @@ impl Store for PostgresStore {
         Ok(row)
     }
 
-    async fn list_messages(&self, conversation_id: Uuid) -> Result<Vec<Message>> {
-        let rows = sqlx::query_as::<_, Message>(
-            "select * from messages where conversation_id = $1 order by created_at asc limit 1000",
-        )
-        .bind(conversation_id)
-        .fetch_all(&self.pool)
-        .await?;
+    async fn list_messages(
+        &self,
+        conversation_id: Uuid,
+        before: Option<Uuid>,
+        after: Option<Uuid>,
+        limit: i64,
+    ) -> Result<Vec<Message>> {
+        let mut rows = if let Some(cursor) = before {
+            sqlx::query_as::<_, Message>(
+                "select m.* from messages m
+                 join messages c on c.id = $2
+                 where m.conversation_id = $1
+                   and (m.created_at < c.created_at
+                        or (m.created_at = c.created_at and m.id < c.id))
+                 order by m.created_at desc, m.id desc
+                 limit $3",
+            )
+            .bind(conversation_id)
+            .bind(cursor)
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await?
+        } else if let Some(cursor) = after {
+            sqlx::query_as::<_, Message>(
+                "select m.* from messages m
+                 join messages c on c.id = $2
+                 where m.conversation_id = $1
+                   and (m.created_at > c.created_at
+                        or (m.created_at = c.created_at and m.id > c.id))
+                 order by m.created_at asc, m.id asc
+                 limit $3",
+            )
+            .bind(conversation_id)
+            .bind(cursor)
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await?
+        } else {
+            sqlx::query_as::<_, Message>(
+                "select * from messages
+                 where conversation_id = $1
+                 order by created_at desc, id desc
+                 limit $2",
+            )
+            .bind(conversation_id)
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await?
+        };
+        if after.is_none() {
+            rows.reverse();
+        }
         Ok(rows)
     }
 
