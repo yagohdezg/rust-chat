@@ -1393,6 +1393,7 @@ pub struct ProviderView {
     pub name: String,
     pub kind: String,
     pub base_url: String,
+    pub vision: bool,
     pub created_at: DateTime<Utc>,
     pub has_key: bool,
 }
@@ -1404,6 +1405,7 @@ fn provider_view(provider: Provider, has_key: bool) -> ProviderView {
         name: provider.name,
         kind: provider.kind,
         base_url: provider.base_url,
+        vision: provider.vision,
         created_at: provider.created_at,
         has_key,
     }
@@ -1459,19 +1461,8 @@ fn conflict_on_unique(err: ChatError, message: &str) -> ApiError {
     err.into()
 }
 
-/// The provider to use when neither the request nor an agent names one: the
-/// caller's first own provider, else the file-declared default global, else the
-/// first admin-provided global one.
-async fn default_provider(
-    state: &AppState,
-    user_id: Uuid,
-) -> Result<Arc<dyn LlmProvider>, ApiError> {
-    let row = default_provider_row(state, user_id).await?;
-    build_provider(state, &row, user_id).await
-}
-
-/// The stored row behind [`default_provider`], for callers that need the id
-/// (e.g. the cached model catalog).
+/// The stored row for the fallback provider, for callers that need the id or
+/// its capabilities (e.g. the cached model catalog).
 async fn default_provider_row(state: &AppState, user_id: Uuid) -> Result<Provider, ApiError> {
     Ok(default_provider_choice(state, user_id).await?.0)
 }
@@ -1528,6 +1519,9 @@ pub struct CreateProviderBody {
     /// `openai` | `custom` (Anthropic is not supported yet).
     #[serde(default = "default_kind")]
     pub kind: String,
+    /// Whether the provider serves models that accept image input.
+    #[serde(default)]
+    pub vision: bool,
     #[serde(default)]
     pub api_key: Option<String>,
     /// Admin-only: expose this provider to every user.
@@ -1561,7 +1555,7 @@ pub async fn create_provider(
 
     let provider = state
         .store
-        .create_provider(owner, name, &body.kind, base_url, api_key)
+        .create_provider(owner, name, &body.kind, base_url, api_key, body.vision)
         .await
         .map_err(|err| conflict_on_unique(err, "a provider with that name already exists"))?;
     let has_key = provider.api_key.is_some();
@@ -1584,9 +1578,11 @@ pub struct UpdateProviderBody {
     pub kind: Option<String>,
     /// Omit to keep the stored key; send an empty string to clear it.
     pub api_key: Option<String>,
+    /// Omit to keep the stored capability.
+    pub vision: Option<bool>,
 }
 
-/// `PUT /api/providers/{id}` — update a provider's fields (own provider, or a
+/// `PATCH /api/providers/{id}` — update a provider's fields (own provider, or a
 /// global one for admins). Rotating base_url/kind/key invalidates the cached
 /// model catalog.
 pub async fn update_provider(
@@ -1622,7 +1618,14 @@ pub async fn update_provider(
 
     let provider = state
         .store
-        .update_provider(provider_id, &name, &kind, &base_url, api_key.as_deref())
+        .update_provider(
+            provider_id,
+            &name,
+            &kind,
+            &base_url,
+            api_key.as_deref(),
+            body.vision.unwrap_or(existing.vision),
+        )
         .await
         .map_err(|err| conflict_on_unique(err, "a provider with that name already exists"))?;
     state
@@ -1700,7 +1703,7 @@ pub async fn admin_bulk_create_providers(
             .filter(|key| !key.is_empty());
         let provider = state
             .store
-            .create_provider(None, name, &entry.kind, base_url, api_key)
+            .create_provider(None, name, &entry.kind, base_url, api_key, entry.vision)
             .await
             .map_err(|err| conflict_on_unique(err, "a provider with that name already exists"))?;
         let has_key = provider.api_key.is_some();
@@ -1983,15 +1986,16 @@ pub async fn chat(
     // Resolve the plain provider/model up front too, so an unconfigured
     // provider fails before the turn is written.
     let plain = if resolved.is_none() {
-        let (provider, fallback_model) = match requested_provider {
+        let ((row, provider), fallback_model) = match requested_provider {
             Some(provider_id) => (resolve_provider(&state, provider_id, user.id).await?, None),
             None => {
                 let (row, fallback) = default_provider_choice(&state, user.id).await?;
-                (build_provider(&state, &row, user.id).await?, fallback)
+                let provider = build_provider(&state, &row, user.id).await?;
+                ((row, provider), fallback)
             }
         };
         let model = pick_model(provider.as_ref(), requested_model.or(fallback_model)).await?;
-        Some((provider, model))
+        Some((row, provider, model))
     } else {
         None
     };
@@ -2010,6 +2014,11 @@ pub async fn chat(
         user_id: user.id,
         conversation_id: conversation.id,
         system: resolved.as_ref().and_then(|r| r.config.system.clone()),
+        vision: match (&resolved, &plain) {
+            (Some(resolved), _) => resolved.vision,
+            (None, Some((row, _, _))) => row.vision,
+            (None, None) => false,
+        },
     };
 
     let tx = state.hub.open(message_id);
@@ -2017,7 +2026,7 @@ pub async fn chat(
 
     match (resolved, plain) {
         (Some(resolved), _) => spawn_agent_generation(state.clone(), message_id, ctx, resolved, tx),
-        (None, Some((provider, model))) => {
+        (None, Some((_, provider, model))) => {
             let request = ChatRequest {
                 model,
                 messages: Vec::new(),
@@ -2139,6 +2148,9 @@ struct TurnContext {
     user_id: Uuid,
     conversation_id: Uuid,
     system: Option<String>,
+    /// Whether the turn's provider serves vision models, which decides whether
+    /// attached images are forwarded or read as text.
+    vision: bool,
 }
 
 /// Assemble the leading system preamble(s) and the conversation history into
@@ -2157,6 +2169,7 @@ async fn build_turn_messages(state: &AppState, ctx: &TurnContext) -> Vec<ChatMes
         .map(|m| ChatMessage {
             role: m.role.clone(),
             content: m.content.clone().unwrap_or_default(),
+            images: Vec::new(),
             tool_calls: m.tool_calls.as_ref().map(|calls| calls.0.clone()),
             tool_call_id: m.tool_call_id.clone(),
             name: None,
@@ -2167,14 +2180,25 @@ async fn build_turn_messages(state: &AppState, ctx: &TurnContext) -> Vec<ChatMes
     if let Some(system) = ctx.system.clone().filter(|s| !s.trim().is_empty()) {
         preambles.push(system);
     }
-    match state
+    let attachments = match state
         .workspace
-        .attachment_context(ctx.user_id, ctx.conversation_id, &state.ocr)
+        .attachment_context(ctx.user_id, ctx.conversation_id, &state.ocr, ctx.vision)
         .await
     {
-        Ok(Some(context)) => preambles.push(context),
-        Ok(None) => {}
-        Err(err) => tracing::warn!(error = %err, "failed to load attachment context"),
+        Ok(attachments) => attachments,
+        Err(err) => {
+            tracing::warn!(error = %err, "failed to load attachment context");
+            Default::default()
+        }
+    };
+    if let Some(context) = attachments.text {
+        preambles.push(context);
+    }
+    // Images go on the turn's own user message, which is the last one.
+    if !attachments.images.is_empty() {
+        if let Some(turn) = messages.iter_mut().rev().find(|m| m.role == "user") {
+            turn.images = attachments.images;
+        }
     }
 
     for preamble in preambles.into_iter().rev() {
@@ -2230,6 +2254,8 @@ struct ResolvedAgent {
     provider: Arc<dyn LlmProvider>,
     config: AgentConfig,
     tools: ToolRegistry,
+    /// Whether the provider serves vision models.
+    vision: bool,
 }
 
 /// Build the runtime provider/config/tools for a turn.
@@ -2260,14 +2286,15 @@ async fn resolve_agent(
     // Provider: the explicitly requested one, else the agent's own, else the
     // default (own, then the file-declared default global, then first global).
     let mut file_default_model: Option<String> = None;
-    let provider = match requested_provider {
+    let (row, provider) = match requested_provider {
         Some(provider_id) => resolve_provider(state, provider_id, user_id).await?,
         None => match agent.as_ref().and_then(|agent| agent.provider_id) {
             Some(provider_id) => resolve_provider(state, provider_id, user_id).await?,
             None => {
                 let (row, fallback) = default_provider_choice(state, user_id).await?;
                 file_default_model = fallback;
-                build_provider(state, &row, user_id).await?
+                let provider = build_provider(state, &row, user_id).await?;
+                (row, provider)
             }
         },
     };
@@ -2344,6 +2371,7 @@ async fn resolve_agent(
     };
 
     Ok(ResolvedAgent {
+        vision: row.vision,
         provider,
         config,
         tools,
@@ -2356,12 +2384,17 @@ async fn resolve_provider(
     state: &AppState,
     provider_id: Uuid,
     user_id: Uuid,
-) -> Result<Arc<dyn LlmProvider>, ApiError> {
+) -> Result<(Provider, Arc<dyn LlmProvider>), ApiError> {
     match state.store.get_provider(provider_id, user_id).await? {
-        Some(row) => build_provider(state, &row, user_id).await,
+        Some(row) => {
+            let provider = build_provider(state, &row, user_id).await?;
+            Ok((row, provider))
+        }
         None => {
             tracing::warn!(%provider_id, "agent provider not found; using default");
-            default_provider(state, user_id).await
+            let row = default_provider_row(state, user_id).await?;
+            let provider = build_provider(state, &row, user_id).await?;
+            Ok((row, provider))
         }
     }
 }
@@ -2412,6 +2445,7 @@ fn spawn_agent_generation(
             provider,
             config,
             tools,
+            ..
         } = resolved;
         let messages = build_turn_messages(&state, &ctx).await;
         let mut stream = run_agent_stream(provider, tools, config, messages);

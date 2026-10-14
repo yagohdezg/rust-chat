@@ -7,6 +7,7 @@
 	let kind = $state('openai');
 	let baseUrl = $state('https://api.openai.com/v1');
 	let apiKey = $state('');
+	let vision = $state(false);
 	let global = $state(true);
 	let busy = $state(false);
 	let error = $state<string | null>(null);
@@ -23,6 +24,7 @@
 				kind,
 				base_url: baseUrl.trim(),
 				api_key: apiKey.trim() || undefined,
+				vision,
 				global: isAdmin && global
 			});
 			if (provider) {
@@ -60,6 +62,10 @@
 		<label>
 			API key
 			<input type="password" bind:value={apiKey} placeholder="sk-…" autocomplete="off" />
+		</label>
+		<label class="check">
+			<input type="checkbox" bind:checked={vision} />
+			Serves vision models (send attached images to the model)
 		</label>
 		{#if isAdmin}
 			<label class="check">

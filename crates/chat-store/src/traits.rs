@@ -211,6 +211,7 @@ pub trait Store: Send + Sync {
         kind: &str,
         base_url: &str,
         api_key: Option<&str>,
+        vision: bool,
     ) -> Result<Provider>;
 
     /// Delete a provider matching `owner_id` exactly (`None` = global).
@@ -225,6 +226,7 @@ pub trait Store: Send + Sync {
         kind: &str,
         base_url: &str,
         api_key: Option<&str>,
+        vision: bool,
     ) -> Result<Provider>;
 
     /// Idempotently insert or update a global (admin-provided) provider declared

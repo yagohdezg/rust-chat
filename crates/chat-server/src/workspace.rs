@@ -11,6 +11,7 @@
 use std::sync::Arc;
 
 use base64::Engine as _;
+use chat_providers::ImagePart;
 use chat_sandbox::{RejectedFile, SandboxFile};
 use chat_store::{FileRecord, FileStore, Store};
 use uuid::Uuid;
@@ -24,6 +25,14 @@ pub struct FileWorkspace {
     files: Arc<dyn FileStore>,
     store: Arc<dyn Store>,
     policy: FilePolicy,
+}
+
+/// What a conversation's attached files contribute to a turn: the text
+/// preamble, and the images to forward to a vision-capable model.
+#[derive(Debug, Default)]
+pub struct AttachmentContext {
+    pub text: Option<String>,
+    pub images: Vec<ImagePart>,
 }
 
 /// The result of persisting a run's outputs: the library records created, plus
@@ -76,24 +85,32 @@ impl FileWorkspace {
         Ok(inputs)
     }
 
-    /// Load the conversation's attached files as a prompt preamble.
+    /// Load the conversation's attached files as prompt context.
     ///
     /// Text files are decoded directly, common document formats (PDF, DOCX,
     /// XLSX, PPTX, HTML) are parsed to text, and image-only documents are
     /// recognized with `ocr` when it is configured. Each file is truncated to
-    /// keep the prompt bounded; unsupported formats are skipped. Returns `None`
-    /// when nothing usable is attached.
+    /// keep the prompt bounded; unsupported formats are skipped.
+    ///
+    /// With `vision`, images are returned as image parts for a vision-capable
+    /// model instead of being read as text, so the model sees the pixels. An
+    /// image that cannot be forwarded (too large, or past the count limit)
+    /// falls back to the text path.
     pub async fn attachment_context(
         &self,
         user_id: Uuid,
         conversation_id: Uuid,
         ocr: &Ocr,
-    ) -> Result<Option<String>, ApiError> {
+        vision: bool,
+    ) -> Result<AttachmentContext, ApiError> {
         const MAX_FILE_BYTES: usize = 128 * 1024;
         const MAX_TOTAL_CHARS: usize = 256 * 1024;
+        const MAX_IMAGE_BYTES: usize = 4 * 1024 * 1024;
+        const MAX_IMAGES: usize = 4;
 
         let records = self.store.list_files(conversation_id).await?;
         let mut out = String::new();
+        let mut images: Vec<ImagePart> = Vec::new();
         let mut included = 0usize;
         for record in records {
             if record.user_id != user_id {
@@ -106,6 +123,19 @@ impl FileWorkspace {
                     continue;
                 }
             };
+            if vision && images.len() < MAX_IMAGES && bytes.len() <= MAX_IMAGE_BYTES {
+                if let Some(mime) = record
+                    .mime
+                    .clone()
+                    .filter(|mime| mime.starts_with("image/"))
+                {
+                    images.push(ImagePart {
+                        mime,
+                        data: base64::engine::general_purpose::STANDARD.encode(&bytes),
+                    });
+                    continue;
+                }
+            }
             let Some(text) = extract_attachment_text(&record.filename, bytes, ocr).await else {
                 continue; // unsupported or unreadable format
             };
@@ -136,7 +166,10 @@ impl FileWorkspace {
                 break;
             }
         }
-        Ok((included > 0).then_some(out))
+        Ok(AttachmentContext {
+            text: (included > 0).then_some(out),
+            images,
+        })
     }
 
     /// Persist sandbox output files into the user's library and attach them to

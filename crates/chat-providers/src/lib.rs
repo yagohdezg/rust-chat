@@ -14,11 +14,24 @@ use serde_json::Value;
 
 pub use openai::OpenAiProvider;
 
+/// An image attached to a message, forwarded to a vision-capable model.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImagePart {
+    /// Sniffed MIME type, used to build the `data:` URL.
+    pub mime: String,
+    /// Base64-encoded bytes, without the data-URL prefix.
+    pub data: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ChatMessage {
     pub role: String,
     #[serde(default)]
     pub content: String,
+    /// Images to forward alongside `content`. Only vision-capable providers
+    /// receive these; a text-only provider is never sent an image part.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<ImagePart>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -48,6 +61,12 @@ impl ChatMessage {
             content: content.into(),
             ..Default::default()
         }
+    }
+    /// Attach images to this message, to be forwarded to a vision-capable
+    /// model alongside the text.
+    pub fn with_images(mut self, images: Vec<ImagePart>) -> Self {
+        self.images = images;
+        self
     }
     pub fn tool(tool_call_id: impl Into<String>, content: impl Into<String>) -> Self {
         Self {

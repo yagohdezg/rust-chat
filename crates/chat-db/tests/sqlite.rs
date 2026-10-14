@@ -149,7 +149,14 @@ async fn agent_and_provider_loading() {
     // A global provider (`user_id` null) is visible to everyone; a private one
     // only to its owner. A user's own providers list before globals.
     let global = store
-        .create_provider(None, "global", "openai", "https://api.example.com", None)
+        .create_provider(
+            None,
+            "global",
+            "openai",
+            "https://api.example.com",
+            None,
+            false,
+        )
         .await
         .unwrap();
     let private = store
@@ -159,6 +166,7 @@ async fn agent_and_provider_loading() {
             "openai",
             "https://api.example.com",
             Some("sk-test"),
+            false,
         )
         .await
         .unwrap();
@@ -268,6 +276,7 @@ async fn model_catalog_is_cached_per_provider() {
             "openai",
             "https://api.example.com",
             None,
+            false,
         )
         .await
         .unwrap();
@@ -351,6 +360,7 @@ async fn admin_user_summaries_and_provider_update() {
             "openai",
             "https://api.example.com",
             Some("sk-old"),
+            true,
         )
         .await
         .unwrap();
@@ -386,6 +396,7 @@ async fn admin_user_summaries_and_provider_update() {
             "custom",
             "https://new.example.com",
             Some("sk-new"),
+            true,
         )
         .await
         .unwrap();
@@ -393,12 +404,21 @@ async fn admin_user_summaries_and_provider_update() {
     assert_eq!(updated.kind, "custom");
     assert_eq!(updated.base_url, "https://new.example.com");
     assert_eq!(updated.api_key.as_deref(), Some("sk-new"));
+    assert!(updated.vision);
 
     let cleared = store
-        .update_provider(provider.id, "p2", "custom", "https://new.example.com", None)
+        .update_provider(
+            provider.id,
+            "p2",
+            "custom",
+            "https://new.example.com",
+            None,
+            false,
+        )
         .await
         .unwrap();
     assert!(cleared.api_key.is_none());
+    assert!(!cleared.vision);
 
     drop(store);
     let _ = std::fs::remove_file(path);
@@ -414,7 +434,14 @@ async fn provider_credentials_round_trip() {
         .unwrap();
     // An admin-provisioned global provider with no shared key.
     let provider = store
-        .create_provider(None, "shared", "openai", "https://api.example.com", None)
+        .create_provider(
+            None,
+            "shared",
+            "openai",
+            "https://api.example.com",
+            None,
+            false,
+        )
         .await
         .unwrap();
 
@@ -501,7 +528,7 @@ async fn delete_user_cascades_to_resources() {
         .unwrap();
     store.create_conversation(user.id, None, "x").await.unwrap();
     store
-        .create_provider(Some(user.id), "p", "openai", "https://x", None)
+        .create_provider(Some(user.id), "p", "openai", "https://x", None, false)
         .await
         .unwrap();
     assert_eq!(store.count_users().await.unwrap(), 2);

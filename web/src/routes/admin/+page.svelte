@@ -18,6 +18,7 @@
 	let pKind = $state('openai');
 	let pBaseUrl = $state('https://api.openai.com/v1');
 	let pKey = $state('');
+	let pVision = $state(false);
 	let bulk = $state('');
 	let busy = $state(false);
 
@@ -154,10 +155,12 @@
 				kind: pKind,
 				base_url: pBaseUrl.trim(),
 				api_key: pKey.trim() || undefined,
+				vision: pVision,
 				global: true
 			});
 			providers = [...providers, created];
 			pKey = '';
+			pVision = false;
 			notice = `Added global provider "${created.name}".`;
 		} catch (err) {
 			error = message(err);
@@ -192,6 +195,18 @@
 			error = message(err);
 		} finally {
 			busy = false;
+		}
+	}
+
+	async function toggleVision(provider: api.Provider) {
+		error = null;
+		notice = null;
+		try {
+			const updated = await api.updateProvider(provider.id, { vision: !provider.vision });
+			providers = providers.map((p) => (p.id === updated.id ? updated : p));
+			notice = `"${updated.name}" ${updated.vision ? 'serves' : 'does not serve'} vision models.`;
+		} catch (err) {
+			error = message(err);
 		}
 	}
 
@@ -378,8 +393,12 @@
 									<span class="pname">{provider.name}</span>
 									<span class="purl" title={provider.base_url}>{provider.base_url}</span>
 									<span class="tag">{provider.kind}</span>
+									{#if provider.vision}<span class="tag vision">vision</span>{/if}
 								</div>
 								<div class="actions">
+									<button class="mini" onclick={() => void toggleVision(provider)}>
+										{provider.vision ? 'No vision' : 'Vision'}
+									</button>
 									<button class="mini" onclick={() => void rotateKey(provider)}>Rotate key</button>
 									<button class="mini danger" onclick={() => void removeProvider(provider)}>
 										Delete
@@ -406,6 +425,9 @@
 					<label>
 						API key
 						<input type="password" bind:value={pKey} placeholder="sk-…" autocomplete="off" />
+					</label>
+					<label class="check">
+						<input type="checkbox" bind:checked={pVision} /> Serves vision models
 					</label>
 					<button class="primary" type="submit" disabled={busy || !pName.trim() || !pBaseUrl.trim()}>
 						{busy ? 'Saving…' : 'Add provider'}
@@ -598,6 +620,11 @@
 	.tag.admin {
 		background: var(--primary-soft);
 		color: var(--accent);
+	}
+	.tag.vision {
+		background: var(--primary-soft);
+		color: var(--accent);
+		margin-left: 0.35rem;
 	}
 	.tag.locked {
 		background: var(--danger-bg);

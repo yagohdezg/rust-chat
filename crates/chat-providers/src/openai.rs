@@ -3,7 +3,9 @@ use eventsource_stream::Eventsource;
 use futures::StreamExt;
 use serde_json::{json, Value};
 
-use crate::{ChatChunk, ChatRequest, ChatStream, LlmProvider, ModelInfo, ProviderError};
+use crate::{
+    ChatChunk, ChatMessage, ChatRequest, ChatStream, LlmProvider, ModelInfo, ProviderError,
+};
 
 /// An OpenAI-compatible chat provider (also covers Azure-style `/chat/completions`
 /// gateways and local servers like Ollama, vLLM and LM Studio).
@@ -42,6 +44,36 @@ impl OpenAiProvider {
         }
         roots
     }
+}
+
+/// Render one message in the OpenAI wire format. A message carrying images
+/// uses the multi-part content array (`text` + `image_url` data URLs); every
+/// other message keeps the plain string content, which is what text-only
+/// gateways accept.
+fn message_json(message: &ChatMessage) -> Value {
+    let content = if message.images.is_empty() {
+        json!(message.content)
+    } else {
+        let mut parts = vec![json!({"type": "text", "text": message.content})];
+        for image in &message.images {
+            parts.push(json!({
+                "type": "image_url",
+                "image_url": { "url": format!("data:{};base64,{}", image.mime, image.data) },
+            }));
+        }
+        json!(parts)
+    };
+    let mut out = json!({ "role": message.role, "content": content });
+    if let Some(name) = &message.name {
+        out["name"] = json!(name);
+    }
+    if let Some(tool_calls) = &message.tool_calls {
+        out["tool_calls"] = tool_calls.clone();
+    }
+    if let Some(tool_call_id) = &message.tool_call_id {
+        out["tool_call_id"] = json!(tool_call_id);
+    }
+    out
 }
 
 fn snippet(body: &str) -> String {
@@ -85,9 +117,10 @@ impl LlmProvider for OpenAiProvider {
     }
 
     async fn stream(&self, request: ChatRequest) -> std::result::Result<ChatStream, ProviderError> {
+        let messages: Vec<Value> = request.messages.iter().map(message_json).collect();
         let mut body = json!({
             "model": request.model,
-            "messages": request.messages,
+            "messages": messages,
             "stream": true,
         });
         if let Some(t) = request.temperature {

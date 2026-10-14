@@ -794,11 +794,12 @@ impl Store for PostgresStore {
         kind: &str,
         base_url: &str,
         api_key: Option<&str>,
+        vision: bool,
     ) -> Result<Provider> {
         let encrypted_key = self.encrypt_opt(api_key)?;
         let row = sqlx::query_as::<_, Provider>(
-            "insert into providers (id, user_id, name, kind, base_url, api_key, created_at)
-             values ($1, $2, $3, $4, $5, $6, $7)
+            "insert into providers (id, user_id, name, kind, base_url, api_key, vision, created_at)
+             values ($1, $2, $3, $4, $5, $6, $7, $8)
              returning *",
         )
         .bind(Uuid::new_v4())
@@ -807,6 +808,7 @@ impl Store for PostgresStore {
         .bind(kind)
         .bind(base_url)
         .bind(encrypted_key)
+        .bind(vision)
         .bind(Utc::now())
         .fetch_one(&self.pool)
         .await?;
@@ -829,11 +831,12 @@ impl Store for PostgresStore {
         kind: &str,
         base_url: &str,
         api_key: Option<&str>,
+        vision: bool,
     ) -> Result<Provider> {
         let encrypted_key = self.encrypt_opt(api_key)?;
         let row = sqlx::query_as::<_, Provider>(
             "update providers
-             set name = $2, kind = $3, base_url = $4, api_key = $5
+             set name = $2, kind = $3, base_url = $4, api_key = $5, vision = $6
              where id = $1
              returning *",
         )
@@ -842,6 +845,7 @@ impl Store for PostgresStore {
         .bind(kind)
         .bind(base_url)
         .bind(encrypted_key)
+        .bind(vision)
         .fetch_one(&self.pool)
         .await?;
         self.decrypt_provider(row)

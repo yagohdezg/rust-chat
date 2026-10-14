@@ -151,6 +151,10 @@ pub struct Provider {
     pub base_url: String,
     #[serde(skip_serializing)]
     pub api_key: Option<String>,
+    /// Whether this provider serves models that accept image input. Set from
+    /// the provider form; decides whether attached images are forwarded to the
+    /// model as image parts or read as text.
+    pub vision: bool,
     pub created_at: DateTime<Utc>,
 }
 

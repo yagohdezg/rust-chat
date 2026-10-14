@@ -55,6 +55,8 @@ export type Provider = {
 	name: string;
 	kind: string;
 	base_url: string;
+	/** Whether the provider serves models that accept image input. */
+	vision: boolean;
 	created_at: string;
 	/** Whether the caller has a usable key (own credential or shared key). */
 	has_key?: boolean;
@@ -65,6 +67,7 @@ export type CreateProviderInput = {
 	base_url: string;
 	kind?: string;
 	api_key?: string;
+	vision?: boolean;
 	global?: boolean;
 };
 
@@ -179,6 +182,7 @@ export type UpdateProviderInput = {
 	base_url?: string;
 	kind?: string;
 	api_key?: string;
+	vision?: boolean;
 };
 
 /** One entry of the security audit trail (`GET /api/admin/audit`). */

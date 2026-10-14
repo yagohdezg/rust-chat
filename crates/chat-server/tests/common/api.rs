@@ -126,10 +126,25 @@ impl Session {
     }
 
     pub async fn create_provider(&self, name: &str, base_url: &str) -> Result<Uuid> {
+        self.create_provider_with_vision(name, base_url, false)
+            .await
+    }
+
+    pub async fn create_provider_with_vision(
+        &self,
+        name: &str,
+        base_url: &str,
+        vision: bool,
+    ) -> Result<Uuid> {
         let value = self
             .post_expect(
                 "/api/providers",
-                &json!({"name": name, "base_url": base_url, "api_key": "fake-key"}),
+                &json!({
+                    "name": name,
+                    "base_url": base_url,
+                    "api_key": "fake-key",
+                    "vision": vision,
+                }),
             )
             .await?;
         Ok(value["id"].as_str().unwrap().parse()?)

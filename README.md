@@ -156,6 +156,9 @@ and PDF, DOCX, XLSX, PPTX and HTML are parsed to text; parsing is capped at
 image-only PDFs are recognized as well: the document path is appended to the
 command as its last argument, its name is in `OCR_FILENAME`, and the text is
 read from stdout. A document that cannot be read is skipped, never an error.
+Images are read this way only when the turn's provider is not marked as
+serving vision models; a vision provider receives the images themselves (see
+[Providers](#providers)).
 
 There is no vector store, chunker or embedder: the RAG/embedding stack was
 removed because inlining is exact, needs no extra service, and answers
@@ -359,7 +362,7 @@ size per node is exposed to admins at `GET /api/admin/computers`.
 | `DELETE`| `/api/mcp-servers/{id}`            | JWT  | Delete an MCP server                 |
 | `POST` | `/api/admin/providers`              | admin | Bulk-create instance-wide providers  |
 | `GET`  | `/api/providers`                    | JWT  | List providers visible to the caller, with `has_key` |
-| `POST` | `/api/providers`                    | JWT  | Create a personal provider (admin: `global`) |
+| `POST` | `/api/providers`                    | JWT  | Create a personal provider (admin: `global`, `vision`) |
 | `PATCH`| `/api/providers/{id}`               | JWT  | Update / rotate a provider's fields  |
 | `PUT`  | `/api/providers/{id}/credential`    | JWT  | Store the caller's own key for a provider |
 | `GET`  | `/api/conversations`                | JWT  | List the caller's conversations      |
@@ -410,6 +413,13 @@ their own via `PUT /api/providers/{id}/credential` (personal, encrypted at
 rest); key resolution prefers the caller's credential over the provider's own
 key. `GET /api/providers` returns `has_key` per provider so the UI can prompt
 for the missing key, and admins are never forced through provider setup.
+
+A provider carries a `vision` flag, set from the provider form (or `POST` /
+`PATCH /api/providers`), for endpoints that serve models accepting image input.
+A turn on a vision provider sends the conversation's attached images to the
+model as OpenAI-style `image_url` parts (up to 4 images, 4 MiB each) instead of
+reading them as text; a provider without the flag never receives an image part,
+and the image is read as text or skipped as usual.
 
 `POST /api/files` takes JSON: `{ filename, content_b64, conversation_id? }`.
 Uploads are written under `FILE_STORAGE_DIR` into the caller's personal

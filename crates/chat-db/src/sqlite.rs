@@ -814,11 +814,12 @@ impl Store for SqliteStore {
         kind: &str,
         base_url: &str,
         api_key: Option<&str>,
+        vision: bool,
     ) -> Result<Provider> {
         let encrypted_key = self.encrypt_opt(api_key)?;
         let row = sqlx::query_as::<_, Provider>(
-            "insert into providers (id, user_id, name, kind, base_url, api_key, created_at)
-             values (?, ?, ?, ?, ?, ?, ?)
+            "insert into providers (id, user_id, name, kind, base_url, api_key, vision, created_at)
+             values (?, ?, ?, ?, ?, ?, ?, ?)
              returning *",
         )
         .bind(Uuid::new_v4())
@@ -827,6 +828,7 @@ impl Store for SqliteStore {
         .bind(kind)
         .bind(base_url)
         .bind(encrypted_key)
+        .bind(vision)
         .bind(Utc::now())
         .fetch_one(&self.pool)
         .await?;
@@ -849,11 +851,12 @@ impl Store for SqliteStore {
         kind: &str,
         base_url: &str,
         api_key: Option<&str>,
+        vision: bool,
     ) -> Result<Provider> {
         let encrypted_key = self.encrypt_opt(api_key)?;
         let row = sqlx::query_as::<_, Provider>(
             "update providers
-             set name = ?, kind = ?, base_url = ?, api_key = ?
+             set name = ?, kind = ?, base_url = ?, api_key = ?, vision = ?
              where id = ?
              returning *",
         )
@@ -861,6 +864,7 @@ impl Store for SqliteStore {
         .bind(kind)
         .bind(base_url)
         .bind(encrypted_key)
+        .bind(vision)
         .bind(id)
         .fetch_one(&self.pool)
         .await?;

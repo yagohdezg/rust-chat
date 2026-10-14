@@ -114,6 +114,7 @@
 	let newKind = $state('openai');
 	let newBaseUrl = $state('https://api.openai.com/v1');
 	let newKey = $state('');
+	let newVision = $state(false);
 	let newGlobal = $state(false);
 	let savingProvider = $state(false);
 
@@ -182,11 +183,13 @@
 			kind: newKind,
 			base_url: newBaseUrl.trim(),
 			api_key: newKey.trim() || undefined,
+			vision: newVision,
 			global: isAdmin && newGlobal
 		});
 		savingProvider = false;
 		if (!chat.error) {
 			newKey = '';
+			newVision = false;
 			newGlobal = false;
 			showAddProvider = false;
 		}
@@ -632,6 +635,9 @@
 										</select>
 										<input bind:value={newBaseUrl} placeholder="https://api.openai.com/v1" required />
 										<input type="password" bind:value={newKey} placeholder="API key (optional)" autocomplete="off" />
+										<label class="check">
+											<input type="checkbox" bind:checked={newVision} /> Serves vision models
+										</label>
 										{#if isAdmin}
 											<label class="check">
 												<input type="checkbox" bind:checked={newGlobal} /> Share with every user

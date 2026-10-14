@@ -940,3 +940,98 @@ async fn ocr_failure_skips_the_document() {
         .to_string();
     assert!(!prompt.contains("--- File:"), "prompt: {prompt}");
 }
+
+#[tokio::test]
+async fn vision_provider_receives_attached_images() {
+    let env = TestEnvBuilder::new().start().await.unwrap();
+    let session = Session::register(&env.base_url, "a@example.com", "correct-horse-battery")
+        .await
+        .unwrap();
+    let provider_id = session
+        .create_provider_with_vision("fake", &env.provider_url, true)
+        .await
+        .unwrap();
+    let id = session.create_conversation("pictures").await.unwrap();
+
+    let png = base64::engine::general_purpose::STANDARD
+        .encode(b"\x89PNG\r\n\x1a\n\x00\x00\x00\x0dIHDR\x00\x00\x00\x01\x00\x00\x00\x01");
+    session
+        .post_expect(
+            "/api/files",
+            &json!({"filename": "photo.png", "content_b64": png, "conversation_id": id}),
+        )
+        .await
+        .unwrap();
+
+    session
+        .chat_sse(id, "what is in the photo?", None, Some(provider_id))
+        .await
+        .unwrap();
+
+    let request = &env.provider.requests()[0];
+    let messages = request["messages"].as_array().unwrap();
+    let turn = messages
+        .iter()
+        .rev()
+        .find(|m| m["role"] == json!("user"))
+        .expect("the turn is sent as a user message");
+    let parts = turn["content"]
+        .as_array()
+        .expect("a vision turn sends multi-part content");
+    assert_eq!(parts[0]["type"], json!("text"));
+    assert_eq!(parts[0]["text"], json!("what is in the photo?"));
+    assert_eq!(parts[1]["type"], json!("image_url"));
+    let url = parts[1]["image_url"]["url"].as_str().unwrap();
+    assert!(
+        url.starts_with("data:image/png;base64,"),
+        "image is sent inline: {url}"
+    );
+
+    // The model gets the pixels, so nothing is inlined as document text.
+    if let Some(system) = messages.iter().find(|m| m["role"] == json!("system")) {
+        let text = system["content"].as_str().unwrap_or_default();
+        assert!(!text.contains("--- File:"), "prompt: {text}");
+    }
+}
+
+#[tokio::test]
+async fn text_only_provider_never_receives_image_parts() {
+    let env = TestEnvBuilder::new().start().await.unwrap();
+    let session = Session::register(&env.base_url, "a@example.com", "correct-horse-battery")
+        .await
+        .unwrap();
+    let provider_id = session
+        .create_provider("fake", &env.provider_url)
+        .await
+        .unwrap();
+    let id = session.create_conversation("no vision").await.unwrap();
+
+    let png = base64::engine::general_purpose::STANDARD
+        .encode(b"\x89PNG\r\n\x1a\n\x00\x00\x00\x0dIHDR\x00\x00\x00\x01\x00\x00\x00\x01");
+    session
+        .post_expect(
+            "/api/files",
+            &json!({"filename": "photo.png", "content_b64": png, "conversation_id": id}),
+        )
+        .await
+        .unwrap();
+
+    let events = session
+        .chat_sse(id, "what is in the photo?", None, Some(provider_id))
+        .await
+        .unwrap();
+    assert!(events.iter().any(|event| event.event == "done"));
+
+    let request = &env.provider.requests()[0];
+    let messages = request["messages"].as_array().unwrap();
+    let turn = messages
+        .iter()
+        .rev()
+        .find(|m| m["role"] == json!("user"))
+        .expect("the turn is sent as a user message");
+    assert_eq!(
+        turn["content"],
+        json!("what is in the photo?"),
+        "a text-only provider is never sent content parts"
+    );
+}
