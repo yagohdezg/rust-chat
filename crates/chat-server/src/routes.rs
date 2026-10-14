@@ -150,6 +150,23 @@ pub async fn login(
 ) -> Result<Json<Value>, ApiError> {
     let candidate = state.store.find_user_by_email(&body.email).await?;
 
+    // A locked account is refused before the password is even checked, so the
+    // lock-out cannot be used as a password oracle. Once the lock has expired
+    // the failure streak starts over, so the account gets a full window of
+    // attempts rather than re-locking on the next typo.
+    if let Some(user) = candidate.as_ref() {
+        match user.locked_until {
+            Some(until) if until > Utc::now() => {
+                return Err(ChatError::TooManyRequests(format!(
+                    "account locked until {until}; too many failed sign-in attempts"
+                ))
+                .into());
+            }
+            Some(_) => state.store.clear_login_failures(user.id).await?,
+            None => {}
+        }
+    }
+
     let valid = match candidate.as_ref() {
         Some(user) if user.password_hash.is_some() => {
             verify_password(&body.password, user.password_hash.as_deref().unwrap_or(""))
@@ -158,6 +175,9 @@ pub async fn login(
         _ => false,
     };
     if !valid {
+        if let Some(user) = candidate.as_ref() {
+            lock_out_after_failure(&state, user, addr.ip()).await?;
+        }
         audit(
             &state,
             AuditEntry {
@@ -178,6 +198,10 @@ pub async fn login(
     }
     if state.cfg.require_email_verification && !user.email_verified {
         return Err(ChatError::EmailNotVerified.into());
+    }
+    // Signing in proves the password, so the failure streak starts over.
+    if user.failed_login_count > 0 || user.locked_until.is_some() {
+        state.store.clear_login_failures(user.id).await?;
     }
 
     let token = issue_token(
@@ -453,6 +477,34 @@ fn hours(seconds: i64) -> i64 {
     (seconds.max(1) + 3599) / 3600
 }
 
+/// Count a failed sign-in and lock the account once the configured number of
+/// consecutive failures is reached, auditing the lock-out.
+async fn lock_out_after_failure(
+    state: &AppState,
+    user: &chat_store::User,
+    ip: std::net::IpAddr,
+) -> Result<(), ApiError> {
+    let failures = state.store.record_failed_login(user.id).await?;
+    if failures < state.cfg.login_max_failures {
+        return Ok(());
+    }
+    let until = Utc::now() + Duration::seconds(state.cfg.login_lockout_seconds);
+    state.store.lock_user_until(user.id, until).await?;
+    audit(
+        state,
+        AuditEntry {
+            actor_id: Some(user.id),
+            action: "auth.account_locked".into(),
+            target_type: Some("user".into()),
+            target_id: Some(user.id.to_string()),
+            metadata: Some(json!({ "failed_attempts": failures, "locked_until": until })),
+            ip: Some(ip.to_string()),
+        },
+    )
+    .await;
+    Ok(())
+}
+
 /// Mint a single-use token of `kind` for `user_id`, replacing any outstanding
 /// token of the same kind.
 async fn issue_auth_token(
@@ -647,10 +699,14 @@ pub struct UpdateUserBody {
     pub role: Option<String>,
     #[serde(default)]
     pub disabled: Option<bool>,
+    /// Clear a brute-force lock-out and its failure count.
+    #[serde(default)]
+    pub unlock: bool,
 }
 
 /// `PATCH /api/admin/users/{id}` — change an account's role and/or enabled
-/// state. Admins cannot modify their own account (guards against lock-out).
+/// state, or clear a lock-out. Admins cannot modify their own account (guards
+/// against lock-out).
 pub async fn admin_update_user(
     State(state): State<Arc<AppState>>,
     admin: Require<AdminUsersManage>,
@@ -661,7 +717,7 @@ pub async fn admin_update_user(
     if user_id == admin.id {
         return Err(ChatError::BadRequest("cannot modify your own account".into()).into());
     }
-    if body.role.is_none() && body.disabled.is_none() {
+    if body.role.is_none() && body.disabled.is_none() && !body.unlock {
         return Err(ChatError::BadRequest("nothing to update".into()).into());
     }
     let target = state
@@ -690,6 +746,21 @@ pub async fn admin_update_user(
     if let Some(disabled) = body.disabled {
         state.store.set_user_disabled(user_id, disabled).await?;
     }
+    if body.unlock {
+        state.store.clear_login_failures(user_id).await?;
+        audit(
+            &state,
+            AuditEntry {
+                actor_id: Some(admin.id),
+                action: "admin.user.unlock".into(),
+                target_type: Some("user".into()),
+                target_id: Some(user_id.to_string()),
+                metadata: None,
+                ip: Some(addr.ip().to_string()),
+            },
+        )
+        .await;
+    }
 
     let user = state
         .store
@@ -704,7 +775,11 @@ pub async fn admin_update_user(
             action: "admin.user.update".into(),
             target_type: Some("user".into()),
             target_id: Some(user_id.to_string()),
-            metadata: Some(json!({ "role": body.role, "disabled": body.disabled })),
+            metadata: Some(json!({
+                "role": body.role,
+                "disabled": body.disabled,
+                "unlock": body.unlock,
+            })),
             ip: Some(addr.ip().to_string()),
         },
     )

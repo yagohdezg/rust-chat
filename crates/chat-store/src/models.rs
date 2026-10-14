@@ -24,6 +24,10 @@ pub struct User {
     /// Whether the account's email address has been confirmed. Only enforced
     /// when `REQUIRE_EMAIL_VERIFICATION` is on.
     pub email_verified: bool,
+    /// Consecutive failed sign-ins; reset by a success or an admin unlock.
+    pub failed_login_count: i64,
+    /// End of the brute-force lock-out window, if the account is locked.
+    pub locked_until: Option<DateTime<Utc>>,
     /// Best-effort activity timestamp, refreshed in the background.
     pub last_seen_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
@@ -39,6 +43,7 @@ pub struct AdminUserSummary {
     pub name: Option<String>,
     pub role: String,
     pub disabled: bool,
+    pub locked_until: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub last_seen_at: Option<DateTime<Utc>>,
     pub conversation_count: i64,

@@ -23,6 +23,10 @@ pub enum ChatError {
     #[error("email not verified")]
     EmailNotVerified,
 
+    /// A per-account throttle, distinct from the per-IP request limiter.
+    #[error("too many requests: {0}")]
+    TooManyRequests(String),
+
     #[error("conflict: {0}")]
     Conflict(String),
 
@@ -50,6 +54,7 @@ impl ChatError {
             ChatError::Forbidden => 403,
             ChatError::BadRequest(_) => 400,
             ChatError::EmailNotVerified => 403,
+            ChatError::TooManyRequests(_) => 429,
             ChatError::Conflict(_) => 409,
             ChatError::ProviderNotConfigured => 428,
             ChatError::Upstream(_) => 502,

@@ -75,7 +75,7 @@ async fn concurrent_sse_streams_stay_within_budget() {
         .await
         .unwrap();
 
-    let session = Session::register(&env.base_url, "load@example.com", "password123")
+    let session = Session::register(&env.base_url, "load@example.com", "correct-horse-battery")
         .await
         .unwrap();
     let provider_id = session

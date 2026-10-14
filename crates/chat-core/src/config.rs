@@ -138,6 +138,10 @@ pub struct Config {
     pub password_reset_ttl_seconds: i64,
     /// Require a confirmed email address before an account can log in.
     pub require_email_verification: bool,
+    /// Consecutive failed sign-ins that lock an account out.
+    pub login_max_failures: i64,
+    /// How long an account stays locked after too many failed sign-ins.
+    pub login_lockout_seconds: i64,
 
     /// Base64-encoded 256-bit key used to encrypt provider API keys at rest.
     /// When unset, a key is derived from `jwt_secret` (with a warning); set this
@@ -367,6 +371,12 @@ impl Config {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(3_600),
             require_email_verification: var_bool("REQUIRE_EMAIL_VERIFICATION", false),
+            login_max_failures: var("LOGIN_MAX_FAILURES")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(5),
+            login_lockout_seconds: var("LOGIN_LOCKOUT_SECONDS")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(900),
 
             secret_encryption_key: var("SECRET_ENCRYPTION_KEY"),
 

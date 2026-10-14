@@ -80,6 +80,10 @@ services:
       RATE_LIMIT_ENABLED: ${RATE_LIMIT_ENABLED:-true}
       RATE_LIMIT_AUTH_PER_MINUTE: ${RATE_LIMIT_AUTH_PER_MINUTE:-30}
       RATE_LIMIT_CHAT_PER_MINUTE: ${RATE_LIMIT_CHAT_PER_MINUTE:-60}
+      # Brute-force lockout for local sign-ins; cleared by a success or an
+      # admin unlock from the user console.
+      LOGIN_MAX_FAILURES: ${LOGIN_MAX_FAILURES:-5}
+      LOGIN_LOCKOUT_SECONDS: ${LOGIN_LOCKOUT_SECONDS:-900}
       # File storage: `local` (default) or `s3` (requires the `s3` profile).
       FILE_STORAGE_KIND: ${FILE_STORAGE_KIND:-local}
       FILE_STORAGE_DIR: /data/files

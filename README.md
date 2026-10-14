@@ -265,6 +265,8 @@ See [`.env.example`](.env.example).
 | `RATE_LIMIT_AUTH_PER_MINUTE` | `30`                                              | `/api/auth/*` requests per IP/min  |
 | `RATE_LIMIT_CHAT_PER_MINUTE` | `60`                                              | `/api/chat` requests per IP/min    |
 | `LOG_LEVEL`               | `info`                                               | `tracing` filter                   |
+| `LOGIN_MAX_FAILURES`      | `5`                                                  | Consecutive failed sign-ins that lock an account out |
+| `LOGIN_LOCKOUT_SECONDS`   | `900`                                                | How long an account stays locked   |
 | `PUBLIC_URL`              | `http://localhost:5173`                              | Base URL of the web app, used to build verification/reset links |
 | `MAIL_SEND_COMMAND`       | —                                                    | Sendmail-compatible command reading an RFC 822 message on stdin; unset skips delivery |
 | `MAIL_FROM`               | `rust-chat <no-reply@localhost>`                     | `From:` address of account emails  |
@@ -435,6 +437,13 @@ the whole user's session family. `/api/auth/*` and `/api/chat` are per-IP rate
 limited; admin actions and auth/sandbox events are written to an audit trail
 shown in the `/admin` console.
 
+Sign-ins are also locked per account: `LOGIN_MAX_FAILURES` consecutive failures
+lock the account for `LOGIN_LOCKOUT_SECONDS`, a success clears the count, and an
+admin clears a lock early with `PATCH /api/admin/users/{id}` `{"unlock": true}`
+(lock-outs and unlocks are audited). Passwords are rejected when they are shorter
+than eight characters or match the bundled list of the most commonly breached
+passwords, wherever they are set: registration, admin creation and reset.
+
 Programmatic clients can use an API key instead of a session token: mint one at
 `POST /api/api-keys` (the plaintext is returned once and only its SHA-256 hash
 is stored) and send it as `Authorization: Bearer rck_...`. A key is limited to a
@@ -461,7 +470,7 @@ enforced by the `admin_*` scopes rather than a bare role check.
 ```bash
 TOKEN=$(curl -s localhost:3080/api/auth/register \
   -H 'content-type: application/json' \
-  -d '{"email":"me@example.com","password":"hunter2"}' | jq -r .token)
+  -d '{"email":"me@example.com","password":"a-long-passphrase-42"}' | jq -r .token)
 
 CID=$(curl -s localhost:3080/api/conversations \
   -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' \

@@ -167,7 +167,8 @@ impl Store for SqliteStore {
 
     async fn list_user_summaries(&self) -> Result<Vec<AdminUserSummary>> {
         let rows = sqlx::query_as::<_, AdminUserSummary>(
-            "select u.id, u.email, u.name, u.role, u.disabled, u.created_at, u.last_seen_at,
+            "select u.id, u.email, u.name, u.role, u.disabled, u.locked_until, u.created_at,
+                    u.last_seen_at,
                     (select count(*) from conversations c where c.user_id = u.id) as conversation_count,
                     (select count(*) from providers p where p.user_id = u.id) as provider_count,
                     (select count(*) from agents a where a.user_id = u.id) as agent_count
@@ -343,6 +344,41 @@ impl Store for SqliteStore {
             .bind(id)
             .execute(&self.pool)
             .await?;
+        Ok(())
+    }
+
+    async fn record_failed_login(&self, id: Uuid) -> Result<i64> {
+        let count: i64 = sqlx::query_scalar(
+            "update users set failed_login_count = failed_login_count + 1, updated_at = ?
+             where id = ?
+             returning failed_login_count",
+        )
+        .bind(Utc::now())
+        .bind(id)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(count)
+    }
+
+    async fn lock_user_until(&self, id: Uuid, until: DateTime<Utc>) -> Result<()> {
+        sqlx::query("update users set locked_until = ?, updated_at = ? where id = ?")
+            .bind(until)
+            .bind(Utc::now())
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn clear_login_failures(&self, id: Uuid) -> Result<()> {
+        sqlx::query(
+            "update users set failed_login_count = 0, locked_until = null, updated_at = ?
+             where id = ?",
+        )
+        .bind(Utc::now())
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 

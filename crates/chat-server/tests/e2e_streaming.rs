@@ -29,7 +29,7 @@ async fn one_turn(
     env: &common::TestEnv,
     content: &str,
 ) -> (Session, Uuid, Uuid, Vec<common::SseEvent>) {
-    let session = Session::register(&env.base_url, "a@example.com", "password123")
+    let session = Session::register(&env.base_url, "a@example.com", "correct-horse-battery")
         .await
         .unwrap();
     let provider_id = session
@@ -273,7 +273,7 @@ async fn stream_runs_on_postgres() {
         .unwrap();
 
     let (session, _conversation, message_id, events) = {
-        let session = Session::register(&env.base_url, "a@example.com", "password123")
+        let session = Session::register(&env.base_url, "a@example.com", "correct-horse-battery")
             .await
             .unwrap();
         let provider_id = session
@@ -383,7 +383,7 @@ async fn non_reasoning_stream_emits_no_thinking() {
 #[tokio::test]
 async fn agent_stream_emits_thinking_and_persists_reasoning() {
     let env = env_with(reasoning_script()).await;
-    let session = Session::register(&env.base_url, "a@example.com", "password123")
+    let session = Session::register(&env.base_url, "a@example.com", "correct-horse-battery")
         .await
         .unwrap();
     let provider_id = session

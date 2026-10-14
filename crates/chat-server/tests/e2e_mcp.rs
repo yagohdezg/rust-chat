@@ -29,7 +29,7 @@ async fn mcp_tool_call_is_routed_to_the_server() {
         .await
         .unwrap();
 
-    let session = Session::register(&env.base_url, "mcp@example.com", "password123")
+    let session = Session::register(&env.base_url, "mcp@example.com", "correct-horse-battery")
         .await
         .unwrap();
     let provider = session
@@ -106,9 +106,13 @@ async fn sandboxed_mcp_tool_call_is_bridged_across_the_sandbox() {
         .await
         .unwrap();
 
-    let session = Session::register(&env.base_url, "sandbox-mcp@example.com", "password123")
-        .await
-        .unwrap();
+    let session = Session::register(
+        &env.base_url,
+        "sandbox-mcp@example.com",
+        "correct-horse-battery",
+    )
+    .await
+    .unwrap();
     let provider = session
         .create_provider("fake", &env.provider_url)
         .await
@@ -174,9 +178,13 @@ async fn http_mcp_tool_call_is_routed_to_the_server() {
         .await
         .unwrap();
 
-    let session = Session::register(&env.base_url, "http-mcp@example.com", "password123")
-        .await
-        .unwrap();
+    let session = Session::register(
+        &env.base_url,
+        "http-mcp@example.com",
+        "correct-horse-battery",
+    )
+    .await
+    .unwrap();
     let provider = session
         .create_provider("fake", &env.provider_url)
         .await

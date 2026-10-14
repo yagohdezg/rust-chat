@@ -13,7 +13,9 @@ use uuid::Uuid;
 
 use chat_core::{ChatError, Result};
 
+pub mod breached;
 pub mod permissions;
+pub use breached::is_breached;
 pub use permissions::{permissions_for_role, role_allows, Action, Permission, Scope};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -94,14 +96,20 @@ pub fn hash_auth_token(token: &str) -> String {
     sha256_hex(token)
 }
 
-/// Reject passwords too short to resist guessing. Applied wherever a password is
-/// set: registration, admin creation and reset.
+/// Reject passwords that are too short or that appear in the bundled list of
+/// common breached passwords. Applied wherever a password is set:
+/// registration, admin creation and password reset.
 pub fn validate_password(password: &str) -> Result<()> {
     const MIN_LEN: usize = 8;
     if password.chars().count() < MIN_LEN {
         return Err(ChatError::BadRequest(format!(
             "password must be at least {MIN_LEN} characters"
         )));
+    }
+    if is_breached(password) {
+        return Err(ChatError::BadRequest(
+            "password is one of the most commonly breached passwords; choose another".into(),
+        ));
     }
     Ok(())
 }

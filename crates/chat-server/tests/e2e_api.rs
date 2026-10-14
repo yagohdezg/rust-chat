@@ -19,12 +19,12 @@ async fn health_endpoint_responds() {
 #[tokio::test]
 async fn first_registered_user_is_admin() {
     let env = TestEnvBuilder::new().start().await.unwrap();
-    let first = Session::register(&env.base_url, "admin@example.com", "password123")
+    let first = Session::register(&env.base_url, "admin@example.com", "correct-horse-battery")
         .await
         .unwrap();
     assert_eq!(first.role, "admin");
 
-    let second = Session::register(&env.base_url, "user@example.com", "password123")
+    let second = Session::register(&env.base_url, "user@example.com", "correct-horse-battery")
         .await
         .unwrap();
     assert_eq!(second.role, "user");
@@ -33,10 +33,10 @@ async fn first_registered_user_is_admin() {
 #[tokio::test]
 async fn login_round_trip() {
     let env = TestEnvBuilder::new().start().await.unwrap();
-    let registered = Session::register(&env.base_url, "a@example.com", "password123")
+    let registered = Session::register(&env.base_url, "a@example.com", "correct-horse-battery")
         .await
         .unwrap();
-    let logged_in = Session::login(&env.base_url, "a@example.com", "password123")
+    let logged_in = Session::login(&env.base_url, "a@example.com", "correct-horse-battery")
         .await
         .unwrap();
     assert_eq!(registered.user_id, logged_in.user_id);
@@ -57,7 +57,7 @@ async fn protected_routes_require_auth() {
 #[tokio::test]
 async fn conversation_lifecycle() {
     let env = TestEnvBuilder::new().start().await.unwrap();
-    let session = Session::register(&env.base_url, "a@example.com", "password123")
+    let session = Session::register(&env.base_url, "a@example.com", "correct-horse-battery")
         .await
         .unwrap();
 
@@ -76,7 +76,7 @@ async fn conversation_lifecycle() {
 #[tokio::test]
 async fn conversation_rename_archive_and_updated_at() {
     let env = TestEnvBuilder::new().start().await.unwrap();
-    let session = Session::register(&env.base_url, "a@example.com", "password123")
+    let session = Session::register(&env.base_url, "a@example.com", "correct-horse-battery")
         .await
         .unwrap();
     let id = session.create_conversation("Original").await.unwrap();
@@ -144,7 +144,7 @@ async fn conversation_rename_archive_and_updated_at() {
 #[tokio::test]
 async fn message_pagination_is_stable() {
     let env = TestEnvBuilder::new().start().await.unwrap();
-    let session = Session::register(&env.base_url, "a@example.com", "password123")
+    let session = Session::register(&env.base_url, "a@example.com", "correct-horse-battery")
         .await
         .unwrap();
     let provider_id = session
@@ -220,7 +220,7 @@ async fn message_pagination_is_stable() {
 #[tokio::test]
 async fn provider_lifecycle() {
     let env = TestEnvBuilder::new().start().await.unwrap();
-    let session = Session::register(&env.base_url, "a@example.com", "password123")
+    let session = Session::register(&env.base_url, "a@example.com", "correct-horse-battery")
         .await
         .unwrap();
 
@@ -245,10 +245,10 @@ async fn provider_lifecycle() {
 #[tokio::test]
 async fn conversations_are_isolated_between_users() {
     let env = TestEnvBuilder::new().start().await.unwrap();
-    let alice = Session::register(&env.base_url, "alice@example.com", "password123")
+    let alice = Session::register(&env.base_url, "alice@example.com", "correct-horse-battery")
         .await
         .unwrap();
-    let bob = Session::register(&env.base_url, "bob@example.com", "password123")
+    let bob = Session::register(&env.base_url, "bob@example.com", "correct-horse-battery")
         .await
         .unwrap();
 
@@ -272,16 +272,16 @@ async fn conversations_are_isolated_between_users_runs_on_postgres() {
         .await
         .unwrap();
 
-    let admin = Session::register(&env.base_url, "admin@example.com", "password123")
+    let admin = Session::register(&env.base_url, "admin@example.com", "correct-horse-battery")
         .await
         .unwrap();
     assert_eq!(admin.role, "admin");
-    let user = Session::register(&env.base_url, "user@example.com", "password123")
+    let user = Session::register(&env.base_url, "user@example.com", "correct-horse-battery")
         .await
         .unwrap();
     assert_eq!(user.role, "user");
 
-    let logged_in = Session::login(&env.base_url, "admin@example.com", "password123")
+    let logged_in = Session::login(&env.base_url, "admin@example.com", "correct-horse-battery")
         .await
         .unwrap();
     assert_eq!(admin.user_id, logged_in.user_id);
@@ -320,7 +320,7 @@ async fn upload_enforces_the_configured_size_limit() {
         .start()
         .await
         .unwrap();
-    let session = Session::register(&env.base_url, "a@example.com", "password123")
+    let session = Session::register(&env.base_url, "a@example.com", "correct-horse-battery")
         .await
         .unwrap();
 
@@ -348,7 +348,7 @@ async fn upload_enforces_the_configured_size_limit() {
 #[tokio::test]
 async fn upload_sniffs_the_mime_type_from_bytes() {
     let env = TestEnvBuilder::new().start().await.unwrap();
-    let session = Session::register(&env.base_url, "a@example.com", "password123")
+    let session = Session::register(&env.base_url, "a@example.com", "correct-horse-battery")
         .await
         .unwrap();
 
@@ -374,7 +374,7 @@ async fn upload_sniffs_the_mime_type_from_bytes() {
 #[tokio::test]
 async fn upload_sanitizes_path_traversal_filenames() {
     let env = TestEnvBuilder::new().start().await.unwrap();
-    let session = Session::register(&env.base_url, "a@example.com", "password123")
+    let session = Session::register(&env.base_url, "a@example.com", "correct-horse-battery")
         .await
         .unwrap();
 
@@ -409,7 +409,7 @@ async fn upload_runs_the_scanner_hook() {
         .start()
         .await
         .unwrap();
-    let session = Session::register(&env.base_url, "a@example.com", "password123")
+    let session = Session::register(&env.base_url, "a@example.com", "correct-horse-battery")
         .await
         .unwrap();
 
@@ -444,7 +444,7 @@ async fn upload_runs_the_scanner_hook() {
 #[tokio::test]
 async fn api_key_lifecycle() {
     let env = TestEnvBuilder::new().start().await.unwrap();
-    let session = Session::register(&env.base_url, "a@example.com", "password123")
+    let session = Session::register(&env.base_url, "a@example.com", "correct-horse-battery")
         .await
         .unwrap();
 
@@ -510,7 +510,7 @@ async fn api_key_lifecycle() {
 #[tokio::test]
 async fn api_keys_are_scoped() {
     let env = TestEnvBuilder::new().start().await.unwrap();
-    let session = Session::register(&env.base_url, "a@example.com", "password123")
+    let session = Session::register(&env.base_url, "a@example.com", "correct-horse-battery")
         .await
         .unwrap();
 
@@ -573,7 +573,7 @@ async fn email_verification_and_password_reset() {
         .await
         .unwrap();
 
-    let session = Session::register(&env.base_url, "a@example.com", "password123")
+    let session = Session::register(&env.base_url, "a@example.com", "correct-horse-battery")
         .await
         .unwrap();
 
@@ -669,7 +669,7 @@ async fn email_verification_and_password_reset() {
         .unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
     assert!(
-        Session::login(&env.base_url, "a@example.com", "password123")
+        Session::login(&env.base_url, "a@example.com", "correct-horse-battery")
             .await
             .is_err()
     );
@@ -699,4 +699,135 @@ async fn email_verification_and_password_reset() {
     );
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn account_lockout_and_password_policy() {
+    let env = TestEnvBuilder::new()
+        .env("LOGIN_MAX_FAILURES", "3")
+        .env("LOGIN_LOCKOUT_SECONDS", "1")
+        .start()
+        .await
+        .unwrap();
+
+    // A password from the bundled breached list never makes it into an account.
+    let resp = env
+        .http
+        .post(format!("{}/api/auth/register", env.base_url))
+        .json(&json!({"email": "weak@example.com", "password": "password123"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    let admin = Session::register(&env.base_url, "a@example.com", "correct-horse-battery")
+        .await
+        .unwrap();
+    let user = Session::register(&env.base_url, "b@example.com", "correct-horse-battery")
+        .await
+        .unwrap();
+
+    async fn wrong(base: &str, email: &str) -> reqwest::StatusCode {
+        let resp = reqwest::Client::new()
+            .post(format!("{base}/api/auth/login"))
+            .json(&json!({"email": email, "password": "wrong-password"}))
+            .send()
+            .await
+            .unwrap();
+        resp.status()
+    }
+
+    // Two failures are not enough, and a success in between clears the streak.
+    for _ in 0..2 {
+        assert_eq!(
+            wrong(&env.base_url, "b@example.com").await,
+            reqwest::StatusCode::UNAUTHORIZED
+        );
+    }
+    Session::login(&env.base_url, "b@example.com", "correct-horse-battery")
+        .await
+        .unwrap();
+    for _ in 0..2 {
+        assert_eq!(
+            wrong(&env.base_url, "b@example.com").await,
+            reqwest::StatusCode::UNAUTHORIZED
+        );
+    }
+
+    // The third consecutive failure locks the account out, even for the right
+    // password, and the lock is visible to the admin console.
+    assert_eq!(
+        wrong(&env.base_url, "b@example.com").await,
+        reqwest::StatusCode::UNAUTHORIZED
+    );
+    let resp = reqwest::Client::new()
+        .post(format!("{}/api/auth/login", env.base_url))
+        .json(&json!({"email": "b@example.com", "password": "correct-horse-battery"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::TOO_MANY_REQUESTS);
+
+    let listed = admin.get_expect("/api/admin/users").await.unwrap();
+    let locked = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["id"] == json!(user.user_id))
+        .expect("user is listed");
+    assert!(locked["locked_until"].is_string(), "row: {locked}");
+
+    // The lock expires on its own after LOGIN_LOCKOUT_SECONDS, and the failure
+    // streak starts over rather than re-locking on the next typo.
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    assert_eq!(
+        wrong(&env.base_url, "b@example.com").await,
+        reqwest::StatusCode::UNAUTHORIZED
+    );
+    Session::login(&env.base_url, "b@example.com", "correct-horse-battery")
+        .await
+        .unwrap();
+
+    // Lock again, then clear it early from the admin console.
+    for _ in 0..3 {
+        assert_eq!(
+            wrong(&env.base_url, "b@example.com").await,
+            reqwest::StatusCode::UNAUTHORIZED
+        );
+    }
+    let resp = reqwest::Client::new()
+        .post(format!("{}/api/auth/login", env.base_url))
+        .json(&json!({"email": "b@example.com", "password": "correct-horse-battery"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::TOO_MANY_REQUESTS);
+
+    admin
+        .patch_expect(
+            &format!("/api/admin/users/{}", user.user_id),
+            &json!({"unlock": true}),
+        )
+        .await
+        .unwrap();
+    Session::login(&env.base_url, "b@example.com", "correct-horse-battery")
+        .await
+        .unwrap();
+
+    // Both the lock-out and the manual unlock are audited.
+    let audit = admin
+        .get_expect("/api/admin/audit?limit=100")
+        .await
+        .unwrap();
+    let actions: Vec<&str> = audit
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|entry| entry["action"].as_str())
+        .collect();
+    assert!(
+        actions.contains(&"auth.account_locked"),
+        "audit: {actions:?}"
+    );
+    assert!(actions.contains(&"admin.user.unlock"), "audit: {actions:?}");
 }

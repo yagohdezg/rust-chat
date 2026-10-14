@@ -153,6 +153,7 @@ export type Account = {
 	name?: string | null;
 	role: string;
 	disabled: boolean;
+	locked_until?: string | null;
 	created_at: string;
 	last_seen_at?: string | null;
 };
@@ -164,7 +165,7 @@ export type AdminUserSummary = Account & {
 	agent_count: number;
 };
 
-export type UpdateAdminUserInput = { role?: string; disabled?: boolean };
+export type UpdateAdminUserInput = { role?: string; disabled?: boolean; unlock?: boolean };
 
 export type CreateAdminUserInput = {
 	email: string;

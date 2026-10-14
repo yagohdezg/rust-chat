@@ -81,6 +81,10 @@
 		void patchUser(user.id, { disabled: !user.disabled });
 	}
 
+	function isLocked(user: api.AdminUserSummary) {
+		return !!user.locked_until && new Date(user.locked_until) > new Date();
+	}
+
 	async function addUser(event: SubmitEvent) {
 		event.preventDefault();
 		if (userBusy) return;
@@ -313,6 +317,7 @@
 							<td>
 								<span class="dot" class:on={!user.disabled}></span>
 								{user.disabled ? 'Disabled' : 'Active'}
+								{#if isLocked(user)}<span class="tag locked">locked</span>{/if}
 							</td>
 							<td>{fmt(user.last_seen_at)}</td>
 							<td class="num">{user.conversation_count}</td>
@@ -331,6 +336,15 @@
 										>
 											{user.disabled ? 'Enable' : 'Disable'}
 										</button>
+										{#if isLocked(user)}
+											<button
+												class="mini"
+												onclick={() => void patchUser(user.id, { unlock: true })}
+												title="Clear the failed sign-in lock"
+											>
+												Unlock
+											</button>
+										{/if}
 										<button
 											class="mini danger"
 											onclick={() => void removeUser(user)}
@@ -584,6 +598,11 @@
 	.tag.admin {
 		background: var(--primary-soft);
 		color: var(--accent);
+	}
+	.tag.locked {
+		background: var(--danger-bg);
+		color: var(--danger);
+		margin-left: 0.4rem;
 	}
 	.hint {
 		color: var(--text-faint);

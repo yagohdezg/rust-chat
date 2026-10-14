@@ -52,6 +52,16 @@ pub trait Store: Send + Sync {
     /// Replace an account's password hash (password reset).
     async fn set_user_password(&self, id: Uuid, password_hash: &str) -> Result<()>;
 
+    /// Count one failed sign-in and return the new consecutive-failure count.
+    async fn record_failed_login(&self, id: Uuid) -> Result<i64>;
+
+    /// Lock an account out until `until` (brute-force protection).
+    async fn lock_user_until(&self, id: Uuid, until: DateTime<Utc>) -> Result<()>;
+
+    /// Clear the failure count and any lock-out; called on a successful sign-in
+    /// and by an admin unlocking the account.
+    async fn clear_login_failures(&self, id: Uuid) -> Result<()>;
+
     // ---- refresh tokens / audit ----------------------------------------
     /// Persist a refresh token by its hash (the plaintext never reaches the DB).
     async fn create_refresh_token(

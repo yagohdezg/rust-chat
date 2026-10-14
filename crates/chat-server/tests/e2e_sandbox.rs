@@ -36,7 +36,7 @@ async fn env_with_tool(tool_args: &str, answer: &str) -> TestEnv {
 }
 
 async fn run_chat(env: &TestEnv) -> (Session, Uuid, Vec<common::SseEvent>) {
-    let session = Session::register(&env.base_url, "a@example.com", "password123")
+    let session = Session::register(&env.base_url, "a@example.com", "correct-horse-battery")
         .await
         .unwrap();
     let provider_id = session
