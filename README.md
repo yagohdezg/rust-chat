@@ -36,8 +36,7 @@ integrity.
 | ------------------------ | ------------------------------------------------------------- |
 | `crates/chat-core`       | Config, domain IDs, shared `ChatError`/`Result`.              |
 | `crates/chat-store`      | Storage-agnostic domain models + `Store` trait.               |
-| `crates/chat-db-postgres`| `Store` on Postgres.                                          |
-| `crates/chat-db-sqlite`  | `Store` on SQLite.                                            |
+| `crates/chat-db`         | `Store` on Postgres / SQLite (feature-gated backends).        |
 | `crates/chat-providers`  | `LlmProvider` trait + OpenAI-compatible streaming SSE client. |
 | `crates/chat-mcp`        | Minimal MCP client (stdio JSON-RPC): init/list/call tools.    |
 | `crates/chat-agents`     | `Tool`/`ToolRegistry`, agent tool-call loop, code tool.       |

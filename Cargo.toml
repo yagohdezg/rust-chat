@@ -3,8 +3,7 @@ resolver = "2"
 members = [
   "crates/chat-core",
   "crates/chat-store",
-  "crates/chat-db-postgres",
-  "crates/chat-db-sqlite",
+  "crates/chat-db",
   "crates/chat-files-s3",
   "crates/chat-providers",
   "crates/chat-mcp",
@@ -68,8 +67,7 @@ pdf-extract = "0.12"
 # internal crates
 chat-core = { path = "crates/chat-core" }
 chat-store = { path = "crates/chat-store" }
-chat-db-postgres = { path = "crates/chat-db-postgres" }
-chat-db-sqlite = { path = "crates/chat-db-sqlite" }
+chat-db = { path = "crates/chat-db" }
 chat-files-s3 = { path = "crates/chat-files-s3" }
 chat-providers = { path = "crates/chat-providers" }
 chat-mcp = { path = "crates/chat-mcp" }

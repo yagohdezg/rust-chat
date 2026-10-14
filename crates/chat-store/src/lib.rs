@@ -1,11 +1,11 @@
 //! Storage abstractions for rust-chat.
 //!
 //! Everything above this crate (server, agents) depends on the [`Store`] trait
-//! rather than on `sqlx` or a specific engine. Concrete backends live in
-//! sibling crates:
+//! rather than on `sqlx` or a specific engine. Concrete backends live in the
+//! `chat-db` crate:
 //!
-//! * `chat-db-postgres` — [`Store`] on Postgres.
-//! * `chat-db-sqlite`   — [`Store`] on SQLite.
+//! * `chat-db` (`postgres` feature) — [`Store`] on Postgres.
+//! * `chat-db` (`sqlite` feature)   — [`Store`] on SQLite.
 
 pub mod files;
 pub mod models;

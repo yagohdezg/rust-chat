@@ -1,7 +1,7 @@
 //! Postgres implementation of the `chat-store` traits.
 //!
-//! All SQL for this backend lives here. Swapping to another engine means
-//! writing a sibling crate, not touching the application.
+//! All SQL for this backend lives here; the sibling `sqlite` module holds the
+//! other engine, so a new method is added to both side by side.
 
 use std::sync::Arc;
 

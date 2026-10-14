@@ -121,9 +121,7 @@ mod tests {
         let path = std::env::temp_dir().join(format!("rustchat-computers-{}.db", Uuid::new_v4()));
         let url = format!("sqlite://{}", path.display());
         let secrets = Arc::new(chat_core::SecretCipher::derive_from_secret("test").unwrap());
-        let db = chat_db_sqlite::SqliteStore::connect(&url, secrets)
-            .await
-            .unwrap();
+        let db = chat_db::SqliteStore::connect(&url, secrets).await.unwrap();
         db.migrate().await.unwrap();
         let user = db
             .create_user("u@example.com", None, "hash", "user")

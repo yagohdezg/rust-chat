@@ -538,7 +538,7 @@ dependencies = [
  "async-trait",
  "axum",
  "chat-core",
- "chat-db-sqlite",
+ "chat-db",
  "chat-sandbox",
  "chat-store",
  "chrono",
@@ -567,22 +567,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "chat-db-postgres"
-version = "0.0.1"
-dependencies = [
- "anyhow",
- "async-trait",
- "chat-core",
- "chat-store",
- "chrono",
- "serde_json",
- "sqlx",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "chat-db-sqlite"
+name = "chat-db"
 version = "0.0.1"
 dependencies = [
  "anyhow",
@@ -680,8 +665,7 @@ dependencies = [
  "chat-auth",
  "chat-computers",
  "chat-core",
- "chat-db-postgres",
- "chat-db-sqlite",
+ "chat-db",
  "chat-files-s3",
  "chat-mcp",
  "chat-providers",

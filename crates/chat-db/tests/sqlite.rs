@@ -1,7 +1,8 @@
+#![cfg(feature = "sqlite")]
 //! Smoke test proving the SQLite backend behind the `chat-store` traits:
 //! relational CRUD through `Store`.
 
-use chat_db_sqlite::SqliteStore;
+use chat_db::SqliteStore;
 use chat_store::{ProviderModel, Store};
 use uuid::Uuid;
 
