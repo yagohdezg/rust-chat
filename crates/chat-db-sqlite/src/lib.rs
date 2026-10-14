@@ -522,8 +522,8 @@ impl Store for SqliteStore {
     async fn create_mcp_server(&self, user_id: Uuid, draft: McpServerDraft) -> Result<McpServer> {
         let row = sqlx::query_as::<_, McpServer>(
             "insert into mcp_servers
-             (id, user_id, name, transport, command, url, args, env, enabled, created_at)
-             values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             (id, user_id, name, transport, command, url, args, env, sandbox, sandbox_image, enabled, created_at)
+             values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              returning *",
         )
         .bind(Uuid::new_v4())
@@ -534,6 +534,8 @@ impl Store for SqliteStore {
         .bind(draft.url)
         .bind(Json(draft.args))
         .bind(Json(draft.env))
+        .bind(draft.sandbox)
+        .bind(draft.sandbox_image)
         .bind(draft.enabled)
         .bind(Utc::now())
         .fetch_one(&self.pool)

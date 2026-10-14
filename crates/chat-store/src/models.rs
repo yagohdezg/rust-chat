@@ -104,6 +104,11 @@ pub struct McpServer {
     pub url: Option<String>,
     pub args: Json<Vec<String>>,
     pub env: Json<BTreeMap<String, String>>,
+    /// Whether a `stdio` server runs inside the sandbox instead of on the host.
+    pub sandbox: bool,
+    /// Optional image override for a sandboxed server; `None` uses the
+    /// deployment's `SANDBOX_IMAGE`.
+    pub sandbox_image: Option<String>,
     pub enabled: bool,
     pub created_at: DateTime<Utc>,
 }
@@ -117,6 +122,8 @@ pub struct McpServerDraft {
     pub url: Option<String>,
     pub args: Vec<String>,
     pub env: BTreeMap<String, String>,
+    pub sandbox: bool,
+    pub sandbox_image: Option<String>,
     pub enabled: bool,
 }
 

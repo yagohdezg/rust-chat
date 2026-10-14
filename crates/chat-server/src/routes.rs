@@ -828,6 +828,10 @@ pub struct CreateMcpServerBody {
     pub args: Vec<String>,
     #[serde(default)]
     pub env: BTreeMap<String, String>,
+    #[serde(default)]
+    pub sandbox: bool,
+    #[serde(default)]
+    pub sandbox_image: Option<String>,
     #[serde(default = "default_enabled")]
     pub enabled: bool,
 }
@@ -865,6 +869,11 @@ pub async fn create_mcp_server(
     if transport == "http" && url.is_none() {
         return Err(ChatError::BadRequest("http servers require a url".into()).into());
     }
+    if body.sandbox && transport != "stdio" {
+        return Err(
+            ChatError::BadRequest("sandbox is only supported for stdio servers".into()).into(),
+        );
+    }
 
     let server = state
         .store
@@ -877,6 +886,8 @@ pub async fn create_mcp_server(
                 url,
                 args: body.args,
                 env: body.env,
+                sandbox: body.sandbox,
+                sandbox_image: blank_to_none(body.sandbox_image),
                 enabled: body.enabled,
             },
         )

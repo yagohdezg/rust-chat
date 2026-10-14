@@ -14,7 +14,10 @@ use tokio::sync::{Mutex, RwLock};
 use uuid::Uuid;
 
 use chat_agents::Tool;
-use chat_mcp::{McpClient, McpError, McpServerConfig, McpTool, Transport};
+use chat_mcp::{
+    LineChannel, McpClient, McpError, McpServerConfig, McpTool, SandboxMcpClient, Transport,
+};
+use chat_sandbox::{CommandSpec, OutputChannel, SandboxBackend, SandboxSession};
 use chat_store::McpServer;
 
 /// How long a single MCP request (initialize, list, call) may take before it is
@@ -27,7 +30,8 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 /// parallel; `reconnect` serializes respawning when the connection dies.
 struct McpClientHandle {
     name: String,
-    config: McpServerConfig,
+    server: McpServer,
+    sandbox: Arc<dyn SandboxBackend>,
     client: RwLock<Arc<McpClient>>,
     reconnect: Mutex<()>,
     tools: Vec<McpTool>,
@@ -48,17 +52,48 @@ fn config_for(server: &McpServer) -> Result<McpServerConfig, McpError> {
     })
 }
 
+/// Connect to `server`, bridging stdio across a sandbox when the server is
+/// configured to run inside one.
+async fn connect(
+    server: &McpServer,
+    sandbox: &Arc<dyn SandboxBackend>,
+) -> Result<McpClient, McpError> {
+    if server.sandbox && server.transport.eq_ignore_ascii_case("stdio") {
+        let command = server
+            .command
+            .clone()
+            .filter(|command| !command.trim().is_empty())
+            .ok_or_else(|| {
+                McpError::Protocol(format!("sandboxed server `{}` has no command", server.name))
+            })?;
+        let spec = CommandSpec {
+            command,
+            args: server.args.0.clone(),
+            env: server.env.0.clone(),
+            image: server.sandbox_image.clone(),
+        };
+        let session = sandbox
+            .open_session(&spec)
+            .await
+            .map_err(|e| McpError::Protocol(format!("sandbox session failed: {e}")))?;
+        let channel: Arc<dyn LineChannel> = Arc::new(SessionChannel::new(Arc::from(session)));
+        return Ok(McpClient::Sandbox(Box::new(SandboxMcpClient::new(channel))));
+    }
+    let config = config_for(server)?;
+    McpClient::connect(&config).await
+}
+
 impl McpClientHandle {
     /// Connect, initialize and enumerate the tools of `server`.
-    async fn spawn(server: &McpServer) -> Result<Self, McpError> {
-        let config = config_for(server)?;
-        let client = Arc::new(McpClient::connect(&config).await?);
+    async fn spawn(server: &McpServer, sandbox: Arc<dyn SandboxBackend>) -> Result<Self, McpError> {
+        let client = Arc::new(connect(server, &sandbox).await?);
         request(client.initialize()).await?;
         let tools = request(client.list_tools()).await?;
 
         Ok(Self {
-            name: config.name.clone(),
-            config,
+            name: server.name.clone(),
+            server: server.clone(),
+            sandbox,
             client: RwLock::new(client),
             reconnect: Mutex::new(()),
             tools,
@@ -93,7 +128,7 @@ impl McpClientHandle {
         }
 
         tracing::warn!(server = %self.name, "MCP server connection died; reconnecting");
-        let fresh = Arc::new(McpClient::connect(&self.config).await?);
+        let fresh = Arc::new(connect(&self.server, &self.sandbox).await?);
         request(fresh.initialize()).await?;
         *self.client.write().await = fresh.clone();
         Ok(fresh)
@@ -124,13 +159,16 @@ async fn request<T>(
 pub struct McpRegistry {
     servers: Mutex<HashMap<Uuid, Arc<McpClientHandle>>>,
     idle_ttl: Duration,
+    /// Backend used to run servers configured with `sandbox = true`.
+    sandbox: Arc<dyn SandboxBackend>,
 }
 
 impl McpRegistry {
-    pub fn new(idle_ttl: Duration) -> Self {
+    pub fn new(idle_ttl: Duration, sandbox: Arc<dyn SandboxBackend>) -> Self {
         Self {
             servers: Mutex::new(HashMap::new()),
             idle_ttl,
+            sandbox,
         }
     }
 
@@ -146,7 +184,7 @@ impl McpRegistry {
             return Ok(handle.clone());
         }
 
-        let handle = Arc::new(McpClientHandle::spawn(server).await?);
+        let handle = Arc::new(McpClientHandle::spawn(server, self.sandbox.clone()).await?);
         let mut servers = self.servers.lock().await;
         // A concurrent turn may have connected first; keep the cached one.
         let handle = servers.entry(server.id).or_insert(handle).clone();
@@ -287,5 +325,59 @@ fn format_tool_result(result: &Value) -> String {
         format!("error: {text}")
     } else {
         text
+    }
+}
+
+/// Bridges an MCP server's stdio across a sandbox boundary: newline-delimited
+/// JSON-RPC is written to the session's stdin and reassembled from its stdout.
+struct SessionChannel {
+    session: Arc<dyn SandboxSession>,
+    buffer: Mutex<String>,
+}
+
+impl SessionChannel {
+    fn new(session: Arc<dyn SandboxSession>) -> Self {
+        Self {
+            session,
+            buffer: Mutex::new(String::new()),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl LineChannel for SessionChannel {
+    async fn send_line(&self, line: &str) -> Result<(), McpError> {
+        let mut data = Vec::with_capacity(line.len() + 1);
+        data.extend_from_slice(line.as_bytes());
+        data.push(b'\n');
+        self.session
+            .write_stdin(&data)
+            .await
+            .map_err(|e| McpError::Protocol(format!("sandbox stdin failed: {e}")))
+    }
+
+    async fn recv_line(&self) -> Option<String> {
+        let mut buffer = self.buffer.lock().await;
+        loop {
+            if let Some(pos) = buffer.find('\n') {
+                let line: String = buffer.drain(..=pos).collect();
+                return Some(line.trim_end_matches(['\n', '\r']).to_string());
+            }
+            match self.session.read_output().await {
+                Some(chunk) => match chunk.channel {
+                    OutputChannel::Stdout => buffer.push_str(&String::from_utf8_lossy(&chunk.data)),
+                    OutputChannel::Stderr => tracing::debug!(
+                        "sandboxed MCP server stderr: {}",
+                        String::from_utf8_lossy(&chunk.data).trim_end()
+                    ),
+                },
+                None => {
+                    if buffer.is_empty() {
+                        return None;
+                    }
+                    return Some(std::mem::take(&mut *buffer));
+                }
+            }
+        }
     }
 }

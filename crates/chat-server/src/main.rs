@@ -143,6 +143,7 @@ async fn main() -> anyhow::Result<()> {
     let mcp_idle_ttl = std::time::Duration::from_secs(cfg.mcp_idle_ttl_seconds.max(1));
     let mcp_reap_interval = (mcp_idle_ttl / 2).max(std::time::Duration::from_secs(5));
     let workspace = Arc::new(workspace::FileWorkspace::new(files.clone(), store.clone()));
+    let mcp_sandbox = sandbox.clone();
     let state = Arc::new(AppState {
         cfg: Arc::new(cfg),
         store,
@@ -153,7 +154,7 @@ async fn main() -> anyhow::Result<()> {
         tools,
         // MCP clients whose tools the agent runtime can call, spawned on demand
         // from each user's stored server config.
-        mcp: Arc::new(mcp::McpRegistry::new(mcp_idle_ttl)),
+        mcp: Arc::new(mcp::McpRegistry::new(mcp_idle_ttl, mcp_sandbox)),
         hub: Arc::new(StreamHub::new()),
         rate_limit: Arc::new(rate_limit::RateLimiter::new()),
     });

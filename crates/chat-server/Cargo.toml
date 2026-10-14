@@ -45,5 +45,6 @@ pdf-extract.workspace = true
 
 [dev-dependencies]
 testcontainers-modules = { version = "0.13.0", features = ["postgres"] }
+axum = { workspace = true, features = ["ws"] }
 reqwest.workspace = true
 eventsource-stream.workspace = true
