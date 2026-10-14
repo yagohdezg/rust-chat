@@ -38,6 +38,7 @@ use crate::extract::{
     ConversationsManage, ConversationsView, FilesManage, FilesView, McpServersManage,
     McpServersView, MessagesView, ModelsView, ProvidersManage, ProvidersView, Require, SandboxUse,
 };
+use crate::file_policy::detect_mime;
 use crate::state::AppState;
 use crate::stream::{SseEvent, StreamState};
 use crate::tools::CodeBackend;
@@ -1321,12 +1322,14 @@ pub async fn delete_provider(
 #[derive(Deserialize)]
 pub struct UploadFileBody {
     pub filename: String,
-    #[serde(default)]
-    pub mime: Option<String>,
     /// Base64-encoded file contents.
     pub content_b64: String,
     #[serde(default)]
     pub conversation_id: Option<Uuid>,
+}
+
+fn oversize(limit: u64) -> ChatError {
+    ChatError::BadRequest(format!("file exceeds the {limit} byte upload limit"))
 }
 
 pub async fn upload_file(
@@ -1334,9 +1337,18 @@ pub async fn upload_file(
     user: Require<FilesManage>,
     Json(body): Json<UploadFileBody>,
 ) -> Result<Json<Value>, ApiError> {
+    let limit = state.cfg.upload_max_bytes;
+    // Reject from the encoded length first so an oversized body is never
+    // decoded into memory.
+    if body.content_b64.len() as u64 > limit / 3 * 4 + 8 {
+        return Err(oversize(limit).into());
+    }
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(&body.content_b64)
         .map_err(|e| ChatError::BadRequest(format!("invalid base64 content: {e}")))?;
+    if bytes.len() as u64 > limit {
+        return Err(oversize(limit).into());
+    }
 
     if let Some(conversation_id) = body.conversation_id {
         state
@@ -1345,13 +1357,14 @@ pub async fn upload_file(
             .await?;
     }
 
+    // Never trust the client's filename or MIME: sanitize the name and sniff
+    // the type from the bytes, then run the optional malware hook.
+    let filename = sanitize_filename(&body.filename);
+    state.scanner.scan(&filename, &bytes).await?;
+    let mime = detect_mime(&filename, &bytes);
+
     let file_id = Uuid::new_v4();
-    let key = format!(
-        "{}/{}-{}",
-        user.id,
-        file_id,
-        sanitize_filename(&body.filename)
-    );
+    let key = format!("{}/{}", user.id, file_id);
     let location = state.files.put(&key, &bytes).await?;
 
     let record = state
@@ -1359,8 +1372,8 @@ pub async fn upload_file(
         .create_file(
             user.id,
             None,
-            &body.filename,
-            body.mime.as_deref(),
+            &filename,
+            Some(&mime),
             bytes.len() as i64,
             &location,
         )

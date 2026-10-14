@@ -8,6 +8,7 @@ use chat_store::{FileStore, Store};
 
 use crate::mcp::McpRegistry;
 use crate::rate_limit::RateLimiter;
+use crate::scan::UploadScanner;
 use crate::stream::StreamHub;
 use crate::workspace::FileWorkspace;
 
@@ -31,4 +32,6 @@ pub struct AppState {
     pub hub: Arc<StreamHub>,
     /// Process-local per-IP rate limiter for the auth and chat routes.
     pub rate_limit: Arc<RateLimiter>,
+    /// Optional external malware scanner run on uploads.
+    pub scanner: Arc<UploadScanner>,
 }

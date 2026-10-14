@@ -157,6 +157,14 @@ pub struct Config {
     /// is allowed.
     pub file_output_allowed_types: Vec<String>,
 
+    /// Largest single upload accepted, in bytes. Uploads are rejected before
+    /// they are written to storage.
+    pub upload_max_bytes: u64,
+    /// Optional external scanner run on every upload's bytes (antivirus hook).
+    /// The command receives the file on stdin; exit 0 accepts, any non-zero
+    /// exit rejects the upload.
+    pub upload_scan_command: Option<String>,
+
     /// Base URL of the standalone `sandboxd` execution service.
     pub sandboxd_url: String,
     /// Shared bearer token presented to `sandboxd` (`SANDBOXD_TOKEN`).
@@ -345,6 +353,10 @@ impl Config {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(8 * 1024 * 1024),
             file_output_allowed_types: var_list("FILE_OUTPUT_ALLOWED_TYPES"),
+            upload_max_bytes: var("UPLOAD_MAX_BYTES")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(25 * 1024 * 1024),
+            upload_scan_command: var("UPLOAD_SCAN_COMMAND"),
 
             sandboxd_url,
             sandboxd_token: var("SANDBOXD_TOKEN"),

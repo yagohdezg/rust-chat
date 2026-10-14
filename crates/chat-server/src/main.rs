@@ -5,6 +5,7 @@ mod file_policy;
 mod mcp;
 mod rate_limit;
 mod routes;
+mod scan;
 mod state;
 mod stream;
 mod text;
@@ -31,6 +32,7 @@ use chat_files_s3::S3FileStore;
 use chat_sandbox::{HttpSandboxBackend, SandboxBackend};
 use chat_store::{FileStore, LocalFileStore, Store};
 
+use crate::scan::UploadScanner;
 use crate::state::AppState;
 use crate::stream::StreamHub;
 
@@ -150,6 +152,10 @@ async fn main() -> anyhow::Result<()> {
             cfg.file_output_allowed_types.clone(),
         ),
     ));
+    let scanner = Arc::new(UploadScanner::new(cfg.upload_scan_command.clone()));
+    if scanner.enabled() {
+        tracing::info!("upload malware scanning enabled");
+    }
     let mcp_sandbox = sandbox.clone();
     let state = Arc::new(AppState {
         cfg: Arc::new(cfg),
@@ -164,6 +170,7 @@ async fn main() -> anyhow::Result<()> {
         mcp: Arc::new(mcp::McpRegistry::new(mcp_idle_ttl, mcp_sandbox)),
         hub: Arc::new(StreamHub::new()),
         rate_limit: Arc::new(rate_limit::RateLimiter::new()),
+        scanner,
     });
     tracing::debug!(
         servers = state.mcp.server_count().await,

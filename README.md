@@ -383,10 +383,13 @@ rest); key resolution prefers the caller's credential over the provider's own
 key. `GET /api/providers` returns `has_key` per provider so the UI can prompt
 for the missing key, and admins are never forced through provider setup.
 
-`POST /api/files` takes JSON: `{ filename, mime?, content_b64, conversation_id? }`.
+`POST /api/files` takes JSON: `{ filename, content_b64, conversation_id? }`.
 Uploads are written under `FILE_STORAGE_DIR` into the caller's personal
 library; when `conversation_id` is set the file is also attached to that
-conversation. The response returns the created `file` record.
+conversation. The response returns the created `file` record. The filename is
+sanitized and the MIME type is sniffed from the bytes rather than taken from the
+client; uploads larger than `UPLOAD_MAX_BYTES` are rejected, and when
+`UPLOAD_SCAN_COMMAND` is set an external scanner runs over every upload.
 
 Authenticated routes expect `Authorization: Bearer <jwt>`. Registering and
 logging in return a short-lived access token plus a rotating `refresh_token`;

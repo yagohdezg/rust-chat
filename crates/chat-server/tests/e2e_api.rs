@@ -1,5 +1,6 @@
 mod common;
 
+use base64::Engine as _;
 use common::{Backend, Session, TestEnvBuilder};
 use serde_json::json;
 
@@ -310,4 +311,132 @@ async fn conversations_are_isolated_between_users_runs_on_postgres() {
         .await
         .unwrap();
     assert!(resp.status().is_success());
+}
+
+#[tokio::test]
+async fn upload_enforces_the_configured_size_limit() {
+    let env = TestEnvBuilder::new()
+        .env("UPLOAD_MAX_BYTES", "16")
+        .start()
+        .await
+        .unwrap();
+    let session = Session::register(&env.base_url, "a@example.com", "password123")
+        .await
+        .unwrap();
+
+    let payload = base64::engine::general_purpose::STANDARD.encode(vec![b'a'; 64]);
+    let resp = session
+        .post(
+            "/api/files",
+            &json!({"filename": "big.txt", "content_b64": payload}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    let ok = base64::engine::general_purpose::STANDARD.encode(b"tiny");
+    let resp = session
+        .post(
+            "/api/files",
+            &json!({"filename": "tiny.txt", "content_b64": ok}),
+        )
+        .await
+        .unwrap();
+    assert!(resp.status().is_success());
+}
+
+#[tokio::test]
+async fn upload_sniffs_the_mime_type_from_bytes() {
+    let env = TestEnvBuilder::new().start().await.unwrap();
+    let session = Session::register(&env.base_url, "a@example.com", "password123")
+        .await
+        .unwrap();
+
+    let png =
+        base64::engine::general_purpose::STANDARD.encode(b"\x89PNG\r\n\x1a\n\x00\x00\x00\x0dIHDR");
+    session
+        .post_expect(
+            "/api/files",
+            &json!({"filename": "photo.bin", "content_b64": png, "mime": "text/plain"}),
+        )
+        .await
+        .unwrap();
+
+    let files = session.get_expect("/api/files").await.unwrap();
+    assert_eq!(files.as_array().unwrap().len(), 1);
+    assert_eq!(
+        files[0]["mime"],
+        json!("image/png"),
+        "the client-supplied MIME must not be trusted"
+    );
+}
+
+#[tokio::test]
+async fn upload_sanitizes_path_traversal_filenames() {
+    let env = TestEnvBuilder::new().start().await.unwrap();
+    let session = Session::register(&env.base_url, "a@example.com", "password123")
+        .await
+        .unwrap();
+
+    let payload = base64::engine::general_purpose::STANDARD.encode(b"secret");
+    let created = session
+        .post_expect(
+            "/api/files",
+            &json!({"filename": "../../etc/passwd", "content_b64": payload}),
+        )
+        .await
+        .unwrap();
+    let filename = created["file"]["filename"].as_str().unwrap();
+    assert!(
+        !filename.contains('/'),
+        "filename kept a path separator: {filename}"
+    );
+    assert!(
+        !filename.starts_with('.'),
+        "filename kept a leading dot: {filename}"
+    );
+
+    // The file is still downloadable under its sanitized name.
+    let id = created["file"]["id"].as_str().unwrap();
+    let resp = session.get(&format!("/api/files/{id}")).await.unwrap();
+    assert!(resp.status().is_success());
+}
+
+#[tokio::test]
+async fn upload_runs_the_scanner_hook() {
+    let env = TestEnvBuilder::new()
+        .env("UPLOAD_SCAN_COMMAND", "grep -q EICAR && exit 1 || exit 0")
+        .start()
+        .await
+        .unwrap();
+    let session = Session::register(&env.base_url, "a@example.com", "password123")
+        .await
+        .unwrap();
+
+    let clean = base64::engine::general_purpose::STANDARD.encode(b"hello");
+    let resp = session
+        .post(
+            "/api/files",
+            &json!({"filename": "clean.txt", "content_b64": clean}),
+        )
+        .await
+        .unwrap();
+    assert!(
+        resp.status().is_success(),
+        "clean upload should pass the hook"
+    );
+
+    let infected = base64::engine::general_purpose::STANDARD.encode(b"X5O!EICAR");
+    let resp = session
+        .post(
+            "/api/files",
+            &json!({"filename": "bad.txt", "content_b64": infected}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::BAD_REQUEST,
+        "the scanner hook should reject a flagged upload"
+    );
 }
