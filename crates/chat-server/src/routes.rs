@@ -25,14 +25,15 @@ use chat_auth::{
 use chat_computers::ComputerOrchestrator;
 use chat_core::ChatError;
 use chat_providers::{
-    ChatMessage, ChatRequest, FailoverProvider, LlmProvider, ModelInfo, OpenAiProvider, RetryPolicy,
+    ChatMessage, ChatRequest, FailoverProvider, LlmProvider, ModelInfo, OpenAiProvider,
+    RetryPolicy, TokenUsage,
 };
 use chat_sandbox::{ExecRequest, ExecResult, SandboxFile};
 use chat_store::types::message_status;
 use chat_store::{
     AdminUserSummary, ApiKey, ApiKeyDraft, AuditEntry, AuditLog, AuthTokenDraft, Computer,
     Conversation, FileRecord, McpServer, McpServerDraft, Message, Provider, ProviderDraft,
-    ProviderModel, Store,
+    ProviderModel, Store, UsageByUser, UsageDraft, UsageSummary,
 };
 
 use crate::error::ApiError;
@@ -823,6 +824,25 @@ pub async fn admin_update_user(
 pub struct AuditQuery {
     #[serde(default)]
     pub limit: Option<i64>,
+}
+
+// ---- usage ----------------------------------------------------------------
+
+/// `GET /api/usage` — the caller's token usage, overall and per model.
+pub async fn usage_summary(
+    State(state): State<Arc<AppState>>,
+    user: Require<ChatUse>,
+) -> Result<Json<UsageSummary>, ApiError> {
+    Ok(Json(state.store.usage_summary(user.id).await?))
+}
+
+/// `GET /api/admin/usage` — token usage of every account that has spent tokens,
+/// heaviest first.
+pub async fn admin_usage(
+    State(state): State<Arc<AppState>>,
+    _admin: Require<AdminUsersView>,
+) -> Result<Json<Vec<UsageByUser>>, ApiError> {
+    Ok(Json(state.store.usage_by_user().await?))
 }
 
 /// `GET /api/admin/audit?limit=` — recent security events, newest first.
@@ -2141,6 +2161,16 @@ pub async fn chat(
             (None, Some((row, _, _))) => row.vision,
             (None, None) => false,
         },
+        provider_id: match (&resolved, &plain) {
+            (Some(resolved), _) => Some(resolved.provider_id),
+            (None, Some((row, _, _))) => Some(row.id),
+            (None, None) => None,
+        },
+        model: match (&resolved, &plain) {
+            (Some(resolved), _) => resolved.config.model.clone(),
+            (None, Some((_, _, model))) => model.clone(),
+            (None, None) => String::new(),
+        },
     };
 
     let tx = state.hub.open(message_id);
@@ -2273,6 +2303,10 @@ struct TurnContext {
     /// Whether the turn's provider serves vision models, which decides whether
     /// attached images are forwarded or read as text.
     vision: bool,
+    /// The provider row that serves the turn, when one is known.
+    provider_id: Option<Uuid>,
+    /// The model the turn asks for.
+    model: String,
 }
 
 /// Assemble the leading system preamble(s) and the conversation history into
@@ -2344,16 +2378,18 @@ fn spawn_generation(
         let hub = state.hub.clone();
         request.messages = build_turn_messages(&state, &ctx).await;
         match generate(provider.as_ref(), request, &tx, &store, message_id).await {
-            Ok((content, events)) => {
+            Ok((content, events, usage)) => {
                 if let Err(err) = store
                     .update_message_content(message_id, &content, message_status::COMPLETE)
                     .await
                 {
                     tracing::error!(error = %err, "failed to persist assistant message");
                 }
+                record_usage(&store, &ctx, usage).await;
                 let _ = tx.send(StreamState::Completed { content, events });
             }
-            Err((partial, error, events)) => {
+            Err((partial, error, events, usage)) => {
+                record_usage(&store, &ctx, usage).await;
                 if let Err(err) = store
                     .update_message_content(message_id, &partial, message_status::ERROR)
                     .await
@@ -2378,6 +2414,8 @@ struct ResolvedAgent {
     tools: ToolRegistry,
     /// Whether the provider serves vision models.
     vision: bool,
+    /// The provider row the turn is billed to.
+    provider_id: Uuid,
 }
 
 /// Build the runtime provider/config/tools for a turn.
@@ -2495,6 +2533,7 @@ async fn resolve_agent(
 
     Ok(ResolvedAgent {
         vision: row.vision,
+        provider_id: row.id,
         provider,
         config,
         tools,
@@ -2645,6 +2684,7 @@ fn spawn_agent_generation(
         let mut reasoning = String::new();
         let mut last_persist = 0usize;
         let mut used_tools = false;
+        let mut usage = TokenUsage::default();
         let mut failure: Option<String> = None;
 
         let ResolvedAgent {
@@ -2709,6 +2749,7 @@ fn spawn_agent_generation(
                         events: events.clone(),
                     });
                 }
+                Ok(AgentEvent::Usage(reported)) => usage.add(&reported),
                 Ok(AgentEvent::ToolResult { id, name, content }) => {
                     if let Err(err) = store
                         .insert_message(conversation_id, "tool", Some(&content), None, Some(&id))
@@ -2733,6 +2774,7 @@ fn spawn_agent_generation(
         }
 
         persist_reasoning(&store, message_id, &reasoning).await;
+        record_usage(&store, &ctx, usage).await;
 
         match failure {
             Some(error) => {
@@ -2774,22 +2816,31 @@ fn spawn_agent_generation(
 }
 
 /// Consume the provider stream, checkpointing and broadcasting as it goes.
-/// Returns the full content and events on success, or `(partial_content, error, events)`.
+/// Returns the full content, events and reported token usage on success, or
+/// `(partial_content, error, events, usage)`.
 async fn generate(
     provider: &dyn LlmProvider,
     request: ChatRequest,
     tx: &watch::Sender<StreamState>,
     store: &Arc<dyn Store>,
     message_id: Uuid,
-) -> Result<(String, Vec<SseEvent>), (String, String, Vec<SseEvent>)> {
+) -> Result<(String, Vec<SseEvent>, TokenUsage), (String, String, Vec<SseEvent>, TokenUsage)> {
     let mut upstream = match provider.stream(request).await {
         Ok(stream) => stream,
-        Err(err) => return Err((String::new(), err.to_string(), Vec::new())),
+        Err(err) => {
+            return Err((
+                String::new(),
+                err.to_string(),
+                Vec::new(),
+                TokenUsage::default(),
+            ))
+        }
     };
 
     let mut accumulated = String::new();
     let mut reasoning = String::new();
     let mut events: Vec<SseEvent> = Vec::new();
+    let mut usage = TokenUsage::default();
     let mut last_persist = 0usize;
 
     while let Some(chunk) = upstream.next().await {
@@ -2826,18 +2877,41 @@ async fn generate(
                         last_persist = accumulated.len();
                     }
                 }
+                if let Some(reported) = chunk.usage {
+                    usage.add(&reported);
+                }
                 if chunk.done {
                     break;
                 }
             }
             Err(err) => {
                 persist_reasoning(store, message_id, &reasoning).await;
-                return Err((accumulated, err.to_string(), events));
+                return Err((accumulated, err.to_string(), events, usage));
             }
         }
     }
     persist_reasoning(store, message_id, &reasoning).await;
-    Ok((accumulated, events))
+    Ok((accumulated, events, usage))
+}
+
+/// Record a turn's token usage against the account that asked for it. Providers
+/// that report nothing are skipped, so a silent provider does not write an
+/// empty row per turn.
+async fn record_usage(store: &Arc<dyn Store>, ctx: &TurnContext, usage: TokenUsage) {
+    if usage.is_empty() {
+        return;
+    }
+    let draft = UsageDraft {
+        conversation_id: Some(ctx.conversation_id),
+        provider_id: ctx.provider_id,
+        model: ctx.model.clone(),
+        prompt_tokens: usage.prompt_tokens as i64,
+        completion_tokens: usage.completion_tokens as i64,
+        total_tokens: usage.total_tokens as i64,
+    };
+    if let Err(err) = store.record_usage(ctx.user_id, &draft).await {
+        tracing::warn!(error = %err, "failed to record token usage");
+    }
 }
 
 /// Persist a generation's accumulated reasoning text on its assistant message.

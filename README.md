@@ -364,7 +364,9 @@ size per node is exposed to admins at `GET /api/admin/computers`.
 | `PATCH`| `/api/admin/users/{id}`             | admin | Change role / enable-disable an account |
 | `DELETE`| `/api/admin/users/{id}`            | admin | Delete an account (not self/last admin) |
 | `GET`  | `/api/admin/audit`                  | admin | Recent security audit events         |
+| `GET`  | `/api/admin/usage`                  | admin | Token usage per account              |
 | `GET`  | `/api/admin/computers`              | admin | Computer placements and warm-pool size per node |
+| `GET`  | `/api/usage`                        | JWT  | The caller's own token usage, overall and per model |
 | `GET`  | `/api/mcp-servers`                  | JWT  | List the caller's MCP servers        |
 | `POST` | `/api/mcp-servers`                  | JWT  | Register a user-scoped MCP server    |
 | `DELETE`| `/api/mcp-servers/{id}`            | JWT  | Delete an MCP server                 |
@@ -448,6 +450,16 @@ model outside the result is rejected with a 400 instead of being forwarded to
 the provider. An empty allow-list means "no restriction"; a layer that excludes
 every model fails closed. `GET /api/models` and
 `GET /api/providers/{id}/models` return the narrowed catalog.
+
+Every completed turn records the token counts the provider reported for it —
+prompt, completion and total — attributed to the account that asked for it and
+to the conversation, provider and model it used. The counts come from the
+provider's own usage report, which is requested with
+`stream_options.include_usage`; a provider that reports nothing writes no row.
+`GET /api/usage` returns the caller's totals with a per-model breakdown, and
+`GET /api/admin/usage` lists every account that has spent tokens, heaviest
+first, with its totals and last use. Both are visible in the admin console's
+Usage tab.
 
 `POST /api/files` takes JSON: `{ filename, content_b64, conversation_id? }`.
 Uploads are written under `FILE_STORAGE_DIR` into the caller's personal

@@ -16,6 +16,7 @@ pub enum Turn {
     Text(String),
     Reasoning(String),
     ToolCall { name: String, arguments: String },
+    Usage { prompt: u64, completion: u64 },
     Raw(String),
     Finish,
 }
@@ -135,6 +136,14 @@ async fn chat_completions(State(p): State<FakeProvider>, Json(body): Json<Value>
                         "index": 0, "id": "call_1", "type": "function",
                         "function": {"name": name, "arguments": arguments}
                     }]}}]})
+                    .to_string(),
+                )),
+                Turn::Usage { prompt, completion } => Ok(Event::default().data(
+                    json!({"choices": [], "usage": {
+                        "prompt_tokens": prompt,
+                        "completion_tokens": completion,
+                        "total_tokens": prompt + completion
+                    }})
                     .to_string(),
                 )),
                 Turn::Raw(raw) => Ok(Event::default().data(raw)),

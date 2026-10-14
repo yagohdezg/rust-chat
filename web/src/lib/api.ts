@@ -173,6 +173,35 @@ export type AdminUserSummary = Account & {
 	agent_count: number;
 };
 
+/** A row of `GET /api/admin/usage`: one account's token totals. */
+export type UsageByUser = {
+	user_id: string;
+	email: string;
+	prompt_tokens: number;
+	completion_tokens: number;
+	total_tokens: number;
+	turns: number;
+	last_used_at: string | null;
+};
+
+/** Token usage rolled up for one model. */
+export type UsageByModel = {
+	model: string;
+	prompt_tokens: number;
+	completion_tokens: number;
+	total_tokens: number;
+	turns: number;
+};
+
+/** `GET /api/usage`: the caller's token usage, overall and per model. */
+export type UsageSummary = {
+	prompt_tokens: number;
+	completion_tokens: number;
+	total_tokens: number;
+	turns: number;
+	models: UsageByModel[];
+};
+
 export type UpdateAdminUserInput = {
 	role?: string;
 	disabled?: boolean;
@@ -477,6 +506,16 @@ export function deleteAdminUser(id: string): Promise<void> {
 
 export function listAudit(limit = 100): Promise<AuditLog[]> {
 	return request<AuditLog[]>(`/api/admin/audit?limit=${limit}`);
+}
+
+/** Token usage of every account that has spent tokens, heaviest first. */
+export function listAdminUsage(): Promise<UsageByUser[]> {
+	return request<UsageByUser[]>('/api/admin/usage');
+}
+
+/** The caller's own token usage, overall and per model. */
+export function getUsage(): Promise<UsageSummary> {
+	return request<UsageSummary>('/api/usage');
 }
 
 /** Create several instance-wide (global) providers in one request. */

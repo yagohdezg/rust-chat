@@ -4,7 +4,7 @@ use std::sync::Arc;
 use futures::{Stream, StreamExt};
 use serde_json::{json, Value};
 
-use chat_providers::{ChatMessage, ChatRequest, LlmProvider};
+use chat_providers::{ChatMessage, ChatRequest, LlmProvider, TokenUsage};
 
 use crate::tool::ToolRegistry;
 
@@ -32,6 +32,8 @@ pub enum AgentEvent {
     /// `content` is that turn's text and `tool_calls` is the OpenAI-style JSON
     /// array (ready to persist on an assistant message).
     ToolCalls { content: String, tool_calls: Value },
+    /// Token counts the provider reported for one completion of the loop.
+    Usage(TokenUsage),
     /// A single tool call finished executing; `content` is its output.
     ToolResult {
         id: String,
@@ -145,6 +147,9 @@ pub fn run_agent_stream(
                         }
                         if let Some(tc) = &chunk.tool_calls {
                             accumulate(&mut partial, tc);
+                        }
+                        if let Some(usage) = chunk.usage {
+                            yield Ok(AgentEvent::Usage(usage));
                         }
                         if chunk.done {
                             break;
@@ -316,6 +321,7 @@ mod tests {
         while let Some(event) = stream.next().await {
             match event.unwrap() {
                 AgentEvent::Thinking(_) => {}
+                AgentEvent::Usage(_) => {}
                 AgentEvent::Delta(text) => final_text.push_str(&text),
                 AgentEvent::ToolCalls { tool_calls, .. } => {
                     assert!(tool_calls.to_string().contains("echo"));

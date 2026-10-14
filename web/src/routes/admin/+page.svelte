@@ -4,11 +4,12 @@
 	import * as api from '#lib/api';
 	import { auth } from '#lib/auth.svelte';
 
-	type Tab = 'users' | 'providers' | 'audit';
+	type Tab = 'users' | 'providers' | 'usage' | 'audit';
 
 	let tab = $state<Tab>('users');
 	let users = $state<api.AdminUserSummary[]>([]);
 	let providers = $state<api.Provider[]>([]);
+	let usage = $state<api.UsageByUser[]>([]);
 	let audit = $state<api.AuditLog[]>([]);
 	let loading = $state(true);
 	let error = $state<string | null>(null);
@@ -50,9 +51,10 @@
 		loading = true;
 		error = null;
 		try {
-			[users, providers, audit] = await Promise.all([
+			[users, providers, usage, audit] = await Promise.all([
 				api.listAdminUsers(),
 				api.listProviders(),
+				api.listAdminUsage(),
 				api.listAudit(100)
 			]);
 		} catch (err) {
@@ -323,6 +325,7 @@
 		<button class:active={tab === 'providers'} onclick={() => (tab = 'providers')}>
 			Providers
 		</button>
+		<button class:active={tab === 'usage'} onclick={() => (tab = 'usage')}>Usage</button>
 		<button class:active={tab === 'audit'} onclick={() => (tab = 'audit')}>Audit</button>
 	</nav>
 
@@ -511,7 +514,7 @@
 				</form>
 			</div>
 		</div>
-	{:else}
+	{:else if tab === 'audit'}
 		<div class="table-wrap">
 			<table>
 				<thead>
@@ -542,6 +545,35 @@
 						</tr>
 					{:else}
 						<tr><td colspan="6" class="empty">No audit entries yet.</td></tr>
+					{/each}
+				</tbody>
+			</table>
+		</div>
+	{:else}
+		<div class="table-wrap">
+			<table>
+				<thead>
+					<tr>
+						<th>Account</th>
+						<th class="num">Turns</th>
+						<th class="num">Prompt</th>
+						<th class="num">Completion</th>
+						<th class="num">Total</th>
+						<th>Last used</th>
+					</tr>
+				</thead>
+				<tbody>
+					{#each usage as row (row.user_id)}
+						<tr>
+							<td><span class="email">{row.email}</span></td>
+							<td class="num">{row.turns}</td>
+							<td class="num">{row.prompt_tokens.toLocaleString()}</td>
+							<td class="num">{row.completion_tokens.toLocaleString()}</td>
+							<td class="num">{row.total_tokens.toLocaleString()}</td>
+							<td class="nowrap">{fmt(row.last_used_at)}</td>
+						</tr>
+					{:else}
+						<tr><td colspan="6" class="empty">No tokens spent yet.</td></tr>
 					{/each}
 				</tbody>
 			</table>

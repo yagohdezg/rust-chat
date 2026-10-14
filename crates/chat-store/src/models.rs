@@ -256,6 +256,65 @@ pub struct ApiKeyDraft {
     pub expires_at: Option<DateTime<Utc>>,
 }
 
+/// One completed turn's token usage, as reported by the provider that served
+/// it and attributed to the account that asked for it.
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+pub struct UsageRecord {
+    pub id: Uuid,
+    pub user_id: Uuid,
+    pub conversation_id: Option<Uuid>,
+    pub provider_id: Option<Uuid>,
+    pub model: String,
+    pub prompt_tokens: i64,
+    pub completion_tokens: i64,
+    pub total_tokens: i64,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Fields for recording a [`UsageRecord`]. The id and timestamp are assigned by
+/// the store.
+#[derive(Debug, Clone, Default)]
+pub struct UsageDraft {
+    pub conversation_id: Option<Uuid>,
+    pub provider_id: Option<Uuid>,
+    pub model: String,
+    pub prompt_tokens: i64,
+    pub completion_tokens: i64,
+    pub total_tokens: i64,
+}
+
+/// Token usage rolled up for one account, overall and per model.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UsageSummary {
+    pub prompt_tokens: i64,
+    pub completion_tokens: i64,
+    pub total_tokens: i64,
+    pub turns: i64,
+    pub models: Vec<UsageByModel>,
+}
+
+/// Token usage rolled up for one model.
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+pub struct UsageByModel {
+    pub model: String,
+    pub prompt_tokens: i64,
+    pub completion_tokens: i64,
+    pub total_tokens: i64,
+    pub turns: i64,
+}
+
+/// One account's token usage, for the operator report.
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+pub struct UsageByUser {
+    pub user_id: Uuid,
+    pub email: String,
+    pub prompt_tokens: i64,
+    pub completion_tokens: i64,
+    pub total_tokens: i64,
+    pub turns: i64,
+    pub last_used_at: Option<DateTime<Utc>>,
+}
+
 /// One append-only entry in the security audit trail.
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
 pub struct AuditLog {

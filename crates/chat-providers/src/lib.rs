@@ -96,8 +96,38 @@ pub struct ModelInfo {
     pub owned_by: Option<String>,
 }
 
+/// Token counts a provider reported for one completion.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TokenUsage {
+    #[serde(default)]
+    pub prompt_tokens: u64,
+    #[serde(default)]
+    pub completion_tokens: u64,
+    #[serde(default)]
+    pub total_tokens: u64,
+}
+
+impl TokenUsage {
+    /// Fold another report into this one.
+    pub fn add(&mut self, other: &TokenUsage) {
+        self.prompt_tokens += other.prompt_tokens;
+        self.completion_tokens += other.completion_tokens;
+        self.total_tokens += other.total_tokens;
+    }
+
+    /// Whether the report carries any tokens at all.
+    pub fn is_empty(&self) -> bool {
+        self.total_tokens == 0
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ChatChunk {
+    /// Token counts the provider reported for this completion, when it reports
+    /// them (OpenAI-compatible servers send them on a final, choices-less chunk
+    /// once `stream_options.include_usage` is requested).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<TokenUsage>,
     /// Incremental text delta (may be empty on tool-call-only chunks).
     #[serde(default)]
     pub delta: String,

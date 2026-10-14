@@ -1,7 +1,7 @@
 mod common;
 
 use base64::Engine as _;
-use common::{Backend, FakeProvider, Script, Session, TestEnvBuilder};
+use common::{Backend, FakeProvider, Script, Session, TestEnvBuilder, Turn};
 use serde_json::json;
 use uuid::Uuid;
 
@@ -1295,4 +1295,136 @@ async fn provider_fails_over_to_a_secondary() {
         json!("fake-model"),
         "the replayed request asks the failover model"
     );
+}
+
+#[tokio::test]
+async fn token_usage_is_recorded_and_reported() {
+    let env = TestEnvBuilder::new()
+        .script(Script::text("hello there").responses(vec![vec![
+            Turn::Text("hello there".into()),
+            Turn::Usage {
+                prompt: 11,
+                completion: 4,
+            },
+            Turn::Finish,
+        ]]))
+        .start()
+        .await
+        .unwrap();
+
+    let admin = Session::register(&env.base_url, "a@example.com", "correct-horse-battery")
+        .await
+        .unwrap();
+    let user = Session::register(&env.base_url, "b@example.com", "correct-horse-battery")
+        .await
+        .unwrap();
+    admin
+        .post_expect(
+            "/api/providers",
+            &json!({
+                "name": "fake",
+                "base_url": env.provider_url,
+                "api_key": "fake-key",
+                "global": true,
+            }),
+        )
+        .await
+        .unwrap();
+    let id = user.create_conversation("usage").await.unwrap();
+
+    for content in ["hi", "again"] {
+        let events = user.chat_sse(id, content, None, None).await.unwrap();
+        assert!(events.iter().any(|event| event.event == "done"));
+    }
+
+    let usage = user.get_expect("/api/usage").await.unwrap();
+    assert_eq!(usage["turns"], json!(2));
+    assert_eq!(usage["prompt_tokens"], json!(22));
+    assert_eq!(usage["completion_tokens"], json!(8));
+    assert_eq!(usage["total_tokens"], json!(30));
+    assert_eq!(
+        usage["models"],
+        json!([{
+            "model": "fake-model",
+            "prompt_tokens": 22,
+            "completion_tokens": 8,
+            "total_tokens": 30,
+            "turns": 2
+        }])
+    );
+
+    // Usage is per account: the admin's own report stays empty.
+    let own = admin.get_expect("/api/usage").await.unwrap();
+    assert_eq!(own["total_tokens"], json!(0));
+
+    // The operator report rolls every account up.
+    let report = admin.get_expect("/api/admin/usage").await.unwrap();
+    let rows = report.as_array().unwrap();
+    assert_eq!(
+        rows.len(),
+        1,
+        "only the account that spent tokens is listed"
+    );
+    assert_eq!(rows[0]["email"], json!("b@example.com"));
+    assert_eq!(rows[0]["total_tokens"], json!(30));
+    assert!(rows[0]["last_used_at"].is_string());
+
+    // A regular account cannot read the operator report.
+    let denied = user.get("/api/admin/usage").await.unwrap();
+    assert_eq!(denied.status(), 403);
+}
+
+#[tokio::test]
+async fn token_usage_is_reported_runs_on_postgres() {
+    if !common::postgres_available() {
+        eprintln!("skipping: no container runtime available");
+        return;
+    }
+    let env = TestEnvBuilder::new()
+        .backend(Backend::Postgres)
+        .script(Script::text("hello there").responses(vec![vec![
+            Turn::Text("hello there".into()),
+            Turn::Usage {
+                prompt: 11,
+                completion: 4,
+            },
+            Turn::Finish,
+        ]]))
+        .start()
+        .await
+        .unwrap();
+
+    let admin = Session::register(&env.base_url, "admin@example.com", "correct-horse-battery")
+        .await
+        .unwrap();
+    let user = Session::register(&env.base_url, "user@example.com", "correct-horse-battery")
+        .await
+        .unwrap();
+    admin
+        .post_expect(
+            "/api/providers",
+            &json!({
+                "name": "fake",
+                "base_url": env.provider_url,
+                "api_key": "fake-key",
+                "global": true,
+            }),
+        )
+        .await
+        .unwrap();
+    let id = user.create_conversation("usage").await.unwrap();
+    let events = user.chat_sse(id, "hi", None, None).await.unwrap();
+    assert!(events.iter().any(|event| event.event == "done"));
+
+    let usage = user.get_expect("/api/usage").await.unwrap();
+    assert_eq!(usage["total_tokens"], json!(15));
+    assert_eq!(usage["turns"], json!(1));
+    assert_eq!(usage["models"][0]["model"], json!("fake-model"));
+
+    let report = admin.get_expect("/api/admin/usage").await.unwrap();
+    let rows = report.as_array().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["email"], json!("user@example.com"));
+    assert_eq!(rows[0]["total_tokens"], json!(15));
+    assert!(rows[0]["last_used_at"].is_string());
 }

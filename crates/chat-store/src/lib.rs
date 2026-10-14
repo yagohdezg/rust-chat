@@ -16,6 +16,7 @@ pub use files::{FileStore, LocalFileStore};
 pub use models::{
     AdminUserSummary, Agent, AgentDraft, ApiKey, ApiKeyDraft, AuditEntry, AuditLog, AuthToken,
     AuthTokenDraft, Computer, Conversation, FileRecord, McpServer, McpServerDraft, Message,
-    PoolBox, Provider, ProviderDraft, ProviderModel, RefreshToken, User,
+    PoolBox, Provider, ProviderDraft, ProviderModel, RefreshToken, UsageByModel, UsageByUser,
+    UsageDraft, UsageRecord, UsageSummary, User,
 };
 pub use traits::Store;

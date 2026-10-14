@@ -10,7 +10,8 @@ use chat_core::{ChatError, Result, SecretCipher};
 use chat_store::{
     AdminUserSummary, Agent, AgentDraft, ApiKey, ApiKeyDraft, AuditEntry, AuditLog, AuthToken,
     AuthTokenDraft, Computer, Conversation, FileRecord, McpServer, McpServerDraft, Message,
-    PoolBox, Provider, ProviderDraft, ProviderModel, RefreshToken, Store, User,
+    PoolBox, Provider, ProviderDraft, ProviderModel, RefreshToken, Store, UsageByModel,
+    UsageByUser, UsageDraft, UsageRecord, UsageSummary, User,
 };
 use chrono::{DateTime, Utc};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
@@ -461,6 +462,82 @@ impl Store for SqliteStore {
             return Ok(None);
         }
         Ok(Some(token))
+    }
+
+    async fn record_usage(&self, user_id: Uuid, draft: &UsageDraft) -> Result<UsageRecord> {
+        let record = UsageRecord {
+            id: Uuid::new_v4(),
+            user_id,
+            conversation_id: draft.conversation_id,
+            provider_id: draft.provider_id,
+            model: draft.model.clone(),
+            prompt_tokens: draft.prompt_tokens,
+            completion_tokens: draft.completion_tokens,
+            total_tokens: draft.total_tokens,
+            created_at: Utc::now(),
+        };
+        sqlx::query(
+            "insert into usage_records
+                (id, user_id, conversation_id, provider_id, model, prompt_tokens,
+                 completion_tokens, total_tokens, created_at)
+             values (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(record.id)
+        .bind(record.user_id)
+        .bind(record.conversation_id)
+        .bind(record.provider_id)
+        .bind(&record.model)
+        .bind(record.prompt_tokens)
+        .bind(record.completion_tokens)
+        .bind(record.total_tokens)
+        .bind(record.created_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(record)
+    }
+
+    async fn usage_summary(&self, user_id: Uuid) -> Result<UsageSummary> {
+        let models = sqlx::query_as::<_, UsageByModel>(
+            "select model,
+                    coalesce(sum(prompt_tokens), 0) as prompt_tokens,
+                    coalesce(sum(completion_tokens), 0) as completion_tokens,
+                    coalesce(sum(total_tokens), 0) as total_tokens,
+                    count(*) as turns
+             from usage_records where user_id = ?
+             group by model
+             order by total_tokens desc, model",
+        )
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await?;
+        let mut summary = UsageSummary {
+            models,
+            ..Default::default()
+        };
+        for row in &summary.models {
+            summary.prompt_tokens += row.prompt_tokens;
+            summary.completion_tokens += row.completion_tokens;
+            summary.total_tokens += row.total_tokens;
+            summary.turns += row.turns;
+        }
+        Ok(summary)
+    }
+
+    async fn usage_by_user(&self) -> Result<Vec<UsageByUser>> {
+        let rows = sqlx::query_as::<_, UsageByUser>(
+            "select u.id as user_id, u.email as email,
+                    coalesce(sum(r.prompt_tokens), 0) as prompt_tokens,
+                    coalesce(sum(r.completion_tokens), 0) as completion_tokens,
+                    coalesce(sum(r.total_tokens), 0) as total_tokens,
+                    count(r.id) as turns,
+                    max(r.created_at) as last_used_at
+             from usage_records r join users u on u.id = r.user_id
+             group by u.id, u.email
+             order by total_tokens desc, u.email",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
     }
 
     async fn record_audit(&self, entry: &AuditEntry) -> Result<()> {

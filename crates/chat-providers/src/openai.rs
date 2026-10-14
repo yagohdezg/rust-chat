@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 
 use crate::{
     retry_after, ChatChunk, ChatMessage, ChatRequest, ChatStream, LlmProvider, ModelInfo,
-    ProviderError, RetryPolicy,
+    ProviderError, RetryPolicy, TokenUsage,
 };
 
 /// An OpenAI-compatible chat provider (also covers Azure-style `/chat/completions`
@@ -143,6 +143,7 @@ impl LlmProvider for OpenAiProvider {
             "model": request.model,
             "messages": messages,
             "stream": true,
+            "stream_options": { "include_usage": true },
         });
         if let Some(t) = request.temperature {
             body["temperature"] = json!(t);
@@ -219,7 +220,14 @@ impl LlmProvider for OpenAiProvider {
                                     .get("finish_reason")
                                     .and_then(Value::as_str)
                                     .map(str::to_owned);
+                                let usage = json
+                                    .get("usage")
+                                    .filter(|usage| !usage.is_null())
+                                    .and_then(|usage| {
+                                        serde_json::from_value::<TokenUsage>(usage.clone()).ok()
+                                    });
                                 yield Ok(ChatChunk {
+                                    usage,
                                     delta: content,
                                     reasoning,
                                     tool_calls,

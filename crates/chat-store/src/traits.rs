@@ -5,7 +5,8 @@ use uuid::Uuid;
 use crate::models::{
     AdminUserSummary, Agent, AgentDraft, ApiKey, ApiKeyDraft, AuditEntry, AuditLog, AuthToken,
     AuthTokenDraft, Computer, Conversation, FileRecord, McpServer, McpServerDraft, Message,
-    PoolBox, Provider, ProviderDraft, ProviderModel, RefreshToken, User,
+    PoolBox, Provider, ProviderDraft, ProviderModel, RefreshToken, UsageByUser, UsageDraft,
+    UsageRecord, UsageSummary, User,
 };
 /// Relational persistence, independent of the database engine.
 ///
@@ -112,6 +113,15 @@ pub trait Store: Send + Sync {
     /// expired and has not been used, and is marked used in the same step so
     /// two callers can never both succeed.
     async fn consume_auth_token(&self, kind: &str, token_hash: &str) -> Result<Option<AuthToken>>;
+
+    /// Record the token usage of one completed turn.
+    async fn record_usage(&self, user_id: Uuid, draft: &UsageDraft) -> Result<UsageRecord>;
+
+    /// Token usage rolled up for one account, overall and per model.
+    async fn usage_summary(&self, user_id: Uuid) -> Result<UsageSummary>;
+
+    /// Token usage of every account that has spent tokens, heaviest first.
+    async fn usage_by_user(&self) -> Result<Vec<UsageByUser>>;
 
     /// Append an entry to the security audit trail.
     async fn record_audit(&self, entry: &AuditEntry) -> Result<()>;

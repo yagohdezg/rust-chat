@@ -246,6 +246,8 @@ async fn main() -> anyhow::Result<()> {
             patch(routes::admin_update_user).delete(routes::admin_delete_user),
         )
         .route("/api/admin/audit", get(routes::admin_list_audit))
+        .route("/api/admin/usage", get(routes::admin_usage))
+        .route("/api/usage", get(routes::usage_summary))
         .route("/api/admin/computers", get(routes::admin_list_computers))
         .route(
             "/api/admin/providers",
