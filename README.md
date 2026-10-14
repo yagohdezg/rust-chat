@@ -221,6 +221,9 @@ unqualified-search registry. Override the compose provider with
 > configure a provider on the `/setup` page, or create one per user at runtime.
 > Providers are BYOK; no provider key is required in the env.
 
+For the target production topology on EKS — node groups, autoscaling signals,
+networking and state — see [`docs/eks-topology.md`](docs/eks-topology.md).
+
 ### Quality gates
 
 ```bash
