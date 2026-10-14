@@ -1668,3 +1668,148 @@ async fn conversation_title_failure_leaves_the_title_alone() {
     );
     assert_eq!(titler.requests().len(), 1);
 }
+
+#[tokio::test]
+async fn model_allowances_are_enforced_runs_on_postgres() {
+    if !common::postgres_available() {
+        eprintln!("skipping: no container runtime available");
+        return;
+    }
+    let env = TestEnvBuilder::new()
+        .backend(Backend::Postgres)
+        .env("MODEL_ALLOWLIST", "fake-model,other-model")
+        .start()
+        .await
+        .unwrap();
+
+    let admin = Session::register(&env.base_url, "a@example.com", "correct-horse-battery")
+        .await
+        .unwrap();
+    let user = Session::register(&env.base_url, "b@example.com", "correct-horse-battery")
+        .await
+        .unwrap();
+    let provider_id: Uuid = admin
+        .post_expect(
+            "/api/providers",
+            &json!({
+                "name": "fake",
+                "base_url": env.provider_url,
+                "allowed_models": ["fake-model"],
+                "global": true,
+            }),
+        )
+        .await
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+
+    let models = user
+        .get_expect(&format!("/api/providers/{provider_id}/models"))
+        .await
+        .unwrap();
+    assert_eq!(models, json!([{"id": "fake-model"}]));
+
+    let id = user.create_conversation("allowances").await.unwrap();
+    let resp = user
+        .chat(id, "hi", Some("other-model"), Some(provider_id))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
+    assert!(env.provider.requests().is_empty());
+
+    admin
+        .patch_expect(
+            &format!("/api/admin/users/{}", user.user_id),
+            &json!({"allowed_models": ["fake-model"]}),
+        )
+        .await
+        .unwrap();
+    user.chat_sse(id, "hi", Some("fake-model"), Some(provider_id))
+        .await
+        .unwrap();
+    assert_eq!(env.provider.requests().len(), 1);
+}
+
+#[tokio::test]
+async fn litellm_import_is_idempotent_runs_on_postgres() {
+    if !common::postgres_available() {
+        eprintln!("skipping: no container runtime available");
+        return;
+    }
+    let env = TestEnvBuilder::new()
+        .backend(Backend::Postgres)
+        .start()
+        .await
+        .unwrap();
+    let admin = Session::register(&env.base_url, "admin@example.com", "correct-horse-battery")
+        .await
+        .unwrap();
+
+    let yaml = format!(
+        "model_list:\n  - model_name: fake-model\n    litellm_params:\n      model: openai/fake-model\n      api_base: {base}\n  - model_name: other-model\n    litellm_params:\n      model: openai/other-model\n      api_base: {base}\n",
+        base = env.provider_url
+    );
+    for _ in 0..2 {
+        admin
+            .post_expect("/api/admin/providers/import", &json!({"config_yaml": yaml}))
+            .await
+            .unwrap();
+    }
+
+    let providers = admin.get_expect("/api/providers").await.unwrap();
+    assert_eq!(providers.as_array().unwrap().len(), 1);
+    let provider_id = providers[0]["id"].as_str().unwrap().to_string();
+    let models = admin
+        .get_expect(&format!("/api/providers/{provider_id}/models"))
+        .await
+        .unwrap();
+    assert_eq!(models.as_array().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn conversation_title_is_generated_runs_on_postgres() {
+    if !common::postgres_available() {
+        eprintln!("skipping: no container runtime available");
+        return;
+    }
+    let env = TestEnvBuilder::new()
+        .backend(Backend::Postgres)
+        .script(Script {
+            model: "fake-model".into(),
+            responses: vec![
+                vec![Turn::Text("the answer".into()), Turn::Finish],
+                vec![Turn::Text("Gizmo tuning".into()), Turn::Finish],
+            ],
+            delay_ms: 0,
+            failures: Vec::new(),
+        })
+        .config_yaml(title_config)
+        .start()
+        .await
+        .unwrap();
+    let session = Session::register(&env.base_url, "a@example.com", "correct-horse-battery")
+        .await
+        .unwrap();
+    let provider_id: Uuid = session.get_expect("/api/providers").await.unwrap()[0]["id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let conversation_id = session.create_conversation("New chat").await.unwrap();
+    session
+        .chat_sse(conversation_id, "what is gizmo", None, Some(provider_id))
+        .await
+        .unwrap();
+
+    let mut title = String::new();
+    for _ in 0..100 {
+        title = conversation_title(&session, conversation_id).await;
+        if title == "Gizmo tuning" {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!(title, "Gizmo tuning");
+}
