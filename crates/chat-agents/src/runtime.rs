@@ -95,11 +95,6 @@ fn tool_calls_json(calls: &[PartialToolCall]) -> Value {
 /// `delta`, `tool_call` and `tool_result` events to a client and persist tool
 /// turns. Each iteration is buffered so a turn that ends up requesting tools is
 /// never mistaken for the final answer.
-///
-/// Emits [`AgentEvent`]s as the loop progresses so the caller can forward
-/// `delta`, `tool_call` and `tool_result` events to a client and persist tool
-/// turns. Each iteration is buffered so a turn that ends up requesting tools is
-/// never mistaken for the final answer.
 pub fn run_agent_stream(
     provider: Arc<dyn LlmProvider>,
     tools: ToolRegistry,
