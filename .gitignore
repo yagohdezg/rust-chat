@@ -1,6 +1,7 @@
 /target
 /.dev
 /.data
+/architecture.html
 .env
 .env.local
 *.sqlite
