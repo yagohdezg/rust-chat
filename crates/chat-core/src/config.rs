@@ -183,6 +183,11 @@ pub struct Config {
     /// The command receives the file on stdin; exit 0 accepts, any non-zero
     /// exit rejects the upload.
     pub upload_scan_command: Option<String>,
+    /// Optional external OCR command for documents with no text layer (scans,
+    /// screenshots, image-only PDFs). The command receives the document as a
+    /// file path in `$1` and prints the recognized text on stdout. When unset,
+    /// image-only documents are skipped.
+    pub ocr_command: Option<String>,
 
     /// Base URL of the standalone `sandboxd` execution service.
     pub sandboxd_url: String,
@@ -396,6 +401,7 @@ impl Config {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(25 * 1024 * 1024),
             upload_scan_command: var("UPLOAD_SCAN_COMMAND"),
+            ocr_command: var("OCR_COMMAND"),
 
             sandboxd_url,
             sandboxd_token: var("SANDBOXD_TOKEN"),

@@ -3,6 +3,7 @@ mod common;
 use base64::Engine as _;
 use common::{Backend, Session, TestEnvBuilder};
 use serde_json::json;
+use uuid::Uuid;
 
 #[tokio::test]
 async fn health_endpoint_responds() {
@@ -830,4 +831,112 @@ async fn account_lockout_and_password_policy() {
         "audit: {actions:?}"
     );
     assert!(actions.contains(&"admin.user.unlock"), "audit: {actions:?}");
+}
+
+#[tokio::test]
+async fn ocr_extracts_text_from_image_only_documents() {
+    let script = std::env::temp_dir().join(format!("ocr-fake-{}.sh", Uuid::new_v4()));
+    std::fs::write(&script, "echo \"ocr text from $OCR_FILENAME\"\n").unwrap();
+    let env = TestEnvBuilder::new()
+        .env("OCR_COMMAND", format!("sh {}", script.display()))
+        .start()
+        .await
+        .unwrap();
+    let session = Session::register(&env.base_url, "a@example.com", "correct-horse-battery")
+        .await
+        .unwrap();
+    let provider_id = session
+        .create_provider("fake", &env.provider_url)
+        .await
+        .unwrap();
+    let id = session.create_conversation("scanned").await.unwrap();
+
+    let png = base64::engine::general_purpose::STANDARD
+        .encode(b"\x89PNG\r\n\x1a\n\x00\x00\x00\x0dIHDR\x00\x00\x00\x01\x00\x00\x00\x01");
+    session
+        .post_expect(
+            "/api/files",
+            &json!({"filename": "scan.png", "content_b64": png, "conversation_id": id}),
+        )
+        .await
+        .unwrap();
+
+    // A PDF whose only content is a binary image stream has no text layer, so
+    // it falls through to recognition as well.
+    let mut pdf = b"%PDF-1.4\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nstream\n".to_vec();
+    pdf.extend_from_slice(&[0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x80, 0x7f]);
+    pdf.extend_from_slice(b"\nendstream\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n");
+    let pdf = base64::engine::general_purpose::STANDARD.encode(&pdf);
+    session
+        .post_expect(
+            "/api/files",
+            &json!({"filename": "scan.pdf", "content_b64": pdf, "conversation_id": id}),
+        )
+        .await
+        .unwrap();
+
+    session
+        .chat_sse(id, "what does the scan say?", None, Some(provider_id))
+        .await
+        .unwrap();
+
+    let requests = env.provider.requests();
+    let prompt = requests[0]["messages"][0]["content"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        prompt.contains("--- File: scan.png ---"),
+        "prompt: {prompt}"
+    );
+    assert!(
+        prompt.contains("ocr text from scan.png"),
+        "recognized image text is inlined: {prompt}"
+    );
+    assert!(
+        prompt.contains("ocr text from scan.pdf"),
+        "recognized PDF text is inlined: {prompt}"
+    );
+
+    std::fs::remove_file(&script).ok();
+}
+
+#[tokio::test]
+async fn ocr_failure_skips_the_document() {
+    let env = TestEnvBuilder::new()
+        .env("OCR_COMMAND", "false")
+        .start()
+        .await
+        .unwrap();
+    let session = Session::register(&env.base_url, "a@example.com", "correct-horse-battery")
+        .await
+        .unwrap();
+    let provider_id = session
+        .create_provider("fake", &env.provider_url)
+        .await
+        .unwrap();
+    let id = session.create_conversation("unreadable").await.unwrap();
+
+    let png = base64::engine::general_purpose::STANDARD
+        .encode(b"\x89PNG\r\n\x1a\n\x00\x00\x00\x0dIHDR\x00\x00\x00\x01\x00\x00\x00\x01");
+    session
+        .post_expect(
+            "/api/files",
+            &json!({"filename": "scan.png", "content_b64": png, "conversation_id": id}),
+        )
+        .await
+        .unwrap();
+
+    let events = session
+        .chat_sse(id, "what does the scan say?", None, Some(provider_id))
+        .await
+        .unwrap();
+    assert!(events.iter().any(|event| event.event == "done"));
+
+    let requests = env.provider.requests();
+    let prompt = requests[0]["messages"][0]["content"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(!prompt.contains("--- File:"), "prompt: {prompt}");
 }

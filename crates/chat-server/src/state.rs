@@ -8,6 +8,7 @@ use chat_store::{FileStore, Store};
 
 use crate::mail::Mailer;
 use crate::mcp::McpRegistry;
+use crate::ocr::Ocr;
 use crate::rate_limit::RateLimiter;
 use crate::scan::UploadScanner;
 use crate::stream::StreamHub;
@@ -35,6 +36,8 @@ pub struct AppState {
     pub rate_limit: Arc<RateLimiter>,
     /// Optional external malware scanner run on uploads.
     pub scanner: Arc<UploadScanner>,
+    /// Optional external OCR command for documents with no text layer.
+    pub ocr: Arc<Ocr>,
     /// Delivers the account emails (email verification, password reset).
     pub mail: Arc<Mailer>,
 }

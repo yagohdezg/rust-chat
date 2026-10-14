@@ -4,6 +4,7 @@ mod extract;
 mod file_policy;
 mod mail;
 mod mcp;
+mod ocr;
 mod rate_limit;
 mod routes;
 mod scan;
@@ -34,6 +35,7 @@ use chat_sandbox::{HttpSandboxBackend, SandboxBackend};
 use chat_store::{FileStore, LocalFileStore, Store};
 
 use crate::mail::Mailer;
+use crate::ocr::Ocr;
 use crate::scan::UploadScanner;
 use crate::state::AppState;
 use crate::stream::StreamHub;
@@ -158,6 +160,10 @@ async fn main() -> anyhow::Result<()> {
     if scanner.enabled() {
         tracing::info!("upload malware scanning enabled");
     }
+    let ocr = Arc::new(Ocr::new(cfg.ocr_command.clone()));
+    if ocr.enabled() {
+        tracing::info!("OCR of image-only documents enabled");
+    }
     let mail = Arc::new(Mailer::new(
         cfg.mail_send_command.clone(),
         cfg.mail_from.clone(),
@@ -183,6 +189,7 @@ async fn main() -> anyhow::Result<()> {
         hub: Arc::new(StreamHub::new()),
         rate_limit: Arc::new(rate_limit::RateLimiter::new()),
         scanner,
+        ocr,
         mail,
     });
     tracing::debug!(

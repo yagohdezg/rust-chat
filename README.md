@@ -149,15 +149,17 @@ profile), so the same config works on EC2/EKS with an IAM role.
 
 Attached documents are **inlined into the prompt**, not embedded. On every
 `POST /api/chat` turn, `FileWorkspace::attachment_context` reads the
-conversation's attached text-like files and prepends them as a system preamble,
-bounded at 128 KiB/file and 256 KiB total. Text decoding handles UTF-8 and
-UTF-16 (LE/BE); other formats are skipped.
+conversation's attached files and prepends them as a system preamble, bounded at
+128 KiB/file and 256 KiB total. Text decoding handles UTF-8 and UTF-16 (LE/BE),
+and PDF, DOCX, XLSX, PPTX and HTML are parsed to text; parsing is capped at
+25 MiB and 20 s per file. When `OCR_COMMAND` is set, scans, screenshots and
+image-only PDFs are recognized as well: the document path is appended to the
+command as its last argument, its name is in `OCR_FILENAME`, and the text is
+read from stdout. A document that cannot be read is skipped, never an error.
 
 There is no vector store, chunker or embedder: the RAG/embedding stack was
 removed because inlining is exact, needs no extra service, and answers
-instantly for the document sizes this product targets. Extracting text from
-binary formats (PDF, DOCX, OCR, ...) so they can be inlined is a planned
-follow-up (see `PLAN.md` §7).
+instantly for the document sizes this product targets.
 
 ## Requirements
 

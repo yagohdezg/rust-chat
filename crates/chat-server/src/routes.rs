@@ -2169,7 +2169,7 @@ async fn build_turn_messages(state: &AppState, ctx: &TurnContext) -> Vec<ChatMes
     }
     match state
         .workspace
-        .attachment_context(ctx.user_id, ctx.conversation_id)
+        .attachment_context(ctx.user_id, ctx.conversation_id, &state.ocr)
         .await
     {
         Ok(Some(context)) => preambles.push(context),

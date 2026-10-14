@@ -17,6 +17,7 @@ use uuid::Uuid;
 
 use crate::error::ApiError;
 use crate::file_policy::FilePolicy;
+use crate::ocr::Ocr;
 
 /// Reads attached files out of storage and writes sandbox outputs back in.
 pub struct FileWorkspace {
@@ -77,14 +78,16 @@ impl FileWorkspace {
 
     /// Load the conversation's attached files as a prompt preamble.
     ///
-    /// Text files are decoded directly and common document formats (PDF, DOCX,
-    /// XLSX, PPTX, HTML) are parsed to text. Each file is truncated to keep the
-    /// prompt bounded; unsupported formats are skipped. Returns `None` when
-    /// nothing usable is attached.
+    /// Text files are decoded directly, common document formats (PDF, DOCX,
+    /// XLSX, PPTX, HTML) are parsed to text, and image-only documents are
+    /// recognized with `ocr` when it is configured. Each file is truncated to
+    /// keep the prompt bounded; unsupported formats are skipped. Returns `None`
+    /// when nothing usable is attached.
     pub async fn attachment_context(
         &self,
         user_id: Uuid,
         conversation_id: Uuid,
+        ocr: &Ocr,
     ) -> Result<Option<String>, ApiError> {
         const MAX_FILE_BYTES: usize = 128 * 1024;
         const MAX_TOTAL_CHARS: usize = 256 * 1024;
@@ -103,7 +106,7 @@ impl FileWorkspace {
                     continue;
                 }
             };
-            let Some(text) = extract_attachment_text(&record.filename, bytes).await else {
+            let Some(text) = extract_attachment_text(&record.filename, bytes, ocr).await else {
                 continue; // unsupported or unreadable format
             };
 
@@ -219,8 +222,9 @@ impl FileWorkspace {
 
 /// Decode a file to text for inlining: try text codecs first (cheap), then fall
 /// back to a size-capped document parser on a blocking thread so a large PDF or
-/// office file never stalls the async runtime.
-async fn extract_attachment_text(filename: &str, bytes: Vec<u8>) -> Option<String> {
+/// office file never stalls the async runtime, and finally recognize documents
+/// that carry no text layer at all.
+async fn extract_attachment_text(filename: &str, bytes: Vec<u8>, ocr: &Ocr) -> Option<String> {
     if let Some(text) = crate::text::decode_text(&bytes) {
         return Some(text);
     }
@@ -229,8 +233,10 @@ async fn extract_attachment_text(filename: &str, bytes: Vec<u8>) -> Option<Strin
         return None;
     }
     let name = filename.to_string();
-    let task = tokio::task::spawn_blocking(move || crate::doctext::extract_text(&name, &bytes));
-    match tokio::time::timeout(std::time::Duration::from_secs(20), task).await {
+    let parse_bytes = bytes.clone();
+    let task =
+        tokio::task::spawn_blocking(move || crate::doctext::extract_text(&name, &parse_bytes));
+    let parsed = match tokio::time::timeout(std::time::Duration::from_secs(20), task).await {
         Ok(Ok(text)) => text,
         Ok(Err(err)) => {
             tracing::warn!(error = %err, file = %filename, "document parse failed");
@@ -240,6 +246,11 @@ async fn extract_attachment_text(filename: &str, bytes: Vec<u8>) -> Option<Strin
             tracing::warn!(file = %filename, "document parse timed out");
             None
         }
+    };
+    match parsed {
+        Some(text) => Some(text),
+        None if ocr.enabled() && Ocr::recognizes(filename) => ocr.recognize(filename, &bytes).await,
+        None => None,
     }
 }
 
