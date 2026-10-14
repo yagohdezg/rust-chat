@@ -350,7 +350,11 @@
 									label={msg.steps?.length ? 'Working' : 'Thinking'}
 								/>
 								<span class="thinking-label">
-									{msg.steps?.length ? 'Working…' : 'Thinking…'}
+									{chat.reconnecting
+										? 'Reconnecting…'
+										: msg.steps?.length
+											? 'Working…'
+											: 'Thinking…'}
 								</span>
 							</span>
 						{/if}
@@ -360,6 +364,9 @@
 		{/each}
 	</div>
 
+	{#if chat.reconnecting}
+		<p class="reconnecting">Connection lost — reconnecting…</p>
+	{/if}
 	{#if chat.error}
 		<p class="error">{chat.error}</p>
 	{/if}
@@ -1528,6 +1535,15 @@
 	.provider-add button[type='submit']:disabled {
 		opacity: 0.45;
 		cursor: default;
+	}
+	.reconnecting {
+		margin: 0 clamp(1rem, 6vw, 4rem);
+		padding: 0.4rem 0.7rem;
+		border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+		border-radius: var(--radius-sm);
+		background: color-mix(in srgb, var(--accent) 12%, transparent);
+		color: var(--accent);
+		font-size: 0.82rem;
 	}
 	.error {
 		color: var(--danger);

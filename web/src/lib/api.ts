@@ -558,12 +558,22 @@ export async function downloadFile(file: FileRecord): Promise<void> {
 }
 
 export type StreamHandlers = {
+	onMeta?: (meta: StreamMeta) => void;
 	onDelta?: (text: string) => void;
 	onThinking?: (text: string) => void;
 	onToolCall?: (calls: ToolCall[]) => void;
 	onToolResult?: (result: ToolResult) => void;
+	onReconnecting?: (attempt: number) => void;
+	onReconnected?: () => void;
 	onError?: (error: unknown) => void;
 	onDone?: () => void;
+};
+
+export type StreamMeta = {
+	message_id: string;
+	conversation_id: string;
+	resume_path?: string;
+	resumed?: boolean;
 };
 
 export type ChatRequest = {
@@ -573,12 +583,12 @@ export type ChatRequest = {
 	provider_id?: string;
 };
 
+const RECONNECT_ATTEMPTS = 8;
+const RECONNECT_BASE_DELAY_MS = 700;
+
 /**
- * Stream a completion from `POST /api/chat`.
  *
  * `EventSource` cannot issue a POST, so we read the `text/event-stream` body
- * directly and parse SSE frames (`event:` / `data:`), joining multi-line
- * `data:` payloads as the spec requires.
  */
 export async function streamChat(
 	input: ChatRequest,
@@ -595,6 +605,14 @@ export async function streamChat(
 			body: JSON.stringify(input),
 			signal
 		});
+	};
+
+	const resume = (path: string, lastEventId: number): Promise<Response> => {
+		const headers = new Headers({ accept: 'text/event-stream' });
+		if (lastEventId > 0) headers.set('last-event-id', String(lastEventId));
+		const token = auth.token;
+		if (token) headers.set('authorization', `Bearer ${token}`);
+		return fetch(`${API_BASE}${path}`, { headers, signal });
 	};
 
 	let res: Response;
@@ -618,56 +636,106 @@ export async function streamChat(
 		return;
 	}
 
-	const reader = res.body.getReader();
-	const decoder = new TextDecoder();
-	let buffer = '';
+	let lastEventId = 0;
+	let resumePath: string | null = null;
 
-	try {
-		for (;;) {
-			const { value, done } = await reader.read();
-			if (done) break;
-			buffer += decoder.decode(value, { stream: true });
+	const consume = async (response: Response): Promise<'done' | 'dropped' | 'aborted'> => {
+		if (!response.body) return 'dropped';
+		const reader = response.body.getReader();
+		const decoder = new TextDecoder();
+		let buffer = '';
+		try {
+			for (;;) {
+				const { value, done } = await reader.read();
+				if (done) break;
+				buffer += decoder.decode(value, { stream: true });
 
-			let boundary: number;
-			while ((boundary = buffer.search(/\r?\n\r?\n/)) !== -1) {
-				const match = buffer.slice(boundary).match(/^\r?\n\r?\n/);
-				const frame = buffer.slice(0, boundary);
-				buffer = buffer.slice(boundary + (match ? match[0].length : 0));
+				let boundary: number;
+				while ((boundary = buffer.search(/\r?\n\r?\n/)) !== -1) {
+					const match = buffer.slice(boundary).match(/^\r?\n\r?\n/);
+					const frame = buffer.slice(0, boundary);
+					buffer = buffer.slice(boundary + (match ? match[0].length : 0));
 
-				const event = parseFrame(frame);
-				if (!event) continue;
-				if (event.event === 'delta') handlers.onDelta?.(event.data);
-				else if (event.event === 'thinking') {
-					try {
-						handlers.onThinking?.((JSON.parse(event.data) as { text: string }).text);
-					} catch {}
-				} else if (event.event === 'tool_call') {
-					try {
-						handlers.onToolCall?.(JSON.parse(event.data) as ToolCall[]);
-					} catch {
-						// ignore malformed tool event
+					const event = parseFrame(frame);
+					if (!event) continue;
+					if (event.id !== null) lastEventId = event.id;
+					if (event.event === 'meta') {
+						try {
+							const meta = JSON.parse(event.data) as StreamMeta;
+							if (meta.resume_path) resumePath = meta.resume_path;
+							handlers.onMeta?.(meta);
+						} catch {
+						}
+					} else if (event.event === 'delta') handlers.onDelta?.(event.data);
+					else if (event.event === 'thinking') {
+						try {
+							handlers.onThinking?.((JSON.parse(event.data) as { text: string }).text);
+						} catch {}
+					} else if (event.event === 'tool_call') {
+						try {
+							handlers.onToolCall?.(JSON.parse(event.data) as ToolCall[]);
+						} catch {
+						}
+					} else if (event.event === 'tool_result') {
+						try {
+							handlers.onToolResult?.(JSON.parse(event.data) as ToolResult);
+						} catch {
+						}
+					} else if (event.event === 'error') handlers.onError?.(new Error(event.data));
+					else if (event.event === 'done') {
+						handlers.onDone?.();
+						return 'done';
 					}
-				} else if (event.event === 'tool_result') {
-					try {
-						handlers.onToolResult?.(JSON.parse(event.data) as ToolResult);
-					} catch {
-						// ignore malformed tool event
-					}
-				} else if (event.event === 'error') handlers.onError?.(new Error(event.data));
-				else if (event.event === 'done') {
-					handlers.onDone?.();
-					return;
 				}
 			}
+		} catch (err) {
+			return isAbort(err) ? 'aborted' : 'dropped';
 		}
-		handlers.onDone?.();
-	} catch (err) {
-		if (!isAbort(err)) handlers.onError?.(err);
+		return 'dropped';
+	};
+
+	for (let attempt = 0; ; ) {
+		const outcome = await consume(res);
+		if (outcome !== 'dropped' || signal?.aborted) return;
+		if (!resumePath || attempt >= RECONNECT_ATTEMPTS) {
+			handlers.onError?.(new Error('stream interrupted'));
+			return;
+		}
+		attempt++;
+		handlers.onReconnecting?.(attempt);
+		await delay(RECONNECT_BASE_DELAY_MS * attempt, signal);
+		if (signal?.aborted) return;
+		try {
+			let next = await resume(resumePath, lastEventId);
+			if (next.status === 401 && auth.refreshToken && (await refreshOnce())) {
+				next = await resume(resumePath, lastEventId);
+			}
+			if (!next.ok || !next.body) continue;
+			res = next;
+			handlers.onReconnected?.();
+		} catch (err) {
+			if (isAbort(err)) return;
+		}
 	}
 }
 
-function parseFrame(frame: string): { event: string; data: string } | null {
+function delay(ms: number, signal?: AbortSignal): Promise<void> {
+	return new Promise((resolve) => {
+		const timer = setTimeout(resolve, ms);
+		signal?.addEventListener(
+			'abort',
+			() => {
+				clearTimeout(timer);
+				resolve();
+			},
+			{ once: true }
+		);
+	});
+}
+
+function parseFrame(frame: string): { event: string; data: string; id: number | null } | null {
 	let event = 'message';
+	let id: number | null = null;
 	const data: string[] = [];
 
 	for (const line of frame.split(/\r?\n/)) {
@@ -678,10 +746,14 @@ function parseFrame(frame: string): { event: string; data: string } | null {
 		if (value.startsWith(' ')) value = value.slice(1);
 		if (field === 'event') event = value;
 		else if (field === 'data') data.push(value);
+		else if (field === 'id') {
+			const parsed = Number.parseInt(value, 10);
+			if (!Number.isNaN(parsed)) id = parsed;
+		}
 	}
 
 	if (data.length === 0 && event === 'message') return null;
-	return { event, data: data.join('\n') };
+	return { event, data: data.join('\n'), id };
 }
 
 function isAbort(err: unknown): boolean {

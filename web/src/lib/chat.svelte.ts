@@ -108,6 +108,7 @@ class ChatStore {
 	loading = $state(false);
 	initialized = $state(false);
 	streaming = $state(false);
+	reconnecting = $state(false);
 	uploads = $state<UploadItem[]>([]);
 	error = $state<string | null>(null);
 	notice = $state<string | null>(null);
@@ -279,6 +280,8 @@ class ChatStore {
 		this.library = [];
 		this.libraryLoaded = false;
 		this.uploads = [];
+		this.streaming = false;
+		this.reconnecting = false;
 		this.error = null;
 		this.notice = null;
 		this.touch();
@@ -718,6 +721,7 @@ class ChatStore {
 		this.streaming = true;
 		this.touch();
 
+		let thinkingBeforeResume: string | null = null;
 		await api.streamChat(
 			{
 				conversation_id: conversationId,
@@ -726,16 +730,26 @@ class ChatStore {
 				provider_id: this.effectiveProviderId || undefined
 			},
 			{
+				onMeta: (meta) => {
+					if (meta.resumed) {
+						thinkingBeforeResume = assistant.thinking ?? '';
+						assistant.thinking = '';
+						this.reconnecting = false;
+						this.touch();
+					}
+				},
 				onDelta: (delta) => {
 					assistant.content = (assistant.content ?? '') + delta;
 					this.touch();
 				},
 				onThinking: (text) => {
+					thinkingBeforeResume = null;
 					assistant.thinking = (assistant.thinking ?? '') + text;
 					this.touch();
 				},
 				onToolCall: (calls) => {
 					for (const call of calls) {
+						if (steps.some((s) => s.kind === 'call' && s.id === call.id)) continue;
 						steps.push({
 							kind: 'call',
 							id: call.id,
@@ -746,6 +760,7 @@ class ChatStore {
 					this.touch();
 				},
 				onToolResult: (result) => {
+					if (steps.some((s) => s.kind === 'result' && s.id === result.tool_call_id)) return;
 					steps.push({
 						kind: 'result',
 						id: result.tool_call_id,
@@ -754,17 +769,29 @@ class ChatStore {
 					});
 					this.touch();
 				},
+				onReconnecting: () => {
+					this.reconnecting = true;
+					this.touch();
+				},
+				onReconnected: () => {
+					this.reconnecting = false;
+					this.touch();
+				},
 				onError: (err) => {
 					assistant.status = 'error';
+					this.reconnecting = false;
 					this.error = message(err);
 				},
 				onDone: () => {
+					if (thinkingBeforeResume) assistant.thinking = thinkingBeforeResume;
 					assistant.status = 'complete';
 					this.streaming = false;
+					this.reconnecting = false;
 				}
 			}
 		);
 		this.streaming = false;
+		this.reconnecting = false;
 	}
 }
 
