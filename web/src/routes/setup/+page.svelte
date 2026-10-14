@@ -58,6 +58,7 @@
 			<select bind:value={kind}>
 				<option value="openai">OpenAI</option>
 				<option value="custom">OpenAI-compatible</option>
+				<option value="anthropic">Anthropic</option>
 			</select>
 		</label>
 		<label>

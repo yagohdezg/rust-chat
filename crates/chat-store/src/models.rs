@@ -141,7 +141,7 @@ pub struct McpServerDraft {
     pub enabled: bool,
 }
 
-/// An OpenAI-compatible (or, later, Anthropic) model provider.
+/// A model provider: an OpenAI-compatible endpoint or Anthropic's API.
 ///
 /// `user_id` is `None` for an admin-provided global provider that every user
 /// inherits; `Some` scopes it to a single user.

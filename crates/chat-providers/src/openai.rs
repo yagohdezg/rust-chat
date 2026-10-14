@@ -6,8 +6,8 @@ use futures::StreamExt;
 use serde_json::{json, Value};
 
 use crate::{
-    retry_after, ChatChunk, ChatMessage, ChatRequest, ChatStream, LlmProvider, ModelInfo,
-    ProviderError, RetryPolicy, TokenUsage,
+    error_for_response, looks_like_html, retry_after, snippet, ChatChunk, ChatMessage, ChatRequest,
+    ChatStream, LlmProvider, ModelInfo, ProviderError, RetryPolicy, TokenUsage,
 };
 
 /// An OpenAI-compatible chat provider (also covers Azure-style `/chat/completions`
@@ -96,23 +96,6 @@ fn message_json(message: &ChatMessage) -> Value {
     out
 }
 
-fn snippet(body: &str) -> String {
-    let trimmed = body.trim();
-    let end = trimmed
-        .char_indices()
-        .nth(200)
-        .map(|(i, _)| i)
-        .unwrap_or(trimmed.len());
-    trimmed[..end].to_string()
-}
-
-/// Whether a response body looks like an HTML page rather than JSON/SSE. Web UIs
-/// (e.g. LiteLLM's admin app) answer unknown paths with HTML, which is useless
-/// as an error message.
-fn looks_like_html(body: &str) -> bool {
-    body.trim_start().starts_with('<')
-}
-
 /// Turn a failed HTTP response into an actionable error: web-UI HTML becomes a
 /// hint about the base URL, everything else a truncated status + body.
 fn http_error(root: &str, status: u16, body: &str, retry_after: Option<Duration>) -> ProviderError {
@@ -124,11 +107,7 @@ fn http_error(root: &str, status: u16, body: &str, retry_after: Option<Duration>
              http://host:4000/v1) with a valid key, not the admin UI URL."
         ));
     }
-    ProviderError::Http {
-        status,
-        body: snippet(body),
-        retry_after,
-    }
+    error_for_response(status, body, retry_after)
 }
 
 #[async_trait::async_trait]

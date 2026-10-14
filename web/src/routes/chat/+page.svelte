@@ -638,6 +638,7 @@
 										<select bind:value={newKind}>
 											<option value="openai">OpenAI</option>
 											<option value="custom">OpenAI-compatible</option>
+											<option value="anthropic">Anthropic</option>
 										</select>
 										<input bind:value={newBaseUrl} placeholder="https://api.openai.com/v1" required />
 										<input type="password" bind:value={newKey} placeholder="API key (optional)" autocomplete="off" />

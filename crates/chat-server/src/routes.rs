@@ -25,8 +25,8 @@ use chat_auth::{
 use chat_computers::ComputerOrchestrator;
 use chat_core::ChatError;
 use chat_providers::{
-    ChatMessage, ChatRequest, FailoverProvider, LlmProvider, ModelInfo, OpenAiProvider,
-    RetryPolicy, TokenUsage,
+    AnthropicProvider, ChatMessage, ChatRequest, FailoverProvider, LlmProvider, ModelInfo,
+    OpenAiProvider, RetryPolicy, TokenUsage,
 };
 use chat_sandbox::{ExecRequest, ExecResult, SandboxFile};
 use chat_store::types::message_status;
@@ -1485,16 +1485,20 @@ async fn effective_api_key(
 /// Build a runtime client for one provider row and its resolved key, applying
 /// the deployment's retry policy.
 ///
-/// Only OpenAI-compatible endpoints are supported today; an Anthropic-native
-/// provider is a future addition (PLAN §3).
+/// `openai` and `custom` are OpenAI-compatible endpoints; `anthropic` speaks
+/// Anthropic's native Messages API.
 fn runtime_provider(
     row: &Provider,
     key: Option<String>,
     policy: RetryPolicy,
 ) -> Result<Arc<dyn LlmProvider>, ChatError> {
+    let key = key.unwrap_or_default();
     match row.kind.as_str() {
         "openai" | "custom" => Ok(Arc::new(
-            OpenAiProvider::new(&row.base_url, key.unwrap_or_default()).with_retries(policy),
+            OpenAiProvider::new(&row.base_url, key).with_retries(policy),
+        )),
+        "anthropic" => Ok(Arc::new(
+            AnthropicProvider::new(&row.base_url, key).with_retries(policy),
         )),
         other => Err(ChatError::Config(format!(
             "provider kind `{other}` is not supported yet"
@@ -1620,7 +1624,7 @@ pub async fn list_providers(
 pub struct CreateProviderBody {
     pub name: String,
     pub base_url: String,
-    /// `openai` | `custom` (Anthropic is not supported yet).
+    /// `openai` | `anthropic` | `custom`.
     #[serde(default = "default_kind")]
     pub kind: String,
     /// Whether the provider serves models that accept image input.

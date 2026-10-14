@@ -60,6 +60,161 @@ impl Script {
     }
 }
 
+/// A provider speaking Anthropic's native Messages API, scripted with the same
+/// [`Script`] as [`FakeProvider`] but rendering Anthropic's event stream.
+#[derive(Clone)]
+pub struct FakeAnthropic {
+    script: Arc<Script>,
+    calls: Arc<AtomicUsize>,
+    requests: Arc<Mutex<Vec<Value>>>,
+}
+
+impl FakeAnthropic {
+    pub async fn start(script: Script) -> (Self, String) {
+        let provider = Self {
+            script: Arc::new(script),
+            calls: Arc::new(AtomicUsize::new(0)),
+            requests: Arc::new(Mutex::new(Vec::new())),
+        };
+        let app = Router::new()
+            .route("/v1/messages", post(messages))
+            .route("/v1/models", get(anthropic_models))
+            .with_state(provider.clone());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        // The bare host, as a user would paste it: the client appends `/v1`.
+        (provider, format!("http://{addr}"))
+    }
+
+    pub fn requests(&self) -> Vec<Value> {
+        self.requests.lock().unwrap().clone()
+    }
+}
+
+async fn anthropic_models(State(p): State<FakeAnthropic>) -> Json<Value> {
+    Json(json!({"data": [{"id": p.script.model, "display_name": "Fake Claude"}]}))
+}
+
+async fn messages(State(p): State<FakeAnthropic>, Json(body): Json<Value>) -> Response {
+    p.requests.lock().unwrap().push(body);
+    let idx = p.calls.fetch_add(1, Ordering::SeqCst);
+    if let Some((status, retry_after)) = p.script.failures.get(idx) {
+        let mut response = (
+            axum::http::StatusCode::from_u16(*status).unwrap(),
+            json!({"error": {"type": "overloaded_error", "message": "scripted failure"}})
+                .to_string(),
+        )
+            .into_response();
+        if let Some(seconds) = retry_after {
+            response.headers_mut().insert(
+                axum::http::header::RETRY_AFTER,
+                seconds.to_string().parse().unwrap(),
+            );
+        }
+        return response;
+    }
+    let turns = p
+        .script
+        .responses
+        .get(idx)
+        .or_else(|| p.script.responses.last())
+        .cloned()
+        .unwrap_or_default();
+    let usage = turns.iter().find_map(|turn| match turn {
+        Turn::Usage { prompt, completion } => Some((*prompt, *completion)),
+        _ => None,
+    });
+    let (input_tokens, output_tokens) = usage.unwrap_or((0, 0));
+    let stop_reason = if turns
+        .iter()
+        .any(|turn| matches!(turn, Turn::ToolCall { .. }))
+    {
+        "tool_use"
+    } else {
+        "end_turn"
+    };
+    let delay = p.script.delay_ms;
+    let stream = async_stream::stream! {
+        yield Ok::<Event, Infallible>(
+            Event::default().event("message_start").data(
+                json!({"type": "message_start", "message": {
+                    "id": "msg_1", "role": "assistant", "content": [],
+                    "usage": {"input_tokens": input_tokens, "output_tokens": 0}
+                }})
+                .to_string(),
+            ),
+        );
+        let mut index = 0;
+        for turn in turns {
+            if delay > 0 {
+                tokio::time::sleep(Duration::from_millis(delay)).await;
+            }
+            match turn {
+                Turn::Usage { .. } | Turn::Finish => {}
+                Turn::Text(text) => {
+                    yield Ok(Event::default().event("content_block_start").data(
+                        json!({"type": "content_block_start", "index": index,
+                            "content_block": {"type": "text", "text": ""}})
+                        .to_string(),
+                    ));
+                    yield Ok(Event::default().event("content_block_delta").data(
+                        json!({"type": "content_block_delta", "index": index,
+                            "delta": {"type": "text_delta", "text": text}})
+                        .to_string(),
+                    ));
+                    yield Ok(Event::default().event("content_block_stop")
+                        .data(json!({"type": "content_block_stop", "index": index}).to_string()));
+                    index += 1;
+                }
+                Turn::Reasoning(text) => {
+                    yield Ok(Event::default().event("content_block_start").data(
+                        json!({"type": "content_block_start", "index": index,
+                            "content_block": {"type": "thinking", "thinking": ""}})
+                        .to_string(),
+                    ));
+                    yield Ok(Event::default().event("content_block_delta").data(
+                        json!({"type": "content_block_delta", "index": index,
+                            "delta": {"type": "thinking_delta", "thinking": text}})
+                        .to_string(),
+                    ));
+                    yield Ok(Event::default().event("content_block_stop")
+                        .data(json!({"type": "content_block_stop", "index": index}).to_string()));
+                    index += 1;
+                }
+                Turn::ToolCall { name, arguments } => {
+                    yield Ok(Event::default().event("content_block_start").data(
+                        json!({"type": "content_block_start", "index": index,
+                            "content_block": {"type": "tool_use", "id": format!("toolu_{index}"), "name": name, "input": {}}})
+                        .to_string(),
+                    ));
+                    yield Ok(Event::default().event("content_block_delta").data(
+                        json!({"type": "content_block_delta", "index": index,
+                            "delta": {"type": "input_json_delta", "partial_json": arguments}})
+                        .to_string(),
+                    ));
+                    yield Ok(Event::default().event("content_block_stop")
+                        .data(json!({"type": "content_block_stop", "index": index}).to_string()));
+                    index += 1;
+                }
+                Turn::Raw(raw) => {
+                    yield Ok(Event::default().data(raw));
+                }
+            }
+        }
+        yield Ok(Event::default().event("message_delta").data(
+            json!({"type": "message_delta", "delta": {"stop_reason": stop_reason},
+                "usage": {"output_tokens": output_tokens}})
+            .to_string(),
+        ));
+        yield Ok(Event::default().event("message_stop")
+            .data(json!({"type": "message_stop"}).to_string()));
+    };
+    Sse::new(stream).into_response()
+}
+
 #[derive(Clone)]
 pub struct FakeProvider {
     script: Arc<Script>,

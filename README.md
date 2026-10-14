@@ -37,7 +37,7 @@ integrity.
 | `crates/chat-core`       | Config, domain IDs, shared `ChatError`/`Result`.              |
 | `crates/chat-store`      | Storage-agnostic domain models + `Store` trait.               |
 | `crates/chat-db`         | `Store` on Postgres / SQLite (feature-gated backends).        |
-| `crates/chat-providers`  | `LlmProvider` trait + OpenAI-compatible streaming SSE client. |
+| `crates/chat-providers`  | `LlmProvider` trait + OpenAI-compatible and Anthropic streaming clients. |
 | `crates/chat-mcp`        | Minimal MCP client (stdio JSON-RPC): init/list/call tools.    |
 | `crates/chat-agents`     | `Tool`/`ToolRegistry`, agent tool-call loop, code tool.       |
 | `crates/chat-sandbox`    | `SandboxBackend` trait + BoxLite, gVisor, `sandboxd` HTTP backends. |
@@ -423,6 +423,12 @@ their own via `PUT /api/providers/{id}/credential` (personal, encrypted at
 rest); key resolution prefers the caller's credential over the provider's own
 key. `GET /api/providers` returns `has_key` per provider so the UI can prompt
 for the missing key, and admins are never forced through provider setup.
+
+A provider's `kind` selects the wire protocol. `openai` and `custom` are
+OpenAI-compatible endpoints (`POST {base}/v1/chat/completions`); `anthropic`
+speaks Anthropic's native Messages API (`POST {base}/v1/messages`), with the
+system prompt lifted to its own field, images, `tool_use`/`tool_result` blocks
+and `/v1/models` discovery mapped onto the same runtime contract.
 
 A provider carries a `vision` flag, set from the provider form (or `POST` /
 `PATCH /api/providers`), for endpoints that serve models accepting image input.

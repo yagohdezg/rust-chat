@@ -4,6 +4,7 @@
 //! [`ChatChunk`]s. Tool-call deltas are carried verbatim in each chunk so the
 //! agent runtime can assemble them.
 
+pub mod anthropic;
 pub mod failover;
 pub mod openai;
 
@@ -14,6 +15,7 @@ use futures::Stream;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub use anthropic::AnthropicProvider;
 pub use failover::FailoverProvider;
 pub use openai::OpenAiProvider;
 
@@ -191,6 +193,37 @@ pub fn retry_after(response: &reqwest::Response) -> Option<Duration> {
         .parse::<u64>()
         .ok()
         .map(Duration::from_secs)
+}
+
+/// Truncate a response body so an error message stays readable.
+pub(crate) fn snippet(body: &str) -> String {
+    let trimmed = body.trim();
+    let end = trimmed
+        .char_indices()
+        .nth(200)
+        .map(|(i, _)| i)
+        .unwrap_or(trimmed.len());
+    trimmed[..end].to_string()
+}
+
+/// Whether a response body looks like an HTML page rather than JSON/SSE. Web
+/// UIs (e.g. LiteLLM's admin app) answer unknown paths with HTML, which is
+/// useless as an error message.
+pub(crate) fn looks_like_html(body: &str) -> bool {
+    body.trim_start().starts_with('<')
+}
+
+/// Turn a failed HTTP response into a provider error, truncating the body.
+pub(crate) fn error_for_response(
+    status: u16,
+    body: &str,
+    retry_after: Option<Duration>,
+) -> ProviderError {
+    ProviderError::Http {
+        status,
+        body: snippet(body),
+        retry_after,
+    }
 }
 
 /// Bounded retry policy for provider calls that fail with a rate limit, a

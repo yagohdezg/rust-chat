@@ -1,7 +1,10 @@
 mod common;
 
 use base64::Engine as _;
-use common::{Backend, FakeProvider, Script, Session, TestEnvBuilder, Turn};
+use common::{
+    delta_text, events_named, Backend, FakeAnthropic, FakeProvider, Script, Session,
+    TestEnvBuilder, Turn,
+};
 use serde_json::json;
 use uuid::Uuid;
 
@@ -1470,4 +1473,95 @@ async fn litellm_import_is_idempotent() {
         .await
         .unwrap();
     assert_eq!(models.as_array().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn anthropic_provider_streams_and_calls_tools() {
+    let (fake, url) = FakeAnthropic::start(Script {
+        model: "claude-fake".into(),
+        responses: vec![
+            vec![
+                Turn::ToolCall {
+                    name: "execute_code".into(),
+                    arguments: json!({"language": "python", "code": "print(1)"}).to_string(),
+                },
+                Turn::Usage {
+                    prompt: 12,
+                    completion: 3,
+                },
+                Turn::Finish,
+            ],
+            vec![
+                Turn::Text("all done".into()),
+                Turn::Usage {
+                    prompt: 20,
+                    completion: 5,
+                },
+                Turn::Finish,
+            ],
+        ],
+        delay_ms: 0,
+        failures: Vec::new(),
+    })
+    .await;
+    let env = TestEnvBuilder::new()
+        .sandbox_tool(true)
+        .start()
+        .await
+        .unwrap();
+    let session = Session::register(&env.base_url, "a@example.com", "correct-horse-battery")
+        .await
+        .unwrap();
+    let provider_id: Uuid = session
+        .post_expect(
+            "/api/providers",
+            &json!({"name": "claude", "kind": "anthropic", "base_url": url}),
+        )
+        .await
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+
+    let models = session
+        .get_expect(&format!("/api/providers/{provider_id}/models"))
+        .await
+        .unwrap();
+    assert_eq!(
+        models,
+        json!([{"id": "claude-fake", "owned_by": "Fake Claude"}])
+    );
+
+    let conversation_id = session.create_conversation("anthropic chat").await.unwrap();
+    let events = session
+        .chat_sse(conversation_id, "run some code", None, Some(provider_id))
+        .await
+        .unwrap();
+    assert_eq!(delta_text(&events), "all done");
+    assert_eq!(events_named(&events, "tool_result").len(), 1);
+
+    let requests = fake.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0]["model"], json!("claude-fake"));
+    assert_eq!(requests[0]["stream"], json!(true));
+    assert!(requests[0]["system"].is_string());
+    assert_eq!(requests[0]["tools"][0]["name"], json!("execute_code"));
+    assert!(requests[0]["tools"][0]["input_schema"].is_object());
+
+    let messages = requests[1]["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 3);
+    assert_eq!(messages[1]["content"][0]["type"], json!("tool_use"));
+    assert_eq!(messages[1]["content"][0]["name"], json!("execute_code"));
+    assert_eq!(
+        messages[1]["content"][0]["input"]["code"],
+        json!("print(1)")
+    );
+    assert_eq!(messages[2]["role"], json!("user"));
+    assert_eq!(messages[2]["content"][0]["type"], json!("tool_result"));
+    assert_eq!(messages[2]["content"][0]["tool_use_id"], json!("toolu_0"));
+
+    let usage = session.get_expect("/api/usage").await.unwrap();
+    assert_eq!(usage["total_tokens"], json!(40));
+    assert_eq!(usage["models"][0]["model"], json!("claude-fake"));
 }
