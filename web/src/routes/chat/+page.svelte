@@ -3,7 +3,7 @@
 	import { goto } from '$app/navigation';
 	import type { FileRecord, Provider } from '#lib/api';
 	import { auth } from '#lib/auth.svelte';
-	import { chat } from '#lib/chat.svelte';
+	import { chat, type ToolStep } from '#lib/chat.svelte';
 	import BudgetCircle from '#lib/BudgetCircle.svelte';
 	import ConfirmDialog from '#lib/ConfirmDialog.svelte';
 	import Markdown from '#lib/Markdown.svelte';
@@ -13,6 +13,49 @@
 	let uploading = $derived(chat.uploading);
 	let scroller: HTMLDivElement;
 	let fileInput: HTMLInputElement;
+
+	type StepView = { key: string; name: string; args: string; result?: string };
+
+	function pairSteps(steps: ToolStep[]): StepView[] {
+		const out: StepView[] = [];
+		const byId = new Map<string, StepView>();
+		for (const step of steps) {
+			if (step.kind === 'call') {
+				const view: StepView = { key: `${step.id}-call`, name: step.name, args: step.args };
+				out.push(view);
+				if (step.id) byId.set(step.id, view);
+			} else {
+				const existing = step.id ? byId.get(step.id) : undefined;
+				if (existing) {
+					existing.result = step.content;
+					if (!existing.name) existing.name = step.name;
+				} else {
+					out.push({ key: `${step.id}-result-${out.length}`, name: step.name, args: '', result: step.content });
+				}
+			}
+		}
+		return out;
+	}
+
+	function formatArgs(raw: string): string {
+		const text = raw.trim();
+		if (!text) return '';
+		try {
+			return JSON.stringify(JSON.parse(text), null, 2);
+		} catch {
+			return raw;
+		}
+	}
+
+	function formatResult(raw: string): string {
+		const text = raw.trim();
+		if (!text || (text[0] !== '{' && text[0] !== '[')) return raw;
+		try {
+			return JSON.stringify(JSON.parse(text), null, 2);
+		} catch {
+			return raw;
+		}
+	}
 
 	/** First + last initial from the display name, falling back to the email. */
 	function initials(name: string | null | undefined, email: string | undefined): string {
@@ -261,36 +304,39 @@
 						<div class="content">{msg.content}</div>
 					{:else}
 						{#if msg.thinking}
-							<details class="thinking-block">
+							<details class="thinking-block" open={!!msg.status && msg.status === 'streaming'}>
 								<summary>
 									<span class="thinking-icon" aria-hidden="true">✳</span>
-									<span class="thinking-title">Thinking</span>
+									<span class="thinking-title">Reasoning</span>
+									<span class="step-hint">{msg.thinking.length} chars</span>
 								</summary>
 								<div class="thinking-body">{msg.thinking}</div>
 							</details>
 						{/if}
 						{#if msg.steps && msg.steps.length > 0}
 							<div class="steps">
-								{#each msg.steps as step, j (j)}
-									{#if step.kind === 'call'}
-										<details class="step step-call">
-											<summary>
-												<span class="step-icon" aria-hidden="true">⌘</span>
-												<span class="step-title">{step.name || 'tool'}</span>
-												<span class="step-hint">call</span>
-											</summary>
-											{#if step.args}<pre class="step-body">{step.args}</pre>{/if}
-										</details>
-									{:else}
-										<details class="step step-result">
-											<summary>
-												<span class="step-icon" aria-hidden="true">✓</span>
-												<span class="step-title">{step.name || 'result'}</span>
-												<span class="step-hint">result</span>
-											</summary>
-											<pre class="step-body">{step.content}</pre>
-										</details>
-									{/if}
+								{#each pairSteps(msg.steps) as step (step.key)}
+									<details class="step" class:done={step.result !== undefined}>
+										<summary>
+											<span class="step-icon" aria-hidden="true">{step.result !== undefined ? '✓' : '⋯'}</span>
+											<span class="step-title">{step.name || 'tool'}</span>
+											<span class="step-hint">{step.result !== undefined ? 'done' : 'running'}</span>
+										</summary>
+										<div class="step-detail">
+											{#if step.args}
+												<div class="step-section">
+													<span class="step-label">Arguments</span>
+													<pre class="step-body">{formatArgs(step.args)}</pre>
+												</div>
+											{/if}
+											{#if step.result !== undefined}
+												<div class="step-section">
+													<span class="step-label">Result</span>
+													<pre class="step-body">{formatResult(step.result)}</pre>
+												</div>
+											{/if}
+										</div>
+									</details>
 								{/each}
 							</div>
 						{/if}
@@ -803,15 +849,37 @@
 		letter-spacing: 0.04em;
 		color: var(--text-faint);
 	}
+	.step-detail {
+		display: flex;
+		flex-direction: column;
+		border-top: 1px solid var(--border);
+	}
+	.step-section {
+		display: flex;
+		flex-direction: column;
+	}
+	.step-section + .step-section {
+		border-top: 1px dashed var(--border);
+	}
+	.step-label {
+		padding: 0.4rem 0.55rem 0.15rem;
+		font-size: 0.66rem;
+		font-weight: 600;
+		text-transform: uppercase;
+		letter-spacing: 0.06em;
+		color: var(--text-faint);
+	}
 	.step-body {
 		margin: 0;
-		padding: 0.5rem 0.55rem;
-		border-top: 1px solid var(--border);
+		padding: 0.2rem 0.55rem 0.5rem;
 		white-space: pre-wrap;
 		overflow-wrap: anywhere;
-		max-height: 16rem;
+		max-height: 18rem;
 		overflow: auto;
 		color: var(--text-muted);
+	}
+	.step.done .step-icon {
+		color: var(--accent);
 	}
 	.thinking-block {
 		border: 1px solid var(--border);
