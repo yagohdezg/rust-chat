@@ -2,7 +2,7 @@ use std::env;
 
 use serde::{Deserialize, Serialize};
 
-use crate::file_config::FileConfig;
+use crate::file_config::{FileConfig, InterfaceSection, SpeechSection};
 
 /// Which relational backend to persist to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -138,6 +138,10 @@ pub struct Config {
     pub password_reset_ttl_seconds: i64,
     /// Require a confirmed email address before an account can log in.
     pub require_email_verification: bool,
+    /// Whether self-service registration is open.
+    pub registration_enabled: bool,
+    /// Email domains permitted to register (empty allows any domain).
+    pub registration_allowed_domains: Vec<String>,
     /// Consecutive failed sign-ins that lock an account out.
     pub login_max_failures: i64,
     /// How long an account stays locked after too many failed sign-ins.
@@ -232,6 +236,11 @@ pub struct Config {
     /// no global cap; a provider's and a user's own allow-lists still apply.
     pub model_allowlist: Vec<String>,
 
+    /// UI copy and links declared in `rustchat.yaml` (no consumer yet).
+    pub interface: InterfaceSection,
+    /// Speech feature toggle declared in `rustchat.yaml` (no consumer yet).
+    pub speech: SpeechSection,
+
     /// Parsed `rustchat.yaml` (path from `RUSTCHAT_CONFIG`). This is the base
     /// layer: environment variables and runtime/DB state override it.
     pub file: FileConfig,
@@ -245,13 +254,7 @@ fn var(name: &str) -> Option<String> {
 
 /// Parse a boolean-ish env var (`1/true/yes/on` -> true, `0/false/no/off` -> false).
 fn var_bool(name: &str, default: bool) -> bool {
-    match var(name) {
-        Some(v) => matches!(
-            v.trim().to_ascii_lowercase().as_str(),
-            "1" | "true" | "yes" | "on"
-        ),
-        None => default,
-    }
+    layered_bool(name, None, default)
 }
 
 /// Parse a comma-separated env var into a trimmed, non-empty list.
@@ -265,6 +268,34 @@ fn var_list(name: &str) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// Resolve a layered setting: a set environment variable wins, then the
+/// `rustchat.yaml` value, then the built-in default.
+fn layered<T: std::str::FromStr>(env_name: &str, file: Option<T>, default: T) -> T {
+    var(env_name)
+        .and_then(|value| value.parse().ok())
+        .or(file)
+        .unwrap_or(default)
+}
+
+/// Like [`layered`], for boolean-ish values (`1/true/yes/on` -> true).
+fn layered_bool(env_name: &str, file: Option<bool>, default: bool) -> bool {
+    match var(env_name) {
+        Some(value) => matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        ),
+        None => file.unwrap_or(default),
+    }
+}
+
+/// Like [`layered`], for comma-separated lists.
+fn layered_list(env_name: &str, file: Option<Vec<String>>, default: Vec<String>) -> Vec<String> {
+    match var(env_name) {
+        Some(_) => var_list(env_name),
+        None => file.unwrap_or(default),
+    }
 }
 
 /// Reject obviously weak `JWT_SECRET` values at boot. A short or guessable
@@ -359,13 +390,17 @@ impl Config {
                     "http://localhost:3080".into(),
                 ],
             },
-            rate_limit_enabled: var_bool("RATE_LIMIT_ENABLED", true),
-            rate_limit_auth_per_minute: var("RATE_LIMIT_AUTH_PER_MINUTE")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(30),
-            rate_limit_chat_per_minute: var("RATE_LIMIT_CHAT_PER_MINUTE")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(60),
+            rate_limit_enabled: layered_bool("RATE_LIMIT_ENABLED", file.rate_limits.enabled, true),
+            rate_limit_auth_per_minute: layered(
+                "RATE_LIMIT_AUTH_PER_MINUTE",
+                file.rate_limits.auth_per_minute,
+                30,
+            ),
+            rate_limit_chat_per_minute: layered(
+                "RATE_LIMIT_CHAT_PER_MINUTE",
+                file.rate_limits.chat_per_minute,
+                60,
+            ),
 
             public_url: var("PUBLIC_URL")
                 .unwrap_or_else(|| "http://localhost:5173".into())
@@ -380,6 +415,16 @@ impl Config {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(3_600),
             require_email_verification: var_bool("REQUIRE_EMAIL_VERIFICATION", false),
+            registration_enabled: layered_bool(
+                "REGISTRATION_ENABLED",
+                file.registration.enabled,
+                true,
+            ),
+            registration_allowed_domains: layered_list(
+                "REGISTRATION_ALLOWED_DOMAINS",
+                Some(file.registration.allowed_domains.clone()),
+                Vec::new(),
+            ),
             login_max_failures: var("LOGIN_MAX_FAILURES")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(5),
@@ -397,13 +442,17 @@ impl Config {
             s3_endpoint: var("S3_ENDPOINT"),
             s3_prefix: var("S3_PREFIX"),
 
-            file_output_max_bytes: var("FILE_OUTPUT_MAX_BYTES")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(8 * 1024 * 1024),
-            file_output_allowed_types: var_list("FILE_OUTPUT_ALLOWED_TYPES"),
-            upload_max_bytes: var("UPLOAD_MAX_BYTES")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(25 * 1024 * 1024),
+            file_output_max_bytes: layered(
+                "FILE_OUTPUT_MAX_BYTES",
+                file.file.output_max_bytes,
+                8 * 1024 * 1024,
+            ),
+            file_output_allowed_types: layered_list(
+                "FILE_OUTPUT_ALLOWED_TYPES",
+                file.file.output_allowed_types.clone(),
+                Vec::new(),
+            ),
+            upload_max_bytes: layered("UPLOAD_MAX_BYTES", file.file.max_bytes, 25 * 1024 * 1024),
             upload_scan_command: var("UPLOAD_SCAN_COMMAND"),
             ocr_command: var("OCR_COMMAND"),
 
@@ -433,6 +482,9 @@ impl Config {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(300),
             model_allowlist: var_list("MODEL_ALLOWLIST"),
+
+            interface: file.interface.clone(),
+            speech: file.speech.clone(),
 
             file,
         })

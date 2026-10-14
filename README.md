@@ -253,7 +253,9 @@ container images (manual, `workflow_dispatch` only).
 ## Configuration
 
 All settings come from the process environment (and a local `.env` if present).
-See [`.env.example`](.env.example).
+See [`.env.example`](.env.example). A `rustchat.yaml` file can supply a
+declarative base layer for these settings; see
+[`docs/rustchat-config.md`](docs/rustchat-config.md).
 
 | Variable                  | Default                                              | Notes                              |
 | ------------------------- | ---------------------------------------------------- | ---------------------------------- |

@@ -44,6 +44,61 @@ pub struct FileModelRef {
     pub model: String,
 }
 
+/// UI copy and outbound links the web app serves.
+#[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InterfaceSection {
+    /// Markdown shown on the empty conversation screen.
+    pub custom_welcome: Option<String>,
+    /// URL of the deployment's privacy policy.
+    pub privacy_policy: Option<String>,
+    /// URL of the deployment's terms of service.
+    pub terms_of_service: Option<String>,
+}
+
+/// Whether self-service sign-up is open, and which email domains it accepts.
+#[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RegistrationSection {
+    /// Allow new accounts to register. Defaults to enabled.
+    pub enabled: Option<bool>,
+    /// Email domains permitted to register. Empty allows any domain.
+    #[serde(default)]
+    pub allowed_domains: Vec<String>,
+}
+
+/// Per-IP request limits for the auth and chat routes.
+#[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RateLimitsSection {
+    /// Whether the in-memory per-IP rate limiter is active.
+    pub enabled: Option<bool>,
+    /// Max `/api/auth/*` requests per IP per minute.
+    pub auth_per_minute: Option<u32>,
+    /// Max `/api/chat` requests per IP per minute.
+    pub chat_per_minute: Option<u32>,
+}
+
+/// Upload and sandbox-output size and type limits.
+#[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FileSection {
+    /// Largest single upload accepted, in bytes.
+    pub max_bytes: Option<u64>,
+    /// Largest single sandbox output that may be saved, in bytes.
+    pub output_max_bytes: Option<u64>,
+    /// Allowed types for sandbox outputs; empty allows every type.
+    pub output_allowed_types: Option<Vec<String>>,
+}
+
+/// Speech (text-to-speech / speech-to-text) toggle.
+#[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SpeechSection {
+    /// Whether speech features are exposed.
+    pub enabled: Option<bool>,
+}
+
 /// The parsed contents of `rustchat.yaml`, empty when no file is present.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -56,6 +111,21 @@ pub struct FileConfig {
     /// Provider + model used to auto-generate conversation titles.
     #[serde(default)]
     pub title_model: Option<FileModelRef>,
+    /// UI copy and links served to the web app.
+    #[serde(default)]
+    pub interface: InterfaceSection,
+    /// Self-service sign-up policy.
+    #[serde(default)]
+    pub registration: RegistrationSection,
+    /// Per-IP request limits.
+    #[serde(default)]
+    pub rate_limits: RateLimitsSection,
+    /// Upload and sandbox-output limits.
+    #[serde(default)]
+    pub file: FileSection,
+    /// Speech feature toggle.
+    #[serde(default)]
+    pub speech: SpeechSection,
 }
 
 impl FileConfig {

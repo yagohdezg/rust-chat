@@ -36,3 +36,45 @@ defaults:
 title_model:
   provider: openai
   model: gpt-4o-mini
+
+# The sections below are optional; leave a section out (or comment it out) to
+# keep the built-in defaults. Every value here is overridden by its environment
+# variable when that is set — see docs/rustchat-config.md for the mapping.
+
+# ---- interface ------------------------------------------------------------
+# UI copy and outbound links served to the web app.
+# interface:
+#   custom_welcome: "Welcome! Ask me anything."
+#   privacy_policy: https://example.com/privacy
+#   terms_of_service: https://example.com/terms
+
+# ---- registration ---------------------------------------------------------
+# Self-service sign-up policy. `allowed_domains` is a list of email domains;
+# empty allows any domain.
+# registration:
+#   enabled: true
+#   allowed_domains:
+#     - example.com
+
+# ---- rate_limits ----------------------------------------------------------
+# Per-IP request limits for the auth and chat routes.
+# rate_limits:
+#   enabled: true
+#   auth_per_minute: 30
+#   chat_per_minute: 60
+
+# ---- file -----------------------------------------------------------------
+# Upload and sandbox-output size and type limits. `output_allowed_types`
+# entries may be a full MIME (`image/png`), a wildcard (`image/*`) or a bare
+# extension (`png`); empty allows every type.
+# file:
+#   max_bytes: 26214400
+#   output_max_bytes: 8388608
+#   output_allowed_types:
+#     - image/png
+#     - application/pdf
+
+# ---- speech ---------------------------------------------------------------
+# Speech (text-to-speech / speech-to-text) toggle.
+# speech:
+#   enabled: false

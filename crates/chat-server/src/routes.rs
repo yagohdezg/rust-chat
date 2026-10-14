@@ -93,9 +93,25 @@ pub async fn register(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Json(body): Json<RegisterBody>,
 ) -> Result<Json<Value>, ApiError> {
+    if !state.cfg.registration_enabled {
+        return Err(ChatError::Forbidden.into());
+    }
     let email = body.email.trim();
     if email.is_empty() {
         return Err(ChatError::BadRequest("email is required".into()).into());
+    }
+    if !state.cfg.registration_allowed_domains.is_empty() {
+        let domain = email.rsplit_once('@').map(|(_, domain)| domain);
+        let allowed = domain.is_some_and(|domain| {
+            state
+                .cfg
+                .registration_allowed_domains
+                .iter()
+                .any(|allowed| allowed.eq_ignore_ascii_case(domain))
+        });
+        if !allowed {
+            return Err(ChatError::BadRequest("email domain is not allowed".into()).into());
+        }
     }
     validate_password(&body.password)?;
     if state.store.find_user_by_email(email).await?.is_some() {

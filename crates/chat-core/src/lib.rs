@@ -8,4 +8,7 @@ pub mod file_config;
 pub use config::{Config, DatabaseBackend, FileStorageKind};
 pub use crypto::SecretCipher;
 pub use error::{ChatError, Result};
-pub use file_config::{FileConfig, FileModelRef, FileProvider};
+pub use file_config::{
+    FileConfig, FileModelRef, FileProvider, FileSection, InterfaceSection, RateLimitsSection,
+    RegistrationSection, SpeechSection,
+};
