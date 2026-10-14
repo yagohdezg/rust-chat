@@ -147,6 +147,16 @@ pub struct Config {
     /// Optional key prefix inside the bucket.
     pub s3_prefix: Option<String>,
 
+    /// Largest single sandbox output file that may be saved into the file
+    /// library. Oversized outputs are rejected and reported to the caller
+    /// instead of being silently dropped.
+    pub file_output_max_bytes: u64,
+    /// Allowed types for sandbox outputs, matched against the sniffed MIME type
+    /// or the file extension. Entries may be a full MIME (`image/png`), a
+    /// wildcard (`image/*`) or a bare extension (`png`). Empty means every type
+    /// is allowed.
+    pub file_output_allowed_types: Vec<String>,
+
     /// Base URL of the standalone `sandboxd` execution service.
     pub sandboxd_url: String,
     /// Shared bearer token presented to `sandboxd` (`SANDBOXD_TOKEN`).
@@ -330,6 +340,11 @@ impl Config {
             s3_region: var("S3_REGION").unwrap_or_else(|| "us-east-1".into()),
             s3_endpoint: var("S3_ENDPOINT"),
             s3_prefix: var("S3_PREFIX"),
+
+            file_output_max_bytes: var("FILE_OUTPUT_MAX_BYTES")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(8 * 1024 * 1024),
+            file_output_allowed_types: var_list("FILE_OUTPUT_ALLOWED_TYPES"),
 
             sandboxd_url,
             sandboxd_token: var("SANDBOXD_TOKEN"),

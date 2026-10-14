@@ -84,11 +84,17 @@ export type ToolResult = {
 	content: string;
 };
 
+export type RejectedFile = {
+	name: string;
+	reason: string;
+};
+
 export type ExecResult = {
 	exit_code: number;
 	stdout: string;
 	stderr: string;
 	timed_out: boolean;
+	rejected_files?: RejectedFile[];
 };
 
 export type SandboxRequest = {

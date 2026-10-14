@@ -84,6 +84,14 @@
 			<pre>{result.stdout || '(empty)'}</pre>
 			<h2>stderr</h2>
 			<pre class="stderr">{result.stderr || '(empty)'}</pre>
+			{#if result.rejected_files?.length}
+				<h2>rejected files</h2>
+				<ul class="rejected">
+					{#each result.rejected_files as file (file.name)}
+						<li><strong>{file.name}</strong> — {file.reason}</li>
+					{/each}
+				</ul>
+			{/if}
 		</div>
 	{/if}
 </div>
@@ -188,6 +196,12 @@
 		font-size: 0.85rem;
 	}
 	pre.stderr {
+		color: var(--danger);
+	}
+	.rejected {
+		margin: 0;
+		padding-left: 1.2rem;
+		font-size: 0.85rem;
 		color: var(--danger);
 	}
 </style>

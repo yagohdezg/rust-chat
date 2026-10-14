@@ -91,6 +91,7 @@ mod tests {
                 timed_out: false,
                 truncated: false,
                 files: Vec::new(),
+                rejected_files: Vec::new(),
             })
         }
 
@@ -306,6 +307,7 @@ mod tests {
                 timed_out: false,
                 truncated: false,
                 files: Vec::new(),
+                rejected_files: Vec::new(),
             })
         }
 

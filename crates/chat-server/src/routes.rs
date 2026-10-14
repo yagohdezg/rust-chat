@@ -2286,19 +2286,20 @@ pub async fn sandbox_run(
             .load_for_conversation(user.id, conversation_id)
             .await?;
     }
-    let result = state
+    let mut result = state
         .sandbox
         .run(&request)
         .await
         .map_err(|e| ApiError(ChatError::Internal(anyhow::anyhow!(e))))?;
 
     if let Some(conversation_id) = body.conversation_id {
-        if let Err(err) = state
+        match state
             .workspace
             .persist_outputs(user.id, conversation_id, &result.files)
             .await
         {
-            tracing::warn!(error = %err, "failed to persist sandbox outputs");
+            Ok(outcome) => result.rejected_files.extend(outcome.rejected),
+            Err(err) => tracing::warn!(error = %err, "failed to persist sandbox outputs"),
         }
     }
 
@@ -2421,15 +2422,16 @@ pub async fn computer_exec(
             .load_for_conversation(user.id, conversation_id)
             .await?;
     }
-    let result = computer_plane(&state)?.exec(user.id, &request).await?;
+    let mut result = computer_plane(&state)?.exec(user.id, &request).await?;
 
     if let Some(conversation_id) = body.conversation_id {
-        if let Err(err) = state
+        match state
             .workspace
             .persist_outputs(user.id, conversation_id, &result.files)
             .await
         {
-            tracing::warn!(error = %err, "failed to persist computer outputs");
+            Ok(outcome) => result.rejected_files.extend(outcome.rejected),
+            Err(err) => tracing::warn!(error = %err, "failed to persist computer outputs"),
         }
     }
 

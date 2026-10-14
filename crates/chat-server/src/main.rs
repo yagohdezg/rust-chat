@@ -1,6 +1,7 @@
 mod doctext;
 mod error;
 mod extract;
+mod file_policy;
 mod mcp;
 mod rate_limit;
 mod routes;
@@ -142,7 +143,14 @@ async fn main() -> anyhow::Result<()> {
     let bind_addr = cfg.bind_addr.clone();
     let mcp_idle_ttl = std::time::Duration::from_secs(cfg.mcp_idle_ttl_seconds.max(1));
     let mcp_reap_interval = (mcp_idle_ttl / 2).max(std::time::Duration::from_secs(5));
-    let workspace = Arc::new(workspace::FileWorkspace::new(files.clone(), store.clone()));
+    let workspace = Arc::new(workspace::FileWorkspace::new(
+        files.clone(),
+        store.clone(),
+        file_policy::FilePolicy::new(
+            cfg.file_output_max_bytes,
+            cfg.file_output_allowed_types.clone(),
+        ),
+    ));
     let mcp_sandbox = sandbox.clone();
     let state = Arc::new(AppState {
         cfg: Arc::new(cfg),
