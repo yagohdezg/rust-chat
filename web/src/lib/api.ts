@@ -268,8 +268,8 @@ export function login(email: string, password: string): Promise<Session> {
 	});
 }
 
-export function listConversations(): Promise<Conversation[]> {
-	return request<Conversation[]>('/api/conversations');
+export function listConversations(archived = false): Promise<Conversation[]> {
+	return request<Conversation[]>(`/api/conversations${archived ? '?archived=true' : ''}`);
 }
 
 export function createConversation(title: string, agentId?: string): Promise<Conversation> {
@@ -297,6 +297,16 @@ export function renameConversation(conversationId: string, title: string): Promi
 	return request<Conversation>(`/api/conversations/${conversationId}`, {
 		method: 'PATCH',
 		body: JSON.stringify({ title })
+	});
+}
+
+export function setConversationArchived(
+	conversationId: string,
+	archived: boolean
+): Promise<Conversation> {
+	return request<Conversation>(`/api/conversations/${conversationId}`, {
+		method: 'PATCH',
+		body: JSON.stringify({ archived })
 	});
 }
 

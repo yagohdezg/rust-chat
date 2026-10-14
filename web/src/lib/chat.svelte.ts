@@ -81,6 +81,9 @@ function withToolSteps(messages: api.Message[]): ThreadMessage[] {
  */
 class ChatStore {
 	conversations = $state<api.Conversation[]>([]);
+	archivedConversations = $state<api.Conversation[]>([]);
+	showArchived = $state(false);
+	loadingArchived = $state(false);
 	agents = $state<api.Agent[]>([]);
 	providers = $state<api.Provider[]>([]);
 	/** Model catalogs keyed by provider id. */
@@ -159,7 +162,11 @@ class ChatStore {
 	}
 
 	get selected(): api.Conversation | null {
-		return this.conversations.find((c) => c.id === this.selectedId) ?? null;
+		return (
+			this.conversations.find((c) => c.id === this.selectedId) ??
+			this.archivedConversations.find((c) => c.id === this.selectedId) ??
+			null
+		);
 	}
 
 	/** Agent bound to the selected conversation, if any. */
@@ -256,6 +263,8 @@ class ChatStore {
 	reset() {
 		this.initialized = false;
 		this.conversations = [];
+		this.archivedConversations = [];
+		this.showArchived = false;
 		this.agents = [];
 		this.providers = [];
 		this.modelsByProvider = {};
@@ -353,12 +362,59 @@ class ChatStore {
 		try {
 			const updated = await api.renameConversation(id, trimmed);
 			this.conversations = this.conversations.map((c) => (c.id === updated.id ? updated : c));
+			this.archivedConversations = this.archivedConversations.map((c) =>
+				c.id === updated.id ? updated : c
+			);
 			this.touch();
 			return true;
 		} catch (err) {
 			this.error = message(err);
 			return false;
 		}
+	}
+
+	async setArchived(id: string, archived: boolean) {
+		this.error = null;
+		try {
+			const updated = await api.setConversationArchived(id, archived);
+			this.conversations = this.conversations.filter((c) => c.id !== updated.id);
+			this.archivedConversations = this.archivedConversations.filter((c) => c.id !== updated.id);
+			if (archived) {
+				this.archivedConversations = [updated, ...this.archivedConversations];
+			} else {
+				this.conversations = [updated, ...this.conversations];
+				this.sortConversations();
+			}
+			if (archived && this.selectedId === updated.id) {
+				this.selectedId = null;
+				this.messages = [];
+				this.hasOlder = false;
+				this.files = [];
+				const next = this.conversations[0];
+				if (next) await this.select(next.id);
+			}
+			this.touch();
+		} catch (err) {
+			this.error = message(err);
+		}
+	}
+
+	async loadArchived() {
+		if (this.loadingArchived) return;
+		this.loadingArchived = true;
+		this.error = null;
+		try {
+			this.archivedConversations = await api.listConversations(true);
+		} catch (err) {
+			this.error = message(err);
+		} finally {
+			this.loadingArchived = false;
+		}
+	}
+
+	async toggleArchivedList() {
+		this.showArchived = !this.showArchived;
+		if (this.showArchived) await this.loadArchived();
 	}
 
 	/** Pin or unpin a conversation, keeping the pinned-first ordering. */
@@ -399,6 +455,9 @@ class ChatStore {
 		try {
 			const updated = await api.setConversationAgent(this.selectedId, agentId);
 			this.conversations = this.conversations.map((c) => (c.id === updated.id ? updated : c));
+			this.archivedConversations = this.archivedConversations.map((c) =>
+				c.id === updated.id ? updated : c
+			);
 			this.ensureModel();
 			this.touch();
 		} catch (err) {
@@ -493,6 +552,7 @@ class ChatStore {
 			return;
 		}
 		this.conversations = this.conversations.filter((c) => c.id !== id);
+		this.archivedConversations = this.archivedConversations.filter((c) => c.id !== id);
 		if (wasSelected) {
 			this.selectedId = null;
 			this.messages = [];

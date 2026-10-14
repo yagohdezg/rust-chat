@@ -135,6 +135,15 @@
 		void chat.setPinned(conversation.id, !conversation.pinned);
 	}
 
+	let listedConversations = $derived(
+		chat.showArchived ? chat.archivedConversations : chat.conversations
+	);
+
+	function toggleArchive(conversation: { id: string; archived: boolean }) {
+		menuOpenId = null;
+		void chat.setArchived(conversation.id, !conversation.archived);
+	}
+
 	// Delete goes through a themed dialog instead of the browser `confirm`.
 	let pendingDelete = $state<{ id: string; title: string } | null>(null);
 
@@ -281,14 +290,26 @@
 			{:else}
 				<div class="sections">
 					<section class="section">
-						<h2>Chats</h2>
-						{#if chat.loading}
+						<div class="section-head">
+							<h2>{chat.showArchived ? 'Archived' : 'Chats'}</h2>
+							<button
+								class="mini wide"
+								class:on={chat.showArchived}
+								onclick={() => chat.toggleArchivedList()}
+								title={chat.showArchived ? 'Show active chats' : 'Show archived chats'}
+							>
+								{chat.showArchived ? 'Active' : 'Archived'}
+							</button>
+						</div>
+						{#if chat.loading || chat.loadingArchived}
 							<p class="empty-hint">Loading…</p>
-						{:else if chat.conversations.length === 0}
-							<p class="empty-hint">No conversations yet.</p>
+						{:else if listedConversations.length === 0}
+							<p class="empty-hint">
+								{chat.showArchived ? 'No archived chats.' : 'No conversations yet.'}
+							</p>
 						{:else}
 							<ul class="conv-list">
-								{#each chat.conversations as conversation (conversation.id)}
+								{#each listedConversations as conversation (conversation.id)}
 									<li class:active={conversation.id === chat.selectedId}>
 										{#if renamingId === conversation.id}
 											<input
@@ -327,13 +348,18 @@
 												</button>
 												{#if menuOpenId === conversation.id}
 													<div class="menu-pop">
-														<button onclick={() => togglePin(conversation)}>
-															{conversation.pinned ? 'Unpin' : 'Pin'}
-														</button>
-														<button onclick={() => beginRename(conversation)}>Rename</button>
-														<button onclick={() => duplicateConversation(conversation.id)}>
-															Duplicate
-														</button>
+														{#if conversation.archived}
+															<button onclick={() => toggleArchive(conversation)}>Unarchive</button>
+														{:else}
+															<button onclick={() => togglePin(conversation)}>
+																{conversation.pinned ? 'Unpin' : 'Pin'}
+															</button>
+															<button onclick={() => beginRename(conversation)}>Rename</button>
+															<button onclick={() => duplicateConversation(conversation.id)}>
+																Duplicate
+															</button>
+															<button onclick={() => toggleArchive(conversation)}>Archive</button>
+														{/if}
 														<button
 															class="danger"
 															onclick={() => requestRemove(conversation.id, conversation.title)}
@@ -666,6 +692,20 @@
 	}
 	.mini:hover {
 		background: var(--surface-hover);
+		color: var(--text);
+	}
+	.mini.wide {
+		width: auto;
+		height: auto;
+		padding: 0.15rem 0.45rem;
+		border: 1px solid var(--border);
+		font-size: 0.66rem;
+		text-transform: uppercase;
+		letter-spacing: 0.05em;
+	}
+	.mini.wide.on {
+		background: var(--primary-soft);
+		border-color: var(--primary);
 		color: var(--text);
 	}
 
