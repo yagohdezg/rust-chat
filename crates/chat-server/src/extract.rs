@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 use chrono::{Duration, Utc};
 
-use chat_auth::verify_token;
+use chat_auth::{role_allows, verify_token, Action, Scope};
 use chat_core::ChatError;
 
 use crate::error::ApiError;
@@ -76,11 +76,22 @@ impl FromRequestParts<Arc<AppState>> for AuthUser {
     }
 }
 
-/// An authenticated caller that must hold the `admin` role. Use in handlers
-/// under `/api/admin/*` (or any admin-only action).
-pub struct AdminUser(pub AuthUser);
+pub trait ScopedPermission {
+    const SCOPE: Scope;
+    const ACTION: Action;
+}
 
-impl FromRequestParts<Arc<AppState>> for AdminUser {
+pub struct Require<P: ScopedPermission>(pub AuthUser, std::marker::PhantomData<P>);
+
+impl<P: ScopedPermission> std::ops::Deref for Require<P> {
+    type Target = AuthUser;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<P: ScopedPermission> FromRequestParts<Arc<AppState>> for Require<P> {
     type Rejection = ApiError;
 
     async fn from_request_parts(
@@ -88,9 +99,46 @@ impl FromRequestParts<Arc<AppState>> for AdminUser {
         state: &Arc<AppState>,
     ) -> Result<Self, Self::Rejection> {
         let user = AuthUser::from_request_parts(parts, state).await?;
-        if user.role != "admin" {
+        if !role_allows(&user.role, P::SCOPE, P::ACTION) {
             return Err(ApiError(ChatError::Forbidden));
         }
-        Ok(AdminUser(user))
+        Ok(Require(user, std::marker::PhantomData))
     }
+}
+
+macro_rules! permissions {
+    ($($name:ident => $scope:ident / $action:ident),+ $(,)?) => {
+        $(
+            pub struct $name;
+            impl ScopedPermission for $name {
+                const SCOPE: Scope = Scope::$scope;
+                const ACTION: Action = Action::$action;
+            }
+        )+
+    };
+}
+
+permissions! {
+    ConversationsView => Conversations / View,
+    ConversationsManage => Conversations / Manage,
+    MessagesView => Messages / View,
+    AgentsView => Agents / View,
+    AgentsManage => Agents / Manage,
+    McpServersView => McpServers / View,
+    McpServersManage => McpServers / Manage,
+    ProvidersView => Providers / View,
+    ProvidersManage => Providers / Manage,
+    FilesView => Files / View,
+    FilesManage => Files / Manage,
+    ChatUse => Chat / Use,
+    SandboxUse => Sandbox / Use,
+    ComputersView => Computers / View,
+    ComputersUse => Computers / Use,
+    ComputersManage => Computers / Manage,
+    ModelsView => Models / View,
+    AdminUsersView => AdminUsers / View,
+    AdminUsersManage => AdminUsers / Manage,
+    AdminAuditView => AdminAudit / View,
+    AdminComputersView => AdminComputers / View,
+    AdminProvidersManage => AdminProviders / Manage,
 }

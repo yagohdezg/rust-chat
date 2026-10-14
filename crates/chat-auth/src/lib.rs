@@ -13,6 +13,9 @@ use uuid::Uuid;
 
 use chat_core::{ChatError, Result};
 
+pub mod permissions;
+pub use permissions::{permissions_for_role, role_allows, Action, Permission, Scope};
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Claims {
     pub sub: String,

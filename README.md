@@ -397,6 +397,19 @@ the whole user's session family. `/api/auth/*` and `/api/chat` are per-IP rate
 limited; admin actions and auth/sandbox events are written to an audit trail
 shown in the `/admin` console.
 
+### Permissions
+
+Authorization is scope-based. Each route requires a `(scope, action)` pair where
+the action is `view`, `use` or `manage`, and the scopes cover `conversations`,
+`messages`, `agents`, `mcp_servers`, `providers`, `files`, `chat`, `sandbox`,
+`computers`, `models`, plus the admin-only `admin_users`, `admin_audit`,
+`admin_computers` and `admin_providers`. Roles map onto that model: `admin`
+holds every permission, while `user` holds `view`/`use`/`manage` on their own
+resources and `use` on `chat`/`sandbox`. Ownership is still checked per row, so
+a `user` can only touch their own resources. `GET /api/me` returns the caller's
+granted `permissions` (a list of `{scope, action}`), and admin routes are
+enforced by the `admin_*` scopes rather than a bare role check.
+
 ### Example: register + chat
 
 ```bash

@@ -18,7 +18,8 @@ use uuid::Uuid;
 
 use chat_agents::{run_agent_stream, AgentConfig, AgentEvent, ToolRegistry};
 use chat_auth::{
-    generate_refresh_token, hash_password, hash_refresh_token, issue_token, verify_password,
+    generate_refresh_token, hash_password, hash_refresh_token, issue_token, permissions_for_role,
+    role_allows, verify_password, Action, Scope,
 };
 use chat_computers::ComputerOrchestrator;
 use chat_core::ChatError;
@@ -31,7 +32,12 @@ use chat_store::{
 };
 
 use crate::error::ApiError;
-use crate::extract::{AdminUser, AuthUser};
+use crate::extract::{
+    AdminAuditView, AdminComputersView, AdminProvidersManage, AdminUsersManage, AdminUsersView,
+    AgentsManage, AgentsView, AuthUser, ChatUse, ComputersManage, ComputersUse, ComputersView,
+    ConversationsManage, ConversationsView, FilesManage, FilesView, McpServersManage,
+    McpServersView, MessagesView, ModelsView, ProvidersManage, ProvidersView, Require, SandboxUse,
+};
 use crate::state::AppState;
 use crate::stream::{SseEvent, StreamState};
 use crate::tools::CodeBackend;
@@ -258,7 +264,8 @@ pub async fn logout(
 }
 
 pub async fn me(user: AuthUser) -> Json<Value> {
-    Json(json!({ "id": user.id, "role": user.role }))
+    let permissions = permissions_for_role(&user.role);
+    Json(json!({ "id": user.id, "role": user.role, "permissions": permissions }))
 }
 
 /// Issue and persist a new refresh token, returning the plaintext for the
@@ -294,7 +301,7 @@ fn session_json(user: &chat_store::User, token: &str, refresh_token: &str) -> Va
 /// owned-resource counts.
 pub async fn admin_list_users(
     State(state): State<Arc<AppState>>,
-    _admin: AdminUser,
+    _admin: Require<AdminUsersView>,
 ) -> Result<Json<Vec<AdminUserSummary>>, ApiError> {
     Ok(Json(state.store.list_user_summaries().await?))
 }
@@ -312,12 +319,12 @@ pub struct UpdateUserBody {
 /// state. Admins cannot modify their own account (guards against lock-out).
 pub async fn admin_update_user(
     State(state): State<Arc<AppState>>,
-    admin: AdminUser,
+    admin: Require<AdminUsersManage>,
     Path(user_id): Path<Uuid>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Json(body): Json<UpdateUserBody>,
 ) -> Result<Json<chat_store::User>, ApiError> {
-    if user_id == admin.0.id {
+    if user_id == admin.id {
         return Err(ChatError::BadRequest("cannot modify your own account".into()).into());
     }
     if body.role.is_none() && body.disabled.is_none() {
@@ -359,7 +366,7 @@ pub async fn admin_update_user(
     audit(
         &state,
         AuditEntry {
-            actor_id: Some(admin.0.id),
+            actor_id: Some(admin.id),
             action: "admin.user.update".into(),
             target_type: Some("user".into()),
             target_id: Some(user_id.to_string()),
@@ -381,7 +388,7 @@ pub struct AuditQuery {
 /// `GET /api/admin/audit?limit=` — recent security events, newest first.
 pub async fn admin_list_audit(
     State(state): State<Arc<AppState>>,
-    _admin: AdminUser,
+    _admin: Require<AdminAuditView>,
     Query(params): Query<AuditQuery>,
 ) -> Result<Json<Vec<AuditLog>>, ApiError> {
     let limit = params.limit.unwrap_or(100).clamp(1, 500);
@@ -402,7 +409,7 @@ pub struct CreateUserBody {
 /// `POST /api/admin/users` — create an account with an explicit role. Admin only.
 pub async fn admin_create_user(
     State(state): State<Arc<AppState>>,
-    admin: AdminUser,
+    admin: Require<AdminUsersManage>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Json(body): Json<CreateUserBody>,
 ) -> Result<Json<chat_store::User>, ApiError> {
@@ -427,7 +434,7 @@ pub async fn admin_create_user(
     audit(
         &state,
         AuditEntry {
-            actor_id: Some(admin.0.id),
+            actor_id: Some(admin.id),
             action: "admin.user.create".into(),
             target_type: Some("user".into()),
             target_id: Some(user.id.to_string()),
@@ -444,11 +451,11 @@ pub async fn admin_create_user(
 /// the last remaining enabled admin.
 pub async fn admin_delete_user(
     State(state): State<Arc<AppState>>,
-    admin: AdminUser,
+    admin: Require<AdminUsersManage>,
     Path(user_id): Path<Uuid>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
 ) -> Result<StatusCode, ApiError> {
-    if user_id == admin.0.id {
+    if user_id == admin.id {
         return Err(ChatError::BadRequest("cannot delete your own account".into()).into());
     }
     let target = state
@@ -465,7 +472,7 @@ pub async fn admin_delete_user(
     audit(
         &state,
         AuditEntry {
-            actor_id: Some(admin.0.id),
+            actor_id: Some(admin.id),
             action: "admin.user.delete".into(),
             target_type: Some("user".into()),
             target_id: Some(user_id.to_string()),
@@ -497,7 +504,7 @@ async fn is_last_admin(state: &AppState, user_id: Uuid) -> Result<bool, ApiError
 /// model) before a chat request fails.
 pub async fn list_models(
     State(state): State<Arc<AppState>>,
-    user: AuthUser,
+    user: Require<ModelsView>,
 ) -> Result<Json<Vec<ModelInfo>>, ApiError> {
     let row = default_provider_row(&state, user.id).await?;
     Ok(Json(models_for_provider(&state, &row, user.id).await?))
@@ -507,7 +514,7 @@ pub async fn list_models(
 /// provider (own or global), refreshed lazily when stale.
 pub async fn list_provider_models(
     State(state): State<Arc<AppState>>,
-    user: AuthUser,
+    user: Require<ProvidersView>,
     Path(provider_id): Path<Uuid>,
 ) -> Result<Json<Vec<ModelInfo>>, ApiError> {
     let row = state
@@ -589,7 +596,7 @@ pub struct ListConversationsQuery {
 
 pub async fn list_conversations(
     State(state): State<Arc<AppState>>,
-    user: AuthUser,
+    user: Require<ConversationsView>,
     Query(query): Query<ListConversationsQuery>,
 ) -> Result<Json<Vec<Conversation>>, ApiError> {
     Ok(Json(
@@ -610,7 +617,7 @@ pub struct CreateConversationBody {
 
 pub async fn create_conversation(
     State(state): State<Arc<AppState>>,
-    user: AuthUser,
+    user: Require<ConversationsManage>,
     Json(body): Json<CreateConversationBody>,
 ) -> Result<Json<Conversation>, ApiError> {
     // An attached agent must belong to the caller; otherwise a user could
@@ -653,7 +660,7 @@ const MESSAGE_PAGE_MAX: i64 = 200;
 
 pub async fn list_messages(
     State(state): State<Arc<AppState>>,
-    user: AuthUser,
+    user: Require<MessagesView>,
     Path(conversation_id): Path<Uuid>,
     Query(query): Query<ListMessagesQuery>,
 ) -> Result<Json<Vec<Message>>, ApiError> {
@@ -680,7 +687,7 @@ pub async fn list_messages(
 
 pub async fn delete_conversation(
     State(state): State<Arc<AppState>>,
-    user: AuthUser,
+    user: Require<ConversationsManage>,
     Path(conversation_id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
     // Authorize first: the conversation must belong to the caller.
@@ -727,7 +734,7 @@ where
 
 pub async fn update_conversation(
     State(state): State<Arc<AppState>>,
-    user: AuthUser,
+    user: Require<ConversationsManage>,
     Path(conversation_id): Path<Uuid>,
     Json(body): Json<UpdateConversationBody>,
 ) -> Result<Json<Conversation>, ApiError> {
@@ -784,7 +791,7 @@ pub async fn update_conversation(
 /// its messages under a new id. The copy is created unpinned.
 pub async fn duplicate_conversation(
     State(state): State<Arc<AppState>>,
-    user: AuthUser,
+    user: Require<ConversationsManage>,
     Path(conversation_id): Path<Uuid>,
 ) -> Result<Json<Conversation>, ApiError> {
     let conversation = state
@@ -798,7 +805,7 @@ pub async fn duplicate_conversation(
 
 pub async fn list_agents(
     State(state): State<Arc<AppState>>,
-    user: AuthUser,
+    user: Require<AgentsView>,
 ) -> Result<Json<Vec<chat_store::Agent>>, ApiError> {
     Ok(Json(state.store.list_agents(user.id).await?))
 }
@@ -820,7 +827,7 @@ pub struct CreateAgentBody {
 
 pub async fn create_agent(
     State(state): State<Arc<AppState>>,
-    user: AuthUser,
+    user: Require<AgentsManage>,
     Json(body): Json<CreateAgentBody>,
 ) -> Result<Json<chat_store::Agent>, ApiError> {
     let name = body.name.trim();
@@ -857,7 +864,7 @@ pub async fn create_agent(
 
 pub async fn delete_agent(
     State(state): State<Arc<AppState>>,
-    user: AuthUser,
+    user: Require<AgentsManage>,
     Path(agent_id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
     state.store.delete_agent(agent_id, user.id).await?;
@@ -868,7 +875,7 @@ pub async fn delete_agent(
 
 pub async fn list_mcp_servers(
     State(state): State<Arc<AppState>>,
-    user: AuthUser,
+    user: Require<McpServersView>,
 ) -> Result<Json<Vec<McpServer>>, ApiError> {
     Ok(Json(state.store.list_mcp_servers(user.id).await?))
 }
@@ -900,7 +907,7 @@ fn default_enabled() -> bool {
 
 pub async fn create_mcp_server(
     State(state): State<Arc<AppState>>,
-    user: AuthUser,
+    user: Require<McpServersManage>,
     Json(body): Json<CreateMcpServerBody>,
 ) -> Result<Json<McpServer>, ApiError> {
     let name = body.name.trim();
@@ -955,7 +962,7 @@ pub async fn create_mcp_server(
 
 pub async fn delete_mcp_server(
     State(state): State<Arc<AppState>>,
-    user: AuthUser,
+    user: Require<McpServersManage>,
     Path(server_id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
     state.store.delete_mcp_server(server_id, user.id).await?;
@@ -1087,7 +1094,7 @@ async fn default_provider_choice(
 
 pub async fn list_providers(
     State(state): State<Arc<AppState>>,
-    user: AuthUser,
+    user: Require<ProvidersView>,
 ) -> Result<Json<Vec<ProviderView>>, ApiError> {
     let providers = state.store.list_providers(user.id).await?;
     let with_credential = state.store.list_provider_credential_ids(user.id).await?;
@@ -1121,7 +1128,7 @@ fn default_kind() -> String {
 
 pub async fn create_provider(
     State(state): State<Arc<AppState>>,
-    user: AuthUser,
+    user: Require<ProvidersManage>,
     Json(body): Json<CreateProviderBody>,
 ) -> Result<Json<ProviderView>, ApiError> {
     let name = body.name.trim();
@@ -1129,7 +1136,7 @@ pub async fn create_provider(
     if name.is_empty() || base_url.is_empty() {
         return Err(ChatError::BadRequest("provider name and base_url are required".into()).into());
     }
-    if body.global && user.role != "admin" {
+    if body.global && !role_allows(&user.role, Scope::AdminProviders, Action::Manage) {
         return Err(ChatError::Forbidden.into());
     }
     let owner = if body.global { None } else { Some(user.id) };
@@ -1153,7 +1160,7 @@ pub async fn create_provider(
 fn can_manage_provider(provider: &Provider, user: &AuthUser) -> bool {
     match provider.user_id {
         Some(owner) => owner == user.id,
-        None => user.role == "admin",
+        None => role_allows(&user.role, Scope::AdminProviders, Action::Manage),
     }
 }
 
@@ -1171,7 +1178,7 @@ pub struct UpdateProviderBody {
 /// model catalog.
 pub async fn update_provider(
     State(state): State<Arc<AppState>>,
-    user: AuthUser,
+    user: Require<ProvidersManage>,
     Path(provider_id): Path<Uuid>,
     Json(body): Json<UpdateProviderBody>,
 ) -> Result<Json<ProviderView>, ApiError> {
@@ -1225,7 +1232,7 @@ pub struct ProviderCredentialBody {
 /// without a key; the credential is personal and encrypted at rest.
 pub async fn set_provider_credential(
     State(state): State<Arc<AppState>>,
-    user: AuthUser,
+    user: Require<ProvidersManage>,
     Path(provider_id): Path<Uuid>,
     Json(body): Json<ProviderCredentialBody>,
 ) -> Result<Json<ProviderView>, ApiError> {
@@ -1258,7 +1265,7 @@ pub struct BulkCreateProvidersBody {
 /// providers in one request. Admin only.
 pub async fn admin_bulk_create_providers(
     State(state): State<Arc<AppState>>,
-    _admin: AdminUser,
+    _admin: Require<AdminProvidersManage>,
     Json(body): Json<BulkCreateProvidersBody>,
 ) -> Result<Json<Vec<ProviderView>>, ApiError> {
     if body.providers.is_empty() {
@@ -1291,7 +1298,7 @@ pub async fn admin_bulk_create_providers(
 
 pub async fn delete_provider(
     State(state): State<Arc<AppState>>,
-    user: AuthUser,
+    user: Require<ProvidersManage>,
     Path(provider_id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
     let provider = state
@@ -1324,7 +1331,7 @@ pub struct UploadFileBody {
 
 pub async fn upload_file(
     State(state): State<Arc<AppState>>,
-    user: AuthUser,
+    user: Require<FilesManage>,
     Json(body): Json<UploadFileBody>,
 ) -> Result<Json<Value>, ApiError> {
     let bytes = base64::engine::general_purpose::STANDARD
@@ -1372,7 +1379,7 @@ pub async fn upload_file(
 
 pub async fn list_files(
     State(state): State<Arc<AppState>>,
-    user: AuthUser,
+    user: Require<FilesView>,
     Path(conversation_id): Path<Uuid>,
 ) -> Result<Json<Vec<FileRecord>>, ApiError> {
     state
@@ -1385,7 +1392,7 @@ pub async fn list_files(
 /// `GET /api/files` — the caller's personal file storage (library).
 pub async fn list_user_files(
     State(state): State<Arc<AppState>>,
-    user: AuthUser,
+    user: Require<FilesView>,
 ) -> Result<Json<Vec<FileRecord>>, ApiError> {
     Ok(Json(state.store.list_user_files(user.id).await?))
 }
@@ -1399,7 +1406,7 @@ pub struct AttachFilesBody {
 /// conversation so they are materialized into its sandbox.
 pub async fn attach_conversation_file(
     State(state): State<Arc<AppState>>,
-    user: AuthUser,
+    user: Require<FilesManage>,
     Path(conversation_id): Path<Uuid>,
     Json(body): Json<AttachFilesBody>,
 ) -> Result<Json<Vec<FileRecord>>, ApiError> {
@@ -1425,7 +1432,7 @@ pub async fn attach_conversation_file(
 /// conversation, keeping it in the personal library.
 pub async fn detach_conversation_file(
     State(state): State<Arc<AppState>>,
-    user: AuthUser,
+    user: Require<FilesManage>,
     Path((conversation_id, file_id)): Path<(Uuid, Uuid)>,
 ) -> Result<StatusCode, ApiError> {
     state
@@ -1441,7 +1448,7 @@ pub async fn detach_conversation_file(
 
 pub async fn download_file(
     State(state): State<Arc<AppState>>,
-    user: AuthUser,
+    user: Require<FilesView>,
     Path(file_id): Path<Uuid>,
 ) -> Result<Response, ApiError> {
     let file = state
@@ -1471,7 +1478,7 @@ pub async fn download_file(
 
 pub async fn delete_file(
     State(state): State<Arc<AppState>>,
-    user: AuthUser,
+    user: Require<FilesManage>,
     Path(file_id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
     let file = state
@@ -1500,7 +1507,7 @@ pub struct ChatBody {
 
 pub async fn chat(
     State(state): State<Arc<AppState>>,
-    user: AuthUser,
+    user: Require<ChatUse>,
     Json(body): Json<ChatBody>,
 ) -> Result<Sse<impl futures::Stream<Item = Result<Event, Infallible>>>, ApiError> {
     let conversation = state
@@ -1621,7 +1628,7 @@ pub async fn chat(
 /// replay a finished one from `Last-Event-ID`.
 pub async fn resume_stream(
     State(state): State<Arc<AppState>>,
-    user: AuthUser,
+    user: Require<ChatUse>,
     Path(message_id): Path<Uuid>,
     headers: HeaderMap,
 ) -> Result<Sse<impl futures::Stream<Item = Result<Event, Infallible>>>, ApiError> {
@@ -2265,7 +2272,7 @@ pub struct SandboxBody {
 
 pub async fn sandbox_run(
     State(state): State<Arc<AppState>>,
-    user: AuthUser,
+    user: Require<SandboxUse>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Json(body): Json<SandboxBody>,
 ) -> Result<Json<ExecResult>, ApiError> {
@@ -2328,7 +2335,7 @@ pub async fn sandbox_run(
 /// Admin view of every computer placement plus the warm pool size per node.
 pub async fn admin_list_computers(
     State(state): State<Arc<AppState>>,
-    _admin: AdminUser,
+    _admin: Require<AdminComputersView>,
 ) -> Result<Json<Value>, ApiError> {
     let computers = state.store.list_computers(200).await?;
     let pool = match state.computers.as_deref() {
@@ -2354,7 +2361,7 @@ fn computer_plane(state: &AppState) -> Result<&ComputerOrchestrator, ApiError> {
 /// Return the caller's computer, provisioning it on first use.
 pub async fn get_computer(
     State(state): State<Arc<AppState>>,
-    user: AuthUser,
+    user: Require<ComputersView>,
 ) -> Result<Json<Computer>, ApiError> {
     let computer = computer_plane(&state)?.ensure_running(user.id).await?;
     Ok(Json(computer))
@@ -2363,7 +2370,7 @@ pub async fn get_computer(
 /// Pause the caller's computer, keeping its placement.
 pub async fn pause_computer(
     State(state): State<Arc<AppState>>,
-    user: AuthUser,
+    user: Require<ComputersManage>,
 ) -> Result<Json<Option<Computer>>, ApiError> {
     Ok(Json(computer_plane(&state)?.pause(user.id).await?))
 }
@@ -2371,7 +2378,7 @@ pub async fn pause_computer(
 /// Resume a paused computer.
 pub async fn resume_computer(
     State(state): State<Arc<AppState>>,
-    user: AuthUser,
+    user: Require<ComputersManage>,
 ) -> Result<Json<Option<Computer>>, ApiError> {
     Ok(Json(computer_plane(&state)?.resume(user.id).await?))
 }
@@ -2379,7 +2386,7 @@ pub async fn resume_computer(
 /// Destroy the caller's computer and free its box.
 pub async fn destroy_computer(
     State(state): State<Arc<AppState>>,
-    user: AuthUser,
+    user: Require<ComputersManage>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
 ) -> Result<Json<Value>, ApiError> {
     let destroyed = computer_plane(&state)?.destroy(user.id).await?;
@@ -2401,7 +2408,7 @@ pub async fn destroy_computer(
 /// Run code on the caller's persistent computer (created on first use).
 pub async fn computer_exec(
     State(state): State<Arc<AppState>>,
-    user: AuthUser,
+    user: Require<ComputersUse>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Json(body): Json<SandboxBody>,
 ) -> Result<Json<ExecResult>, ApiError> {
