@@ -52,17 +52,18 @@ impl UserSandbox for ConversationSandbox {
             .await
             .map_err(|e| anyhow::anyhow!(e.to_string()))?;
 
-        let result = match &self.backend {
+        let mut result = match &self.backend {
             CodeBackend::Ephemeral(sandbox) => sandbox.run(&request).await?,
             CodeBackend::Computer(orchestrator) => orchestrator.exec(user_id, &request).await?,
         };
 
-        if let Err(err) = self
+        match self
             .workspace
             .persist_outputs(user_id, self.conversation_id, &result.files)
             .await
         {
-            tracing::warn!(error = %err, "failed to persist sandbox output files");
+            Ok(outcome) => result.rejected_files.extend(outcome.rejected),
+            Err(err) => tracing::warn!(error = %err, "failed to persist sandbox output files"),
         }
         Ok(result)
     }

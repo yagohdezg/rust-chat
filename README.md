@@ -267,6 +267,8 @@ See [`.env.example`](.env.example).
 | `S3_REGION`               | `us-east-1`                                          | S3 region                          |
 | `S3_ENDPOINT`             | —                                                    | Custom endpoint (MinIO/R2)         |
 | `S3_PREFIX`               | —                                                    | Optional key prefix in the bucket  |
+| `FILE_OUTPUT_MAX_BYTES`   | `8388608`                                            | Max size of a single sandbox output saved to the library |
+| `FILE_OUTPUT_ALLOWED_TYPES` | (all types)                                        | Comma-separated MIME (`image/png`), wildcard (`image/*`) or extension allow-list for outputs |
 | `SANDBOXD_URL`            | `http://localhost:3081`                              | Standalone `sandboxd` endpoint     |
 | `SANDBOXD_TOKEN`          | —                                                    | Shared bearer token sent to `sandboxd` |
 | `SANDBOX_TOOL_ENABLED`    | `false`                                              | Expose `execute_code` to the agent  |

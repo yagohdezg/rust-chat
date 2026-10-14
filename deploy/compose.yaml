@@ -78,6 +78,10 @@ services:
       S3_REGION: ${S3_REGION:-us-east-1}
       S3_ENDPOINT: ${S3_ENDPOINT:-}
       S3_PREFIX: ${S3_PREFIX:-}
+      # Per-output size cap and optional type allow-list for sandbox outputs
+      # saved to the library. Empty allow-list permits every type.
+      FILE_OUTPUT_MAX_BYTES: ${FILE_OUTPUT_MAX_BYTES:-8388608}
+      FILE_OUTPUT_ALLOWED_TYPES: ${FILE_OUTPUT_ALLOWED_TYPES:-}
       # Credentials for the S3 backend (matched to MinIO below by default).
       AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-rustchat}
       AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-rustchat-secret}

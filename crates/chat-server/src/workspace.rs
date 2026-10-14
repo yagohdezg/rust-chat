@@ -11,21 +11,35 @@
 use std::sync::Arc;
 
 use base64::Engine as _;
-use chat_sandbox::SandboxFile;
+use chat_sandbox::{RejectedFile, SandboxFile};
 use chat_store::{FileRecord, FileStore, Store};
 use uuid::Uuid;
 
 use crate::error::ApiError;
+use crate::file_policy::FilePolicy;
 
 /// Reads attached files out of storage and writes sandbox outputs back in.
 pub struct FileWorkspace {
     files: Arc<dyn FileStore>,
     store: Arc<dyn Store>,
+    policy: FilePolicy,
+}
+
+/// The result of persisting a run's outputs: the library records created, plus
+/// any outputs rejected by the size/type policy.
+#[derive(Debug, Default)]
+pub struct PersistedOutputs {
+    pub saved: Vec<FileRecord>,
+    pub rejected: Vec<RejectedFile>,
 }
 
 impl FileWorkspace {
-    pub fn new(files: Arc<dyn FileStore>, store: Arc<dyn Store>) -> Self {
-        Self { files, store }
+    pub fn new(files: Arc<dyn FileStore>, store: Arc<dyn Store>, policy: FilePolicy) -> Self {
+        Self {
+            files,
+            store,
+            policy,
+        }
     }
 
     /// Load every file attached to `conversation_id` as sandbox inputs. Missing
@@ -124,18 +138,20 @@ impl FileWorkspace {
 
     /// Persist sandbox output files into the user's library and attach them to
     /// the conversation. Outputs whose bytes match an already-attached file are
-    /// skipped, so a re-run that produces identical files is a no-op.
+    /// skipped, so a re-run that produces identical files is a no-op. Outputs
+    /// that fail the size/type policy are returned as rejections rather than
+    /// silently dropped.
     pub async fn persist_outputs(
         &self,
         user_id: Uuid,
         conversation_id: Uuid,
         outputs: &[SandboxFile],
-    ) -> Result<Vec<FileRecord>, ApiError> {
+    ) -> Result<PersistedOutputs, ApiError> {
+        let mut outcome = PersistedOutputs::default();
         if outputs.is_empty() {
-            return Ok(Vec::new());
+            return Ok(outcome);
         }
         let attached = self.store.list_files(conversation_id).await?;
-        let mut saved = Vec::new();
 
         for output in outputs {
             let bytes = match base64::engine::general_purpose::STANDARD.decode(&output.content_b64)
@@ -143,10 +159,25 @@ impl FileWorkspace {
                 Ok(bytes) => bytes,
                 Err(err) => {
                     tracing::warn!(error = %err, name = %output.name, "invalid output encoding");
+                    outcome.rejected.push(RejectedFile {
+                        name: output.name.clone(),
+                        reason: "invalid base64 encoding".into(),
+                    });
                     continue;
                 }
             };
             let filename = sanitize_filename(&output.name);
+            let mime = match self.policy.check(&filename, &bytes) {
+                Ok(mime) => mime,
+                Err(reason) => {
+                    tracing::warn!(name = %filename, reason, "rejected sandbox output");
+                    outcome.rejected.push(RejectedFile {
+                        name: filename,
+                        reason,
+                    });
+                    continue;
+                }
+            };
 
             if let Some(existing) = attached.iter().find(|f| f.filename == filename) {
                 match self.files.get(&existing.storage_path).await {
@@ -164,7 +195,7 @@ impl FileWorkspace {
                     user_id,
                     None,
                     &filename,
-                    mime_for(&filename).as_deref(),
+                    Some(&mime),
                     bytes.len() as i64,
                     &location,
                 )
@@ -172,9 +203,9 @@ impl FileWorkspace {
             self.store
                 .attach_file(record.id, conversation_id, user_id)
                 .await?;
-            saved.push(record);
+            outcome.saved.push(record);
         }
-        Ok(saved)
+        Ok(outcome)
     }
 
     /// Remove a library file's blob. Used when deleting a file; the row itself
@@ -230,23 +261,4 @@ pub(crate) fn sanitize_filename(name: &str) -> String {
     } else {
         cleaned
     }
-}
-
-/// Best-effort MIME guess from a file extension (used for downloads).
-fn mime_for(name: &str) -> Option<String> {
-    let ext = name.rsplit('.').next()?.to_ascii_lowercase();
-    let mime = match ext.as_str() {
-        "txt" | "md" | "log" => "text/plain",
-        "csv" => "text/csv",
-        "json" => "application/json",
-        "html" | "htm" => "text/html",
-        "png" => "image/png",
-        "jpg" | "jpeg" => "image/jpeg",
-        "gif" => "image/gif",
-        "svg" => "image/svg+xml",
-        "pdf" => "application/pdf",
-        "zip" => "application/zip",
-        _ => return None,
-    };
-    Some(mime.to_string())
 }

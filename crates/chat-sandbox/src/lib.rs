@@ -107,6 +107,14 @@ pub struct SandboxFile {
     pub content_b64: String,
 }
 
+/// An output file that was collected from a sandbox but not handed back, with
+/// the reason it was dropped (oversized, unsafe path, disallowed type, ...).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RejectedFile {
+    pub name: String,
+    pub reason: String,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ExecRequest {
     /// Language identifier, e.g. `python`, `javascript`, `bash`, `go`, `rust`.
@@ -134,6 +142,10 @@ pub struct ExecResult {
     /// [`OUTPUT_DIR`]). Base64-encoded, ready to persist or hand back.
     #[serde(default)]
     pub files: Vec<SandboxFile>,
+    /// Output files that were found but not handed back, with the reason. Lets a
+    /// caller surface a rejected output instead of silently losing it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rejected_files: Vec<RejectedFile>,
 }
 
 /// A raw command to run interactively inside a sandbox (argv + environment).

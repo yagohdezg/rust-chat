@@ -13,8 +13,8 @@ use tokio_tungstenite::tungstenite::Message;
 
 use crate::{
     box_names, program, BoxSummary, CommandSpec, ExecRequest, ExecResult, IsolationLevel,
-    OutputChannel, OutputChunk, SandboxBackend, SandboxError, SandboxFile, SandboxSession,
-    SandboxSpec, OUTPUT_DIR,
+    OutputChannel, OutputChunk, RejectedFile, SandboxBackend, SandboxError, SandboxFile,
+    SandboxSession, SandboxSpec, OUTPUT_DIR,
 };
 
 /// Maximum bytes captured per stream (stdout / stderr) before clipping.
@@ -300,7 +300,12 @@ impl BoxliteBackend {
     /// Download a path from the box as a tar archive and decode its regular
     /// files. A missing path (`404`) yields an empty list rather than an error,
     /// so collection is safe when the code produced nothing.
-    async fn download_path(&self, prefix: &str, box_id: &str, path: &str) -> Vec<SandboxFile> {
+    async fn download_path(
+        &self,
+        prefix: &str,
+        box_id: &str,
+        path: &str,
+    ) -> (Vec<SandboxFile>, Vec<RejectedFile>) {
         let url = self.endpoint(prefix, &format!("boxes/{box_id}/files"));
         let resp = match self
             .auth(self.http.get(url))
@@ -311,59 +316,67 @@ impl BoxliteBackend {
             Ok(resp) => resp,
             Err(e) => {
                 tracing::warn!(error = %e, path, "output download request failed");
-                return Vec::new();
+                return (Vec::new(), Vec::new());
             }
         };
         if resp.status() == reqwest::StatusCode::NOT_FOUND {
-            return Vec::new();
+            return (Vec::new(), Vec::new());
         }
         if !resp.status().is_success() {
             tracing::warn!(status = %resp.status(), path, "output download failed");
-            return Vec::new();
+            return (Vec::new(), Vec::new());
         }
         let bytes = match resp.bytes().await {
             Ok(bytes) => bytes,
             Err(e) => {
                 tracing::warn!(error = %e, path, "failed to read output archive");
-                return Vec::new();
+                return (Vec::new(), Vec::new());
             }
         };
         match decode_tar(&bytes) {
             Ok(files) => files,
             Err(e) => {
                 tracing::warn!(error = %e, path, "failed to decode output archive");
-                Vec::new()
+                (Vec::new(), Vec::new())
             }
         }
     }
 
     /// Collect output files produced by a run: the conventional output
     /// directory plus any explicit [`ExecRequest::outputs`] paths. Best-effort;
-    /// collection failures never fail the run.
+    /// collection failures never fail the run. Files dropped by the per-run caps
+    /// are returned as [`RejectedFile`]s so the caller can report them.
     async fn collect_outputs(
         &self,
         prefix: &str,
         box_id: &str,
         request: &ExecRequest,
-    ) -> Vec<SandboxFile> {
+    ) -> (Vec<SandboxFile>, Vec<RejectedFile>) {
         let mut paths = vec![format!("{OUTPUT_DIR}/.")];
         paths.extend(request.outputs.iter().cloned());
 
         let mut files: Vec<SandboxFile> = Vec::new();
+        let mut rejected: Vec<RejectedFile> = Vec::new();
         for path in paths {
             if files.len() >= MAX_OUTPUT_FILES {
                 break;
             }
-            for file in self.download_path(prefix, box_id, &path).await {
+            let (downloaded, path_rejected) = self.download_path(prefix, box_id, &path).await;
+            rejected.extend(path_rejected);
+            for file in downloaded {
                 if files.len() >= MAX_OUTPUT_FILES {
-                    break;
+                    rejected.push(RejectedFile {
+                        name: file.name,
+                        reason: format!("exceeds the {MAX_OUTPUT_FILES}-file sandbox limit"),
+                    });
+                    continue;
                 }
                 if !files.iter().any(|existing| existing.name == file.name) {
                     files.push(file);
                 }
             }
         }
-        files
+        (files, rejected)
     }
 
     /// Remove the output directory after its contents have been collected, so a
@@ -521,6 +534,7 @@ impl BoxliteBackend {
             timed_out: false,
             truncated,
             files: Vec::new(),
+            rejected_files: Vec::new(),
         })
     }
 
@@ -545,7 +559,9 @@ impl BoxliteBackend {
             .await?;
         *exec_id_cell.lock().unwrap() = Some(exec_id.clone());
         let mut result = self.stream_exec(prefix, box_id, &exec_id).await?;
-        result.files = self.collect_outputs(prefix, box_id, request).await;
+        let (files, rejected) = self.collect_outputs(prefix, box_id, request).await;
+        result.files = files;
+        result.rejected_files = rejected;
         Ok(result)
     }
 
@@ -637,6 +653,7 @@ impl BoxliteBackend {
                     timed_out: true,
                     truncated: false,
                     files: Vec::new(),
+                    rejected_files: Vec::new(),
                 });
             }
         };
@@ -717,6 +734,7 @@ impl SandboxBackend for BoxliteBackend {
                     timed_out: true,
                     truncated: false,
                     files: Vec::new(),
+                    rejected_files: Vec::new(),
                 })
             }
         };
@@ -1013,8 +1031,8 @@ fn append_entry<W: std::io::Write>(
 /// Entry names are normalized to a workspace-relative path (stripping the
 /// archive's leading `./`, the absolute root and the output directory prefix)
 /// and rejected if they try to escape the workspace. Oversized files are
-/// skipped.
-fn decode_tar(bytes: &[u8]) -> Result<Vec<SandboxFile>, SandboxError> {
+/// reported rather than silently dropped.
+fn decode_tar(bytes: &[u8]) -> Result<(Vec<SandboxFile>, Vec<RejectedFile>), SandboxError> {
     use base64::Engine as _;
 
     let mut archive = tar::Archive::new(std::io::Cursor::new(bytes));
@@ -1023,13 +1041,10 @@ fn decode_tar(bytes: &[u8]) -> Result<Vec<SandboxFile>, SandboxError> {
         .map_err(|e| SandboxError::Other(format!("tar read error: {e}")))?;
 
     let mut files = Vec::new();
+    let mut rejected = Vec::new();
     for entry in entries {
         let mut entry = entry.map_err(|e| SandboxError::Other(format!("tar entry error: {e}")))?;
         if !entry.header().entry_type().is_file() {
-            continue;
-        }
-        if entry.size() > MAX_OUTPUT_FILE_BYTES {
-            tracing::warn!(size = entry.size(), "skipping oversized output file");
             continue;
         }
         let path = entry
@@ -1038,8 +1053,19 @@ fn decode_tar(bytes: &[u8]) -> Result<Vec<SandboxFile>, SandboxError> {
             .to_string_lossy()
             .into_owned();
         let Some(name) = normalize_entry_name(&path) else {
+            rejected.push(RejectedFile {
+                name: path,
+                reason: "unsafe output path".into(),
+            });
             continue;
         };
+        if entry.size() > MAX_OUTPUT_FILE_BYTES {
+            rejected.push(RejectedFile {
+                name,
+                reason: format!("exceeds the {MAX_OUTPUT_FILE_BYTES}-byte sandbox limit"),
+            });
+            continue;
+        }
         let mut data = Vec::new();
         std::io::Read::read_to_end(&mut entry, &mut data)
             .map_err(|e| SandboxError::Other(format!("tar entry read error: {e}")))?;
@@ -1048,7 +1074,7 @@ fn decode_tar(bytes: &[u8]) -> Result<Vec<SandboxFile>, SandboxError> {
             content_b64: base64::engine::general_purpose::STANDARD.encode(&data),
         });
     }
-    Ok(files)
+    Ok((files, rejected))
 }
 
 /// Normalize a tar entry name into a safe workspace-relative path.
