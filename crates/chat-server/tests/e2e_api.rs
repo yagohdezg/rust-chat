@@ -141,6 +141,82 @@ async fn conversation_rename_archive_and_updated_at() {
 }
 
 #[tokio::test]
+async fn message_pagination_is_stable() {
+    let env = TestEnvBuilder::new().start().await.unwrap();
+    let session = Session::register(&env.base_url, "a@example.com", "password123")
+        .await
+        .unwrap();
+    let provider_id = session
+        .create_provider("fake", &env.provider_url)
+        .await
+        .unwrap();
+    let id = session.create_conversation("paged").await.unwrap();
+
+    for text in ["one", "two", "three"] {
+        session
+            .chat_sse(id, text, None, Some(provider_id))
+            .await
+            .unwrap();
+    }
+
+    let all = session
+        .get_expect(&format!("/api/conversations/{id}/messages?limit=200"))
+        .await
+        .unwrap();
+    let all = all.as_array().unwrap();
+    assert_eq!(all.len(), 6, "three turns, two messages each");
+    assert_eq!(all[0]["role"], json!("user"));
+    assert_eq!(all[0]["content"], json!("one"));
+
+    // Walk backwards two at a time and rebuild the conversation from the pages.
+    let mut pages: Vec<Vec<serde_json::Value>> = Vec::new();
+    let mut cursor: Option<String> = None;
+    loop {
+        let path = match &cursor {
+            Some(cursor) => format!("/api/conversations/{id}/messages?limit=2&before={cursor}"),
+            None => format!("/api/conversations/{id}/messages?limit=2"),
+        };
+        let page = session.get_expect(&path).await.unwrap();
+        let page = page.as_array().unwrap().clone();
+        if page.is_empty() {
+            break;
+        }
+        assert!(page.len() <= 2, "page respects the requested size");
+        cursor = Some(page[0]["id"].as_str().unwrap().to_string());
+        pages.push(page);
+    }
+    assert_eq!(pages.len(), 3, "six messages in pages of two");
+
+    let rebuilt: Vec<serde_json::Value> = pages.into_iter().rev().flatten().collect();
+    assert_eq!(
+        serde_json::Value::Array(rebuilt),
+        serde_json::Value::Array(all.to_vec()),
+        "walking the cursor reconstructs the conversation exactly"
+    );
+
+    // `after` returns the page immediately following a cursor.
+    let after = session
+        .get_expect(&format!(
+            "/api/conversations/{id}/messages?limit=2&after={}",
+            all[1]["id"].as_str().unwrap()
+        ))
+        .await
+        .unwrap();
+    assert_eq!(after.as_array().unwrap()[0]["content"], json!("two"));
+
+    // `before` and `after` are mutually exclusive.
+    let resp = session
+        .get(&format!(
+            "/api/conversations/{id}/messages?before={}&after={}",
+            all[0]["id"].as_str().unwrap(),
+            all[1]["id"].as_str().unwrap()
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn provider_lifecycle() {
     let env = TestEnvBuilder::new().start().await.unwrap();
     let session = Session::register(&env.base_url, "a@example.com", "password123")

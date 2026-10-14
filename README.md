@@ -336,7 +336,7 @@ size per node is exposed to admins at `GET /api/admin/computers`.
 | `GET`  | `/api/conversations`                | JWT  | List the caller's conversations      |
 | `POST` | `/api/conversations`                | JWT  | Create a conversation                |
 | `DELETE`| `/api/conversations/{id}`          | JWT  | Delete a conversation (+ its files)  |
-| `GET`  | `/api/conversations/{id}/messages`  | JWT  | List messages in a conversation      |
+| `GET`  | `/api/conversations/{id}/messages`  | JWT  | Page messages (`limit`, `before`, `after`) |
 | `GET`  | `/api/conversations/{id}/files`     | JWT  | List files attached to a conversation |
 | `POST` | `/api/conversations/{id}/files`     | JWT  | Attach library files (`{file_ids}`)  |
 | `DELETE` | `/api/conversations/{id}/files/{file_id}` | JWT | Detach a file from a conversation |
@@ -352,6 +352,13 @@ size per node is exposed to admins at `GET /api/admin/computers`.
 | `POST` | `/api/computers/me/pause`           | JWT  | Pause the caller's computer          |
 | `POST` | `/api/computers/me/resume`          | JWT  | Resume the caller's computer         |
 | `POST` | `/api/computers/exec`               | JWT  | Run code on the caller's computer (`conversation_id` injects its files) |
+
+`GET /api/conversations/{id}/messages` is cursor-paginated. It returns up to
+`limit` messages (default 50, max 200) in oldest-first order, ordered by
+`(created_at, id)` so pages are stable even when timestamps collide. Pass
+`before=<message_id>` to fetch the page of messages older than one you already
+have, or `after=<message_id>` for the page newer than it; with neither, the most
+recent page is returned. The two cursors are mutually exclusive.
 
 `/api/chat` streams `text/event-stream` events: `meta` (the assistant
 `message_id` and a `resume_path`), `delta` (incremental text, with the byte

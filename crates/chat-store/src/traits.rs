@@ -273,7 +273,20 @@ pub trait Store: Send + Sync {
     /// Fetch a single message by id (used to authorize and resume streams).
     async fn get_message(&self, id: Uuid) -> Result<Option<Message>>;
 
-    async fn list_messages(&self, conversation_id: Uuid) -> Result<Vec<Message>>;
+    /// A page of a conversation's messages, oldest first.
+    ///
+    /// `before` and `after` are message-id cursors: `before` returns the page of
+    /// messages older than that message (scrolling back), `after` the page newer
+    /// than it. With neither, the most recent `limit` messages are returned.
+    /// Ordering is by `(created_at, id)`, so pages never overlap or skip even
+    /// when two messages share a timestamp.
+    async fn list_messages(
+        &self,
+        conversation_id: Uuid,
+        before: Option<Uuid>,
+        after: Option<Uuid>,
+        limit: i64,
+    ) -> Result<Vec<Message>>;
 
     // ---- files ---------------------------------------------------------
     async fn create_file(

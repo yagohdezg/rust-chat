@@ -406,8 +406,18 @@ export function bulkCreateProviders(providers: CreateProviderInput[]): Promise<P
 	});
 }
 
-export function listMessages(conversationId: string): Promise<Message[]> {
-	return request<Message[]>(`/api/conversations/${conversationId}/messages`);
+export function listMessages(
+	conversationId: string,
+	opts: { limit?: number; before?: string; after?: string } = {}
+): Promise<Message[]> {
+	const params = new URLSearchParams();
+	if (opts.limit !== undefined) params.set('limit', String(opts.limit));
+	if (opts.before) params.set('before', opts.before);
+	if (opts.after) params.set('after', opts.after);
+	const query = params.toString();
+	return request<Message[]>(
+		`/api/conversations/${conversationId}/messages${query ? `?${query}` : ''}`
+	);
 }
 
 export function runSandbox(input: SandboxRequest): Promise<ExecResult> {
