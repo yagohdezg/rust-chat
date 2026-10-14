@@ -441,15 +441,30 @@ impl Store for PostgresStore {
         .fetch_one(&mut *tx)
         .await?;
 
-        sqlx::query(
-            "insert into messages (id, conversation_id, role, content, reasoning, tool_calls, tool_call_id, status, created_at)
-             select gen_random_uuid(), $1, role, content, reasoning, tool_calls, tool_call_id, status, created_at
-             from messages where conversation_id = $2 order by created_at",
+        let messages = sqlx::query_as::<_, Message>(
+            "select * from messages where conversation_id = $1 order by created_at asc, id asc",
         )
-        .bind(new_id)
         .bind(id)
-        .execute(&mut *tx)
+        .fetch_all(&mut *tx)
         .await?;
+
+        for message in messages {
+            sqlx::query(
+                "insert into messages (id, conversation_id, role, content, reasoning, tool_calls, tool_call_id, status, created_at)
+                 values ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+            )
+            .bind(Uuid::now_v7())
+            .bind(new_id)
+            .bind(&message.role)
+            .bind(&message.content)
+            .bind(&message.reasoning)
+            .bind(&message.tool_calls)
+            .bind(&message.tool_call_id)
+            .bind(&message.status)
+            .bind(message.created_at)
+            .execute(&mut *tx)
+            .await?;
+        }
 
         tx.commit().await?;
         Ok(row)
@@ -847,7 +862,7 @@ impl Store for PostgresStore {
              values ($1, $2, $3, $4, $5, $6, $7, $8)
              returning *",
         )
-        .bind(Uuid::new_v4())
+        .bind(Uuid::now_v7())
         .bind(conversation_id)
         .bind(role)
         .bind(content)
@@ -875,7 +890,7 @@ impl Store for PostgresStore {
             "insert into messages (id, conversation_id, role, content, status, created_at)
              values ($1, $2, 'user', $3, $4, $5)",
         )
-        .bind(Uuid::new_v4())
+        .bind(Uuid::now_v7())
         .bind(conversation_id)
         .bind(user_content)
         .bind(chat_store::types::message_status::COMPLETE)
@@ -897,7 +912,7 @@ impl Store for PostgresStore {
              values ($1, $2, 'assistant', '', $3, $4)
              returning *",
         )
-        .bind(Uuid::new_v4())
+        .bind(Uuid::now_v7())
         .bind(conversation_id)
         .bind(chat_store::types::message_status::STREAMING)
         .bind(Utc::now())
