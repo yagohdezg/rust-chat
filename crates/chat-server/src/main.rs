@@ -2,6 +2,7 @@ mod doctext;
 mod error;
 mod extract;
 mod file_policy;
+mod litellm;
 mod mail;
 mod mcp;
 mod ocr;
@@ -252,6 +253,10 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/api/admin/providers",
             post(routes::admin_bulk_create_providers),
+        )
+        .route(
+            "/api/admin/providers/import",
+            post(routes::admin_import_providers),
         )
         .route("/api/models", get(routes::list_models))
         .route(

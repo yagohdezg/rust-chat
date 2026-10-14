@@ -941,7 +941,7 @@ impl Store for SqliteStore {
         base_url: &str,
         models: &[String],
     ) -> Result<Provider> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let existing: Option<(Uuid,)> = sqlx::query_as(
             "select id from providers
              where user_id is null and name = ?

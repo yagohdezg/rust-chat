@@ -229,6 +229,24 @@
 		}
 	}
 
+	async function importLitellm() {
+		const yaml = prompt('Paste a LiteLLM config.yaml (its model_list is imported):');
+		if (yaml === null || !yaml.trim()) return;
+		busy = true;
+		error = null;
+		notice = null;
+		try {
+			const imported = await api.importLitellm({ config_yaml: yaml });
+			const ids = new Set(imported.map((provider) => provider.id));
+			providers = [...providers.filter((provider) => !ids.has(provider.id)), ...imported];
+			notice = `Imported ${imported.length} provider(s) from LiteLLM.`;
+		} catch (err) {
+			error = message(err);
+		} finally {
+			busy = false;
+		}
+	}
+
 	async function patchProvider(id: string, input: api.UpdateProviderInput) {
 		error = null;
 		notice = null;
@@ -512,6 +530,11 @@
 						{busy ? 'Importing…' : 'Import'}
 					</button>
 				</form>
+
+				<h2>LiteLLM import</h2>
+				<button class="ghost" onclick={() => void importLitellm()} disabled={busy}>
+					{busy ? 'Importing…' : 'Import LiteLLM'}
+				</button>
 			</div>
 		</div>
 	{:else if tab === 'audit'}

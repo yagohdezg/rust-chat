@@ -526,6 +526,18 @@ export function bulkCreateProviders(providers: CreateProviderInput[]): Promise<P
 	});
 }
 
+/** Import instance-wide (global) providers from a LiteLLM config or proxy. */
+export function importLitellm(input: {
+	config_yaml?: string;
+	proxy_url?: string;
+	api_key?: string;
+}): Promise<Provider[]> {
+	return request<Provider[]>('/api/admin/providers/import', {
+		method: 'POST',
+		body: JSON.stringify(input)
+	});
+}
+
 export function listMessages(
 	conversationId: string,
 	opts: { limit?: number; before?: string; after?: string } = {}

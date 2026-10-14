@@ -461,6 +461,18 @@ provider's own usage report, which is requested with
 first, with its totals and last use. Both are visible in the admin console's
 Usage tab.
 
+An admin can import providers from a LiteLLM proxy with
+`POST /api/admin/providers/import`. The body is either
+`{ "config_yaml": "<text>" }`, importing the `model_list` of a LiteLLM
+`config.yaml`, or `{ "proxy_url": "<url>", "api_key": "<optional>" }`, importing
+a running proxy's `/model/info`. Entries are grouped by upstream kind (read from
+the `model` routing prefix: `openai`, `anthropic`, or `custom`) and `api_base`;
+each group becomes one instance-wide provider named `litellm-<kind>-<host>`,
+carrying the group's model names as its catalog and the group's shared
+`litellm_params.api_key` (encrypted at rest) when every entry carries the same
+one. Re-importing the same config refreshes the matching provider rather than
+creating a duplicate.
+
 `POST /api/files` takes JSON: `{ filename, content_b64, conversation_id? }`.
 Uploads are written under `FILE_STORAGE_DIR` into the caller's personal
 library; when `conversation_id` is set the file is also attached to that

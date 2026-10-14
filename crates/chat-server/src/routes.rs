@@ -1846,6 +1846,74 @@ pub async fn admin_bulk_create_providers(
     Ok(Json(created))
 }
 
+#[derive(Deserialize)]
+pub struct ImportProvidersBody {
+    /// A LiteLLM `config.yaml` whose `model_list` is imported.
+    pub config_yaml: Option<String>,
+    /// A running LiteLLM proxy whose `/model/info` is imported.
+    pub proxy_url: Option<String>,
+    /// Bearer key for the `/model/info` request.
+    pub api_key: Option<String>,
+}
+
+/// `POST /api/admin/providers/import` — create or refresh instance-wide
+/// (global) providers from a LiteLLM `config.yaml` (`config_yaml`) or a running
+/// proxy's `/model/info` (`proxy_url`). Admin only.
+pub async fn admin_import_providers(
+    State(state): State<Arc<AppState>>,
+    _admin: Require<AdminProvidersManage>,
+    Json(body): Json<ImportProvidersBody>,
+) -> Result<Json<Vec<ProviderView>>, ApiError> {
+    let imported = match (body.config_yaml.as_deref(), body.proxy_url.as_deref()) {
+        (Some(_), Some(_)) => {
+            return Err(ChatError::BadRequest(
+                "provide either config_yaml or proxy_url, not both".into(),
+            )
+            .into())
+        }
+        (Some(yaml), None) => crate::litellm::parse_model_list(yaml)?,
+        (None, Some(url)) => {
+            let key = body
+                .api_key
+                .as_deref()
+                .map(str::trim)
+                .filter(|key| !key.is_empty());
+            crate::litellm::fetch_model_info(url, key).await?
+        }
+        (None, None) => {
+            return Err(ChatError::BadRequest("config_yaml or proxy_url is required".into()).into())
+        }
+    };
+
+    let mut views = Vec::with_capacity(imported.len());
+    for entry in imported {
+        let mut provider = state
+            .store
+            .upsert_global_provider(&entry.name, &entry.kind, &entry.base_url, &entry.models)
+            .await?;
+        if let Some(key) = entry.api_key.as_deref().filter(|key| !key.is_empty()) {
+            provider = state
+                .store
+                .update_provider(
+                    provider.id,
+                    &ProviderDraft {
+                        owner_id: None,
+                        name: provider.name.clone(),
+                        kind: provider.kind.clone(),
+                        base_url: provider.base_url.clone(),
+                        api_key: Some(key.to_string()),
+                        vision: provider.vision,
+                        allowed_models: provider.allowed_models.0.clone(),
+                    },
+                )
+                .await?;
+        }
+        let has_key = provider.api_key.is_some();
+        views.push(provider_view(provider, has_key));
+    }
+    Ok(Json(views))
+}
+
 pub async fn delete_provider(
     State(state): State<Arc<AppState>>,
     user: Require<ProvidersManage>,

@@ -1428,3 +1428,46 @@ async fn token_usage_is_reported_runs_on_postgres() {
     assert_eq!(rows[0]["total_tokens"], json!(15));
     assert!(rows[0]["last_used_at"].is_string());
 }
+
+#[tokio::test]
+async fn litellm_import_is_idempotent() {
+    let env = TestEnvBuilder::new().start().await.unwrap();
+    let admin = Session::register(&env.base_url, "admin@example.com", "correct-horse-battery")
+        .await
+        .unwrap();
+
+    let yaml = format!(
+        "model_list:\n  - model_name: fake-model\n    litellm_params:\n      model: openai/fake-model\n      api_key: sk-fake\n      api_base: {base}\n  - model_name: other-model\n    litellm_params:\n      model: openai/other-model\n      api_key: sk-fake\n      api_base: {base}\n",
+        base = env.provider_url
+    );
+
+    let imported = admin
+        .post_expect("/api/admin/providers/import", &json!({"config_yaml": yaml}))
+        .await
+        .unwrap();
+    let imported = imported.as_array().unwrap();
+    assert_eq!(imported.len(), 1);
+    assert_eq!(imported[0]["name"], json!("litellm-openai-127.0.0.1"));
+    assert_eq!(imported[0]["kind"], json!("openai"));
+    assert_eq!(imported[0]["has_key"], json!(true));
+    let provider_id = imported[0]["id"].as_str().unwrap();
+
+    let models = admin
+        .get_expect(&format!("/api/providers/{provider_id}/models"))
+        .await
+        .unwrap();
+    assert_eq!(models, json!([{"id": "fake-model"}, {"id": "other-model"}]));
+
+    admin
+        .post_expect("/api/admin/providers/import", &json!({"config_yaml": yaml}))
+        .await
+        .unwrap();
+
+    let providers = admin.get_expect("/api/providers").await.unwrap();
+    assert_eq!(providers.as_array().unwrap().len(), 1);
+    let models = admin
+        .get_expect(&format!("/api/providers/{provider_id}/models"))
+        .await
+        .unwrap();
+    assert_eq!(models.as_array().unwrap().len(), 2);
+}
