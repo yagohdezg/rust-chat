@@ -89,87 +89,12 @@ fn tool_calls_json(calls: &[PartialToolCall]) -> Value {
     )
 }
 
-/// Run the agent loop until the model stops requesting tools or the iteration
-/// budget is exhausted. Returns the full message list including tool results.
-pub async fn run_agent(
-    provider: &dyn LlmProvider,
-    tools: &ToolRegistry,
-    config: AgentConfig,
-    mut messages: Vec<ChatMessage>,
-) -> anyhow::Result<Vec<ChatMessage>> {
-    if let Some(system) = &config.system {
-        if messages.first().map(|m| m.role.as_str()) != Some("system") {
-            messages.insert(0, ChatMessage::system(system.clone()));
-        }
-    }
-
-    let tool_defs = if tools.is_empty() {
-        None
-    } else {
-        Some(tools.definitions())
-    };
-
-    for _ in 0..config.max_iterations {
-        let request = ChatRequest {
-            model: config.model.clone(),
-            messages: messages.clone(),
-            temperature: config.temperature,
-            max_tokens: None,
-            tools: tool_defs.clone(),
-        };
-
-        let mut stream = provider.stream(request).await?;
-        let mut content = String::new();
-        let mut partial: Vec<PartialToolCall> = Vec::new();
-
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk?;
-            if !chunk.delta.is_empty() {
-                content.push_str(&chunk.delta);
-            }
-            if let Some(tc) = &chunk.tool_calls {
-                accumulate(&mut partial, tc);
-            }
-            if chunk.done {
-                break;
-            }
-        }
-
-        if partial.is_empty() {
-            messages.push(ChatMessage::assistant(content));
-            return Ok(messages);
-        }
-
-        messages.push(ChatMessage {
-            role: "assistant".into(),
-            content: content.clone(),
-            tool_calls: Some(tool_calls_json(&partial)),
-            ..Default::default()
-        });
-
-        for call in &partial {
-            let result = match tools.get(&call.name) {
-                Some(tool) => {
-                    let args: Value =
-                        serde_json::from_str(&call.arguments).unwrap_or_else(|_| json!({}));
-                    match tool.call(args).await {
-                        Ok(output) => output,
-                        Err(err) => format!("tool `{}` failed: {err}", call.name),
-                    }
-                }
-                None => format!("unknown tool: {}", call.name),
-            };
-            messages.push(ChatMessage::tool(&call.id, result));
-        }
-    }
-
-    messages.push(ChatMessage::assistant(
-        "[agent stopped: maximum tool iterations reached]",
-    ));
-    Ok(messages)
-}
-
-/// Streaming variant of [`run_agent`].
+/// Run the agent loop, emitting [`AgentEvent`]s as it progresses.
+///
+/// Emits [`AgentEvent`]s as the loop progresses so the caller can forward
+/// `delta`, `tool_call` and `tool_result` events to a client and persist tool
+/// turns. Each iteration is buffered so a turn that ends up requesting tools is
+/// never mistaken for the final answer.
 ///
 /// Emits [`AgentEvent`]s as the loop progresses so the caller can forward
 /// `delta`, `tool_call` and `tool_result` events to a client and persist tool

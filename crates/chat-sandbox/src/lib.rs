@@ -60,8 +60,6 @@ pub struct BoxSummary {
 /// Strength of the isolation boundary around a sandboxed run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum IsolationLevel {
-    /// Shares the host kernel (containers, namespaces, seccomp).
-    SharedKernel,
     /// A user-space kernel intercepts syscalls (e.g. gVisor).
     UserSpaceKernel,
     /// A dedicated kernel in a virtual machine (Firecracker/BoxLite).
@@ -198,8 +196,6 @@ pub enum SandboxError {
     UnsupportedLanguage(String),
     #[error("backend unavailable: {0}")]
     Unavailable(String),
-    #[error("execution timed out after {0}s")]
-    Timeout(u64),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
     #[error("transport error: {0}")]

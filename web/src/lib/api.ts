@@ -435,10 +435,6 @@ export function setProviderCredential(providerId: string, apiKey: string): Promi
 	});
 }
 
-export function listModels(): Promise<ModelInfo[]> {
-	return request<ModelInfo[]>('/api/models');
-}
-
 /** The cached model catalog for one provider (own or global). */
 export function listProviderModels(providerId: string): Promise<ModelInfo[]> {
 	return request<ModelInfo[]>(`/api/providers/${providerId}/models`);
@@ -519,13 +515,6 @@ export function destroyComputer(): Promise<{ destroyed: boolean }> {
 
 export function execComputer(input: ComputerExecInput): Promise<ExecResult> {
 	return request<ExecResult>('/api/computers/exec', {
-		method: 'POST',
-		body: JSON.stringify(input)
-	});
-}
-
-export function uploadFile(input: UploadInput): Promise<UploadResponse> {
-	return request<UploadResponse>('/api/files', {
 		method: 'POST',
 		body: JSON.stringify(input)
 	});

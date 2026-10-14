@@ -14,13 +14,10 @@ pub mod message_status {
 
 /// Lifecycle values for [`crate::Computer::state`].
 ///
-/// A computer starts out `provisioning` while the box is being placed, then
-/// becomes `running`. `paused` keeps the placement but stops routing new work
-/// until it is resumed; `destroyed` is terminal (the box is gone and the slot
-/// is free).
+/// A computer is `running` once its box is placed. `paused` keeps the placement
+/// but stops routing new work until it is resumed; `destroyed` is terminal (the
+/// box is gone and the slot is free).
 pub mod computer_state {
-    /// The box is being created on its node.
-    pub const PROVISIONING: &str = "provisioning";
     /// The computer is live and serving executions.
     pub const RUNNING: &str = "running";
     /// The computer is idle but its placement is retained.

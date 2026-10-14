@@ -16,7 +16,10 @@ use chat_core::{ChatError, Result};
 pub mod breached;
 pub mod permissions;
 pub use breached::is_breached;
-pub use permissions::{permissions_for_role, role_allows, Action, Permission, Scope};
+pub use permissions::{
+    is_known_role, permissions_for_role, role_allows, Action, Permission, Scope, ROLE_ADMIN,
+    ROLE_USER,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Claims {

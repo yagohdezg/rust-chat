@@ -3,7 +3,7 @@
 //!
 //! Each request is turned into an OCI bundle in a temporary directory and run
 //! with gVisor's `runsc`. `runsc` does not pull images: the deployment unpacks
-//! each configured image into a rootfs directory under [`GvisorBackend::image_root`]
+//! each configured image into a rootfs directory under its configured image root
 //! (`<image_root>/<image>`). The workspace is bind-mounted at `/app`, so the
 //! language/program mapping and the `output/` convention match the BoxLite
 //! backend. Everything is best-effort: a missing `runsc` or rootfs reports
@@ -56,10 +56,6 @@ impl GvisorBackend {
 
     pub fn spec(&self) -> &SandboxSpec {
         &self.spec
-    }
-
-    pub fn image_root(&self) -> &Path {
-        &self.image_root
     }
 
     fn rootfs(&self, image: &str) -> Result<PathBuf, SandboxError> {

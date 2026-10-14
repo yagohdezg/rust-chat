@@ -19,8 +19,8 @@ use uuid::Uuid;
 use chat_agents::{run_agent_stream, AgentConfig, AgentEvent, ToolRegistry};
 use chat_auth::{
     generate_api_key, generate_auth_token, generate_refresh_token, hash_api_key, hash_auth_token,
-    hash_password, hash_refresh_token, issue_token, permissions_for_role, validate_password,
-    verify_password, Action, Scope, API_KEY_PREFIX,
+    hash_password, hash_refresh_token, is_known_role, issue_token, permissions_for_role,
+    validate_password, verify_password, Action, Scope, API_KEY_PREFIX, ROLE_USER,
 };
 use chat_computers::ComputerOrchestrator;
 use chat_core::ChatError;
@@ -727,7 +727,7 @@ pub async fn admin_update_user(
         .ok_or(ChatError::NotFound)?;
 
     // Don't let an admin lock everyone out by demoting/disabling the last one.
-    let demoting = body.role.as_deref() == Some("user");
+    let demoting = body.role.as_deref() == Some(ROLE_USER);
     let disabling = body.disabled == Some(true);
     if target.role == "admin"
         && !target.disabled
@@ -738,7 +738,7 @@ pub async fn admin_update_user(
     }
 
     if let Some(role) = body.role.as_deref() {
-        if role != "user" && role != "admin" {
+        if !is_known_role(role) {
             return Err(ChatError::BadRequest("role must be `user` or `admin`".into()).into());
         }
         state.store.set_user_role(user_id, role).await?;
@@ -827,8 +827,8 @@ pub async fn admin_create_user(
         return Err(ChatError::BadRequest("email and password are required".into()).into());
     }
     validate_password(&body.password)?;
-    let role = body.role.as_deref().unwrap_or("user");
-    if role != "user" && role != "admin" {
+    let role = body.role.as_deref().unwrap_or(ROLE_USER);
+    if !is_known_role(role) {
         return Err(ChatError::BadRequest("role must be `user` or `admin`".into()).into());
     }
     if state.store.find_user_by_email(email).await?.is_some() {

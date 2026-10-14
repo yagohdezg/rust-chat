@@ -1,3 +1,5 @@
+//! Shared helpers for the end-to-end suites. Each test binary links this module
+//! whole but uses a subset of it, so unused items are expected here.
 #![allow(dead_code)]
 #![allow(unused_imports)]
 

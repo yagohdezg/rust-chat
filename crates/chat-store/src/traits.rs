@@ -189,9 +189,6 @@ pub trait Store: Send + Sync {
     /// List the calling user's MCP servers, oldest first.
     async fn list_mcp_servers(&self, user_id: Uuid) -> Result<Vec<McpServer>>;
 
-    /// Fetch an MCP server owned by `user_id` (ownership-checked).
-    async fn get_mcp_server(&self, id: Uuid, user_id: Uuid) -> Result<Option<McpServer>>;
-
     /// Delete an MCP server owned by `user_id`.
     async fn delete_mcp_server(&self, id: Uuid, user_id: Uuid) -> Result<()>;
 
@@ -280,18 +277,6 @@ pub trait Store: Send + Sync {
         content: Option<&str>,
         tool_calls: Option<serde_json::Value>,
         tool_call_id: Option<&str>,
-    ) -> Result<Message>;
-
-    /// Like [`Store::insert_message`] but with an explicit status, used to
-    /// create an assistant placeholder before streaming.
-    async fn insert_message_with_status(
-        &self,
-        conversation_id: Uuid,
-        role: &str,
-        content: Option<&str>,
-        tool_calls: Option<serde_json::Value>,
-        tool_call_id: Option<&str>,
-        status: &str,
     ) -> Result<Message>;
 
     /// Atomically start a chat turn: append the user's message, read the

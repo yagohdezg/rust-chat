@@ -741,17 +741,6 @@ impl Store for PostgresStore {
         Ok(rows)
     }
 
-    async fn get_mcp_server(&self, id: Uuid, user_id: Uuid) -> Result<Option<McpServer>> {
-        let row = sqlx::query_as::<_, McpServer>(
-            "select * from mcp_servers where id = $1 and user_id = $2",
-        )
-        .bind(id)
-        .bind(user_id)
-        .fetch_optional(&self.pool)
-        .await?;
-        Ok(row)
-    }
-
     async fn delete_mcp_server(&self, id: Uuid, user_id: Uuid) -> Result<()> {
         sqlx::query("delete from mcp_servers where id = $1 and user_id = $2")
             .bind(id)
@@ -1027,26 +1016,6 @@ impl Store for PostgresStore {
         tool_calls: Option<serde_json::Value>,
         tool_call_id: Option<&str>,
     ) -> Result<Message> {
-        self.insert_message_with_status(
-            conversation_id,
-            role,
-            content,
-            tool_calls,
-            tool_call_id,
-            chat_store::types::message_status::COMPLETE,
-        )
-        .await
-    }
-
-    async fn insert_message_with_status(
-        &self,
-        conversation_id: Uuid,
-        role: &str,
-        content: Option<&str>,
-        tool_calls: Option<serde_json::Value>,
-        tool_call_id: Option<&str>,
-        status: &str,
-    ) -> Result<Message> {
         let row = sqlx::query_as::<_, Message>(
             "insert into messages (id, conversation_id, role, content, tool_calls, tool_call_id, status, created_at)
              values ($1, $2, $3, $4, $5, $6, $7, $8)
@@ -1058,7 +1027,7 @@ impl Store for PostgresStore {
         .bind(content)
         .bind(tool_calls)
         .bind(tool_call_id)
-        .bind(status)
+        .bind(chat_store::types::message_status::COMPLETE)
         .bind(Utc::now())
         .fetch_one(&self.pool)
         .await?;

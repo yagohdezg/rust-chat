@@ -62,12 +62,6 @@ impl ChatMessage {
             ..Default::default()
         }
     }
-    /// Attach images to this message, to be forwarded to a vision-capable
-    /// model alongside the text.
-    pub fn with_images(mut self, images: Vec<ImagePart>) -> Self {
-        self.images = images;
-        self
-    }
     pub fn tool(tool_call_id: impl Into<String>, content: impl Into<String>) -> Self {
         Self {
             role: "tool".into(),
