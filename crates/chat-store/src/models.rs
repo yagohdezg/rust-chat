@@ -51,6 +51,8 @@ pub struct Conversation {
     pub title: String,
     /// Pinned chats sort ahead of the rest in listings.
     pub pinned: bool,
+    /// Archived chats are hidden from the default listing.
+    pub archived: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

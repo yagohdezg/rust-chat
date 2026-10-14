@@ -73,6 +73,74 @@ async fn conversation_lifecycle() {
 }
 
 #[tokio::test]
+async fn conversation_rename_archive_and_updated_at() {
+    let env = TestEnvBuilder::new().start().await.unwrap();
+    let session = Session::register(&env.base_url, "a@example.com", "password123")
+        .await
+        .unwrap();
+    let id = session.create_conversation("Original").await.unwrap();
+
+    // Rename is reflected in the listing.
+    let renamed = session
+        .patch_expect(
+            &format!("/api/conversations/{id}"),
+            &json!({"title": "Renamed"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(renamed["title"], "Renamed");
+
+    // Archiving hides the chat from the default listing but keeps it in the
+    // archived view.
+    session
+        .patch_expect(
+            &format!("/api/conversations/{id}"),
+            &json!({"archived": true}),
+        )
+        .await
+        .unwrap();
+    let active = session.get_expect("/api/conversations").await.unwrap();
+    assert!(
+        active.as_array().unwrap().is_empty(),
+        "archived chats leave the default list"
+    );
+    let archived = session
+        .get_expect("/api/conversations?archived=true")
+        .await
+        .unwrap();
+    assert_eq!(archived.as_array().unwrap().len(), 1);
+    assert_eq!(archived[0]["archived"], json!(true));
+
+    // Unarchiving restores it to the default listing.
+    session
+        .patch_expect(
+            &format!("/api/conversations/{id}"),
+            &json!({"archived": false}),
+        )
+        .await
+        .unwrap();
+    let active = session.get_expect("/api/conversations").await.unwrap();
+    assert_eq!(active.as_array().unwrap().len(), 1);
+
+    // A new message bumps `updated_at` so the chat sorts by its latest turn.
+    let before = active[0]["updated_at"].as_str().unwrap().to_string();
+    let provider_id = session
+        .create_provider("fake", &env.provider_url)
+        .await
+        .unwrap();
+    session
+        .chat_sse(id, "hi", None, Some(provider_id))
+        .await
+        .unwrap();
+    let after = session.get_expect("/api/conversations").await.unwrap();
+    assert_ne!(
+        after[0]["updated_at"].as_str().unwrap(),
+        before,
+        "updated_at should move after a new message"
+    );
+}
+
+#[tokio::test]
 async fn provider_lifecycle() {
     let env = TestEnvBuilder::new().start().await.unwrap();
     let session = Session::register(&env.base_url, "a@example.com", "password123")
