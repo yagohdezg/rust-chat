@@ -1565,3 +1565,106 @@ async fn anthropic_provider_streams_and_calls_tools() {
     assert_eq!(usage["total_tokens"], json!(40));
     assert_eq!(usage["models"][0]["model"], json!("claude-fake"));
 }
+
+/// The `rustchat.yaml` a title-generation test runs with: one global provider
+/// pointing at `url`, named by `title_model`.
+fn title_config(url: &str) -> String {
+    format!(
+        "providers:\n  - name: titler\n    kind: openai\n    base_url: {url}\n    models: [fake-model]\ntitle_model:\n  provider: titler\n  model: fake-model\n"
+    )
+}
+
+async fn conversation_title(session: &Session, conversation_id: Uuid) -> String {
+    let list = session.get_expect("/api/conversations").await.unwrap();
+    list.as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["id"] == json!(conversation_id))
+        .and_then(|row| row["title"].as_str())
+        .unwrap_or_default()
+        .to_string()
+}
+
+#[tokio::test]
+async fn conversation_title_is_generated_from_the_first_exchange() {
+    let env = TestEnvBuilder::new()
+        .script(Script {
+            model: "fake-model".into(),
+            responses: vec![
+                vec![Turn::Text("the answer".into()), Turn::Finish],
+                vec![Turn::Text("\"Gizmo tuning\"".into()), Turn::Finish],
+            ],
+            delay_ms: 0,
+            failures: Vec::new(),
+        })
+        .config_yaml(title_config)
+        .start()
+        .await
+        .unwrap();
+    let session = Session::register(&env.base_url, "a@example.com", "correct-horse-battery")
+        .await
+        .unwrap();
+    let provider_id: Uuid = session.get_expect("/api/providers").await.unwrap()[0]["id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+
+    let conversation_id = session.create_conversation("New chat").await.unwrap();
+    let events = session
+        .chat_sse(conversation_id, "what is gizmo", None, Some(provider_id))
+        .await
+        .unwrap();
+    assert_eq!(delta_text(&events), "the answer");
+
+    let mut title = String::new();
+    for _ in 0..100 {
+        title = conversation_title(&session, conversation_id).await;
+        if title == "Gizmo tuning" {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!(title, "Gizmo tuning");
+
+    let requests = env.provider.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[1]["messages"][0]["role"], json!("system"));
+    assert!(requests[1]["messages"][1]["content"]
+        .as_str()
+        .unwrap()
+        .contains("what is gizmo"));
+}
+
+#[tokio::test]
+async fn conversation_title_failure_leaves_the_title_alone() {
+    let (titler, titler_url) =
+        FakeProvider::start(Script::text("unused").failures(vec![(500, None)])).await;
+    let env = TestEnvBuilder::new()
+        .script(Script::text("the answer"))
+        .env("PROVIDER_MAX_RETRIES", "0")
+        .config_yaml(move |_| title_config(&titler_url))
+        .start()
+        .await
+        .unwrap();
+    let session = Session::register(&env.base_url, "a@example.com", "correct-horse-battery")
+        .await
+        .unwrap();
+    let provider_id = session
+        .create_provider("chat", &env.provider_url)
+        .await
+        .unwrap();
+    let conversation_id = session.create_conversation("New chat").await.unwrap();
+    let events = session
+        .chat_sse(conversation_id, "what is gizmo", None, Some(provider_id))
+        .await
+        .unwrap();
+    assert_eq!(delta_text(&events), "the answer");
+
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    assert_eq!(
+        conversation_title(&session, conversation_id).await,
+        "New chat"
+    );
+    assert_eq!(titler.requests().len(), 1);
+}

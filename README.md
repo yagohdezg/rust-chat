@@ -467,6 +467,12 @@ provider's own usage report, which is requested with
 first, with its totals and last use. Both are visible in the admin console's
 Usage tab.
 
+A deployment that names a `title_model` (`provider` + `model`, referencing a
+provider declared in `rustchat.yaml`) gets conversation titles for free: after
+the first exchange the server asks that model for a short title and stores it.
+Generation runs detached, so a slow or failing title model never delays or
+fails the chat — the conversation simply keeps its `New chat` name.
+
 An admin can import providers from a LiteLLM proxy with
 `POST /api/admin/providers/import`. The body is either
 `{ "config_yaml": "<text>" }`, importing the `model_list` of a LiteLLM

@@ -2,6 +2,7 @@ use std::borrow::Cow;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, Result};
@@ -161,12 +162,16 @@ impl TestEnv {
     }
 }
 
+/// Builds the contents of the run's `rustchat.yaml` from the fake provider URL.
+type ConfigYaml = Arc<dyn Fn(&str) -> String + Send + Sync>;
+
 #[derive(Clone)]
 pub struct TestEnvBuilder {
     backend: Backend,
     script: Script,
     sandbox_tool: bool,
     extra_env: Vec<(String, String)>,
+    config_yaml: Option<ConfigYaml>,
 }
 
 impl TestEnvBuilder {
@@ -176,6 +181,7 @@ impl TestEnvBuilder {
             script: Script::text("Hello from the fake provider"),
             sandbox_tool: false,
             extra_env: Vec::new(),
+            config_yaml: None,
         }
     }
 
@@ -199,10 +205,24 @@ impl TestEnvBuilder {
         self
     }
 
-    pub async fn start(self) -> Result<TestEnv> {
+    /// Write a `rustchat.yaml` into the run's data directory and point
+    /// `RUSTCHAT_CONFIG` at it. The builder receives the fake provider's URL,
+    /// which is only known once the environment starts.
+    pub fn config_yaml(mut self, build: impl Fn(&str) -> String + Send + Sync + 'static) -> Self {
+        self.config_yaml = Some(Arc::new(build));
+        self
+    }
+
+    pub async fn start(mut self) -> Result<TestEnv> {
         let data_dir = TempDir::new();
         let (sandbox, sandbox_url) = FakeSandbox::start().await;
         let (provider, provider_url) = FakeProvider::start(self.script).await;
+        if let Some(build) = self.config_yaml.take() {
+            let path = data_dir.path().join("rustchat.yaml");
+            std::fs::write(&path, build(&provider_url)).unwrap();
+            self.extra_env
+                .push(("RUSTCHAT_CONFIG".into(), path.display().to_string()));
+        }
 
         let (database_url, pg) = match self.backend {
             Backend::Sqlite => {

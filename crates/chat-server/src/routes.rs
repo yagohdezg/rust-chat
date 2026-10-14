@@ -23,6 +23,7 @@ use chat_auth::{
     validate_password, verify_password, Action, Scope, API_KEY_PREFIX, ROLE_USER,
 };
 use chat_computers::ComputerOrchestrator;
+use chat_core::file_config::FileModelRef;
 use chat_core::ChatError;
 use chat_providers::{
     AnthropicProvider, ChatMessage, ChatRequest, FailoverProvider, LlmProvider, ModelInfo,
@@ -1097,7 +1098,9 @@ pub async fn create_conversation(
             .await?
             .ok_or(ChatError::NotFound)?;
     }
-    let title = body.title.unwrap_or_else(|| "New chat".into());
+    let title = body
+        .title
+        .unwrap_or_else(|| DEFAULT_CONVERSATION_TITLE.into());
     Ok(Json(
         state
             .store
@@ -2437,6 +2440,136 @@ async fn build_turn_messages(state: &AppState, ctx: &TurnContext) -> Vec<ChatMes
 
 /// Spawn generation so it continues (and persists) even if the client
 /// disconnects. Terminates the watch channel with a single terminal state.
+/// The title a conversation carries until something names it.
+const DEFAULT_CONVERSATION_TITLE: &str = "New chat";
+
+/// Instruction sent to the `title_model`.
+const TITLE_INSTRUCTION: &str = "You name chat conversations. Reply with a short title of at most \
+six words, in plain text, with no quotes, prefix or trailing punctuation.";
+
+/// How much of the first exchange the title model is shown.
+const TITLE_PROMPT_CHARS: usize = 2_000;
+
+/// Name a conversation after its first exchange, when `rustchat.yaml` declares
+/// a `title_model`. Detached: the chat is never blocked or failed by title
+/// generation, and a failure leaves the stored title untouched.
+fn spawn_title_generation(state: Arc<AppState>, ctx: &TurnContext, answer: &str) {
+    let Some(reference) = state.cfg.file.title_model.clone() else {
+        return;
+    };
+    if ctx.history.len() > 1 || answer.trim().is_empty() {
+        return;
+    }
+    let Some(prompt) = ctx
+        .history
+        .last()
+        .filter(|message| message.role == "user")
+        .and_then(|message| message.content.clone())
+    else {
+        return;
+    };
+    let prompt: String = prompt.chars().take(TITLE_PROMPT_CHARS).collect();
+    let answer: String = answer.chars().take(TITLE_PROMPT_CHARS).collect();
+    let conversation_id = ctx.conversation_id;
+    let user_id = ctx.user_id;
+    tokio::spawn(async move {
+        if let Err(err) = generate_title(
+            &state,
+            &reference,
+            user_id,
+            conversation_id,
+            &prompt,
+            &answer,
+        )
+        .await
+        {
+            tracing::warn!(%err, "conversation title generation failed");
+        }
+    });
+}
+
+/// Ask the configured `title_model` to name the conversation and store the
+/// result. A conversation the user has already named is left alone.
+async fn generate_title(
+    state: &AppState,
+    reference: &FileModelRef,
+    user_id: Uuid,
+    conversation_id: Uuid,
+    prompt: &str,
+    answer: &str,
+) -> Result<(), ChatError> {
+    let conversation = state
+        .store
+        .get_conversation(conversation_id, user_id)
+        .await?;
+    if conversation.title != DEFAULT_CONVERSATION_TITLE {
+        return Ok(());
+    }
+    let row = state
+        .store
+        .list_providers(user_id)
+        .await?
+        .into_iter()
+        .find(|provider| provider.user_id.is_none() && provider.name == reference.provider)
+        .ok_or_else(|| {
+            ChatError::Config(format!(
+                "`title_model` provider `{}` is not available",
+                reference.provider
+            ))
+        })?;
+    let provider = build_provider(state, &row, user_id)
+        .await
+        .map_err(|err| err.0)?;
+    let request = ChatRequest {
+        model: reference.model.clone(),
+        messages: vec![
+            ChatMessage::system(TITLE_INSTRUCTION),
+            ChatMessage::user(format!("User: {prompt}\n\nAssistant: {answer}")),
+        ],
+        temperature: None,
+        max_tokens: Some(32),
+        tools: None,
+    };
+    let mut stream = provider
+        .stream(request)
+        .await
+        .map_err(|err| ChatError::Upstream(err.to_string()))?;
+    let mut reply = String::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|err| ChatError::Upstream(err.to_string()))?;
+        reply.push_str(&chunk.delta);
+        if reply.chars().count() > 200 {
+            break;
+        }
+    }
+    let Some(title) = clean_title(&reply) else {
+        return Ok(());
+    };
+    state
+        .store
+        .rename_conversation(conversation_id, user_id, &title)
+        .await?;
+    Ok(())
+}
+
+/// Reduce the model's reply to a single-line title, or `None` when nothing
+/// usable came back.
+fn clean_title(reply: &str) -> Option<String> {
+    let line = reply.lines().map(str::trim).find(|line| !line.is_empty())?;
+    let line = line
+        .strip_prefix("Title:")
+        .or_else(|| line.strip_prefix("title:"))
+        .unwrap_or(line)
+        .trim();
+    let line = line.trim_matches(|ch: char| matches!(ch, '"' | '\'' | '`' | '*'));
+    let title = line.split_whitespace().collect::<Vec<_>>().join(" ");
+    let title = title.trim_end_matches(['.', ':', ';']).trim();
+    if title.is_empty() {
+        return None;
+    }
+    Some(title.chars().take(80).collect())
+}
+
 fn spawn_generation(
     provider: Arc<dyn LlmProvider>,
     state: Arc<AppState>,
@@ -2458,6 +2591,7 @@ fn spawn_generation(
                     tracing::error!(error = %err, "failed to persist assistant message");
                 }
                 record_usage(&store, &ctx, usage).await;
+                spawn_title_generation(state.clone(), &ctx, &content);
                 let _ = tx.send(StreamState::Completed { content, events });
             }
             Err((partial, error, events, usage)) => {
@@ -2877,6 +3011,7 @@ fn spawn_agent_generation(
                 if let Err(err) = result {
                     tracing::error!(error = %err, "failed to persist assistant message");
                 }
+                spawn_title_generation(state.clone(), &ctx, &accumulated);
                 let _ = tx.send(StreamState::Completed {
                     content: accumulated,
                     events,
