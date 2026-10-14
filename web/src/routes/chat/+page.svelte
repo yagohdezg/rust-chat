@@ -115,6 +115,7 @@
 	let newBaseUrl = $state('https://api.openai.com/v1');
 	let newKey = $state('');
 	let newVision = $state(false);
+	let newModels = $state('');
 	let newGlobal = $state(false);
 	let savingProvider = $state(false);
 
@@ -184,12 +185,17 @@
 			base_url: newBaseUrl.trim(),
 			api_key: newKey.trim() || undefined,
 			vision: newVision,
+			allowed_models: newModels
+				.split(',')
+				.map((model) => model.trim())
+				.filter(Boolean),
 			global: isAdmin && newGlobal
 		});
 		savingProvider = false;
 		if (!chat.error) {
 			newKey = '';
 			newVision = false;
+			newModels = '';
 			newGlobal = false;
 			showAddProvider = false;
 		}
@@ -638,6 +644,10 @@
 										<label class="check">
 											<input type="checkbox" bind:checked={newVision} /> Serves vision models
 										</label>
+										<input
+											bind:value={newModels}
+											placeholder="Allowed models, comma-separated (optional)"
+										/>
 										{#if isAdmin}
 											<label class="check">
 												<input type="checkbox" bind:checked={newGlobal} /> Share with every user

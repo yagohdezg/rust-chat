@@ -228,6 +228,10 @@ pub struct Config {
     /// killed) and reconnected on demand.
     pub mcp_idle_ttl_seconds: u64,
 
+    /// Models every caller may use, as a deployment-wide allow-list. Empty means
+    /// no global cap; a provider's and a user's own allow-lists still apply.
+    pub model_allowlist: Vec<String>,
+
     /// Parsed `rustchat.yaml` (path from `RUSTCHAT_CONFIG`). This is the base
     /// layer: environment variables and runtime/DB state override it.
     pub file: FileConfig,
@@ -428,6 +432,7 @@ impl Config {
             mcp_idle_ttl_seconds: var("MCP_IDLE_TTL_SECONDS")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(300),
+            model_allowlist: var_list("MODEL_ALLOWLIST"),
 
             file,
         })

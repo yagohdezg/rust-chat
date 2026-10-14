@@ -10,7 +10,7 @@ use chat_core::{ChatError, Result, SecretCipher};
 use chat_store::{
     AdminUserSummary, Agent, AgentDraft, ApiKey, ApiKeyDraft, AuditEntry, AuditLog, AuthToken,
     AuthTokenDraft, Computer, Conversation, FileRecord, McpServer, McpServerDraft, Message,
-    PoolBox, Provider, ProviderModel, RefreshToken, Store, User,
+    PoolBox, Provider, ProviderDraft, ProviderModel, RefreshToken, Store, User,
 };
 use chrono::{DateTime, Utc};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
@@ -167,8 +167,8 @@ impl Store for SqliteStore {
 
     async fn list_user_summaries(&self) -> Result<Vec<AdminUserSummary>> {
         let rows = sqlx::query_as::<_, AdminUserSummary>(
-            "select u.id, u.email, u.name, u.role, u.disabled, u.locked_until, u.created_at,
-                    u.last_seen_at,
+            "select u.id, u.email, u.name, u.role, u.disabled, u.locked_until, u.allowed_models,
+                    u.created_at, u.last_seen_at,
                     (select count(*) from conversations c where c.user_id = u.id) as conversation_count,
                     (select count(*) from providers p where p.user_id = u.id) as provider_count,
                     (select count(*) from agents a where a.user_id = u.id) as agent_count
@@ -379,6 +379,16 @@ impl Store for SqliteStore {
         .bind(id)
         .execute(&self.pool)
         .await?;
+        Ok(())
+    }
+
+    async fn set_user_allowed_models(&self, id: Uuid, models: &[String]) -> Result<()> {
+        sqlx::query("update users set allowed_models = ?, updated_at = ? where id = ?")
+            .bind(Json(models.to_vec()))
+            .bind(Utc::now())
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 
@@ -796,28 +806,22 @@ impl Store for SqliteStore {
             .collect()
     }
 
-    async fn create_provider(
-        &self,
-        owner_id: Option<Uuid>,
-        name: &str,
-        kind: &str,
-        base_url: &str,
-        api_key: Option<&str>,
-        vision: bool,
-    ) -> Result<Provider> {
-        let encrypted_key = self.encrypt_opt(api_key)?;
+    async fn create_provider(&self, draft: &ProviderDraft) -> Result<Provider> {
+        let encrypted_key = self.encrypt_opt(draft.api_key.as_deref())?;
         let row = sqlx::query_as::<_, Provider>(
-            "insert into providers (id, user_id, name, kind, base_url, api_key, vision, created_at)
-             values (?, ?, ?, ?, ?, ?, ?, ?)
+            "insert into providers
+                (id, user_id, name, kind, base_url, api_key, vision, allowed_models, created_at)
+             values (?, ?, ?, ?, ?, ?, ?, ?, ?)
              returning *",
         )
         .bind(Uuid::new_v4())
-        .bind(owner_id)
-        .bind(name)
-        .bind(kind)
-        .bind(base_url)
+        .bind(draft.owner_id)
+        .bind(&draft.name)
+        .bind(&draft.kind)
+        .bind(&draft.base_url)
         .bind(encrypted_key)
-        .bind(vision)
+        .bind(draft.vision)
+        .bind(Json(draft.allowed_models.clone()))
         .bind(Utc::now())
         .fetch_one(&self.pool)
         .await?;
@@ -833,27 +837,20 @@ impl Store for SqliteStore {
         Ok(())
     }
 
-    async fn update_provider(
-        &self,
-        id: Uuid,
-        name: &str,
-        kind: &str,
-        base_url: &str,
-        api_key: Option<&str>,
-        vision: bool,
-    ) -> Result<Provider> {
-        let encrypted_key = self.encrypt_opt(api_key)?;
+    async fn update_provider(&self, id: Uuid, draft: &ProviderDraft) -> Result<Provider> {
+        let encrypted_key = self.encrypt_opt(draft.api_key.as_deref())?;
         let row = sqlx::query_as::<_, Provider>(
             "update providers
-             set name = ?, kind = ?, base_url = ?, api_key = ?, vision = ?
+             set name = ?, kind = ?, base_url = ?, api_key = ?, vision = ?, allowed_models = ?
              where id = ?
              returning *",
         )
-        .bind(name)
-        .bind(kind)
-        .bind(base_url)
+        .bind(&draft.name)
+        .bind(&draft.kind)
+        .bind(&draft.base_url)
         .bind(encrypted_key)
-        .bind(vision)
+        .bind(draft.vision)
+        .bind(Json(draft.allowed_models.clone()))
         .bind(id)
         .fetch_one(&self.pool)
         .await?;

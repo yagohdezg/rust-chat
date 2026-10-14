@@ -28,6 +28,9 @@ pub struct User {
     pub failed_login_count: i64,
     /// End of the brute-force lock-out window, if the account is locked.
     pub locked_until: Option<DateTime<Utc>>,
+    /// Models this account may use, as an allow-list. Empty means every model
+    /// the provider allows.
+    pub allowed_models: Json<Vec<String>>,
     /// Best-effort activity timestamp, refreshed in the background.
     pub last_seen_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
@@ -44,6 +47,7 @@ pub struct AdminUserSummary {
     pub role: String,
     pub disabled: bool,
     pub locked_until: Option<DateTime<Utc>>,
+    pub allowed_models: Json<Vec<String>>,
     pub created_at: DateTime<Utc>,
     pub last_seen_at: Option<DateTime<Utc>>,
     pub conversation_count: i64,
@@ -155,7 +159,27 @@ pub struct Provider {
     /// the provider form; decides whether attached images are forwarded to the
     /// model as image parts or read as text.
     pub vision: bool,
+    /// Models this provider may serve, as an allow-list. Empty means the
+    /// provider's whole discovered catalog is allowed.
+    pub allowed_models: Json<Vec<String>>,
     pub created_at: DateTime<Utc>,
+}
+
+/// Fields for creating or overwriting a [`Provider`]. The id and timestamps are
+/// assigned by the store.
+#[derive(Debug, Clone, Default)]
+pub struct ProviderDraft {
+    /// `None` for an admin-provided global provider, `Some(user)` for a
+    /// personal one.
+    pub owner_id: Option<Uuid>,
+    pub name: String,
+    pub kind: String,
+    pub base_url: String,
+    /// Plaintext key; the store encrypts it before writing.
+    pub api_key: Option<String>,
+    pub vision: bool,
+    /// Model allow-list; empty means the provider's whole catalog.
+    pub allowed_models: Vec<String>,
 }
 
 /// A model advertised by a provider, cached in the `models` table keyed by

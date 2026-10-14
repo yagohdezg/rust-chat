@@ -29,7 +29,8 @@ use chat_sandbox::{ExecRequest, ExecResult, SandboxFile};
 use chat_store::types::message_status;
 use chat_store::{
     AdminUserSummary, ApiKey, ApiKeyDraft, AuditEntry, AuditLog, AuthTokenDraft, Computer,
-    Conversation, FileRecord, McpServer, McpServerDraft, Message, Provider, ProviderModel, Store,
+    Conversation, FileRecord, McpServer, McpServerDraft, Message, Provider, ProviderDraft,
+    ProviderModel, Store,
 };
 
 use crate::error::ApiError;
@@ -702,6 +703,10 @@ pub struct UpdateUserBody {
     /// Clear a brute-force lock-out and its failure count.
     #[serde(default)]
     pub unlock: bool,
+    /// Models this account may use. Send an empty array to allow every model
+    /// the provider allows.
+    #[serde(default)]
+    pub allowed_models: Option<Vec<String>>,
 }
 
 /// `PATCH /api/admin/users/{id}` — change an account's role and/or enabled
@@ -717,7 +722,11 @@ pub async fn admin_update_user(
     if user_id == admin.id {
         return Err(ChatError::BadRequest("cannot modify your own account".into()).into());
     }
-    if body.role.is_none() && body.disabled.is_none() && !body.unlock {
+    if body.role.is_none()
+        && body.disabled.is_none()
+        && !body.unlock
+        && body.allowed_models.is_none()
+    {
         return Err(ChatError::BadRequest("nothing to update".into()).into());
     }
     let target = state
@@ -745,6 +754,9 @@ pub async fn admin_update_user(
     }
     if let Some(disabled) = body.disabled {
         state.store.set_user_disabled(user_id, disabled).await?;
+    }
+    if let Some(models) = &body.allowed_models {
+        state.store.set_user_allowed_models(user_id, models).await?;
     }
     if body.unlock {
         state.store.clear_login_failures(user_id).await?;
@@ -779,6 +791,7 @@ pub async fn admin_update_user(
                 "role": body.role,
                 "disabled": body.disabled,
                 "unlock": body.unlock,
+                "allowed_models": body.allowed_models,
             })),
             ip: Some(addr.ip().to_string()),
         },
@@ -920,7 +933,9 @@ pub async fn list_models(
     user: Require<ModelsView>,
 ) -> Result<Json<Vec<ModelInfo>>, ApiError> {
     let row = default_provider_row(&state, user.id).await?;
-    Ok(Json(models_for_provider(&state, &row, user.id).await?))
+    let models = models_for_provider(&state, &row, user.id).await?;
+    let allowed = allowed_models(&state, &row, &user.allowed_models).await?;
+    Ok(Json(apply_allowance(models, allowed.as_deref())))
 }
 
 /// `GET /api/providers/{id}/models` — the cached model catalog for one
@@ -935,7 +950,9 @@ pub async fn list_provider_models(
         .get_provider(provider_id, user.id)
         .await?
         .ok_or(ChatError::NotFound)?;
-    Ok(Json(models_for_provider(&state, &row, user.id).await?))
+    let models = models_for_provider(&state, &row, user.id).await?;
+    let allowed = allowed_models(&state, &row, &user.allowed_models).await?;
+    Ok(Json(apply_allowance(models, allowed.as_deref())))
 }
 
 /// Return a provider's model catalog, serving the cached copy when fresh and
@@ -1394,6 +1411,8 @@ pub struct ProviderView {
     pub kind: String,
     pub base_url: String,
     pub vision: bool,
+    /// Models this provider may serve. Empty means its whole catalog.
+    pub allowed_models: Vec<String>,
     pub created_at: DateTime<Utc>,
     pub has_key: bool,
 }
@@ -1406,6 +1425,7 @@ fn provider_view(provider: Provider, has_key: bool) -> ProviderView {
         kind: provider.kind,
         base_url: provider.base_url,
         vision: provider.vision,
+        allowed_models: provider.allowed_models.0,
         created_at: provider.created_at,
         has_key,
     }
@@ -1522,6 +1542,10 @@ pub struct CreateProviderBody {
     /// Whether the provider serves models that accept image input.
     #[serde(default)]
     pub vision: bool,
+    /// Models this provider may serve. Omit or leave empty to allow its whole
+    /// discovered catalog.
+    #[serde(default)]
+    pub allowed_models: Vec<String>,
     #[serde(default)]
     pub api_key: Option<String>,
     /// Admin-only: expose this provider to every user.
@@ -1555,7 +1579,15 @@ pub async fn create_provider(
 
     let provider = state
         .store
-        .create_provider(owner, name, &body.kind, base_url, api_key, body.vision)
+        .create_provider(&ProviderDraft {
+            owner_id: owner,
+            name: name.to_string(),
+            kind: body.kind.clone(),
+            base_url: base_url.to_string(),
+            api_key: api_key.map(str::to_owned),
+            vision: body.vision,
+            allowed_models: body.allowed_models.clone(),
+        })
         .await
         .map_err(|err| conflict_on_unique(err, "a provider with that name already exists"))?;
     let has_key = provider.api_key.is_some();
@@ -1580,6 +1612,9 @@ pub struct UpdateProviderBody {
     pub api_key: Option<String>,
     /// Omit to keep the stored capability.
     pub vision: Option<bool>,
+    /// Omit to keep the stored allow-list; send an empty array to allow the
+    /// provider's whole catalog.
+    pub allowed_models: Option<Vec<String>>,
 }
 
 /// `PATCH /api/providers/{id}` — update a provider's fields (own provider, or a
@@ -1620,11 +1655,18 @@ pub async fn update_provider(
         .store
         .update_provider(
             provider_id,
-            &name,
-            &kind,
-            &base_url,
-            api_key.as_deref(),
-            body.vision.unwrap_or(existing.vision),
+            &ProviderDraft {
+                owner_id: existing.user_id,
+                name,
+                kind,
+                base_url,
+                api_key,
+                vision: body.vision.unwrap_or(existing.vision),
+                allowed_models: body
+                    .allowed_models
+                    .clone()
+                    .unwrap_or_else(|| existing.allowed_models.0.clone()),
+            },
         )
         .await
         .map_err(|err| conflict_on_unique(err, "a provider with that name already exists"))?;
@@ -1703,7 +1745,15 @@ pub async fn admin_bulk_create_providers(
             .filter(|key| !key.is_empty());
         let provider = state
             .store
-            .create_provider(None, name, &entry.kind, base_url, api_key, entry.vision)
+            .create_provider(&ProviderDraft {
+                owner_id: None,
+                name: name.to_string(),
+                kind: entry.kind.clone(),
+                base_url: base_url.to_string(),
+                api_key: api_key.map(str::to_owned),
+                vision: entry.vision,
+                allowed_models: entry.allowed_models.clone(),
+            })
             .await
             .map_err(|err| conflict_on_unique(err, "a provider with that name already exists"))?;
         let has_key = provider.api_key.is_some();
@@ -1972,6 +2022,7 @@ pub async fn chat(
             resolve_agent(
                 &state,
                 user.id,
+                &user.allowed_models,
                 &conversation,
                 requested_model.as_deref(),
                 requested_provider,
@@ -1994,7 +2045,14 @@ pub async fn chat(
                 ((row, provider), fallback)
             }
         };
-        let model = pick_model(provider.as_ref(), requested_model.or(fallback_model)).await?;
+        let model = pick_model(
+            &state,
+            &row,
+            &user.allowed_models,
+            provider.as_ref(),
+            requested_model.or(fallback_model),
+        )
+        .await?;
         Some((row, provider, model))
     } else {
         None
@@ -2267,6 +2325,7 @@ struct ResolvedAgent {
 async fn resolve_agent(
     state: &AppState,
     user_id: Uuid,
+    user_allowed: &[String],
     conversation: &Conversation,
     requested_model: Option<&str>,
     requested_provider: Option<Uuid>,
@@ -2362,7 +2421,7 @@ async fn resolve_agent(
     if model.is_none() {
         model = file_default_model;
     }
-    let model = pick_model(provider.as_ref(), model).await?;
+    let model = pick_model(state, &row, user_allowed, provider.as_ref(), model).await?;
     let config = AgentConfig {
         model,
         max_iterations: state.cfg.agent_max_iterations,
@@ -2399,24 +2458,107 @@ async fn resolve_provider(
     }
 }
 
-/// Choose the model for a turn: the requested/agent model, else the provider's
-/// first advertised model.
+/// The models `row` may serve to a caller whose own allow-list is
+/// `user_allowed`: the provider's cached catalog narrowed by the global,
+/// provider and user allow-lists. `None` means no allow-list is in play;
+/// `Some` of an empty list means the layers exclude every model, which fails
+/// closed rather than falling back to free text.
+///
+/// The catalog is read from the cache (the model endpoints refresh it), so a
+/// turn never pays for a catalog fetch just to validate a model.
+async fn allowed_models(
+    state: &AppState,
+    row: &Provider,
+    user_allowed: &[String],
+) -> Result<Option<Vec<String>>, ApiError> {
+    let catalog: Vec<String> = state
+        .store
+        .list_provider_models(row.id)
+        .await?
+        .into_iter()
+        .map(|model| model.id)
+        .collect();
+    let layers = [
+        state.cfg.model_allowlist.as_slice(),
+        row.allowed_models.0.as_slice(),
+        user_allowed,
+        catalog.as_slice(),
+    ];
+    let mut allowed: Option<Vec<String>> = None;
+    for layer in layers {
+        if layer.is_empty() {
+            continue;
+        }
+        allowed = Some(match allowed {
+            None => layer.to_vec(),
+            Some(current) => current
+                .into_iter()
+                .filter(|model| layer.contains(model))
+                .collect(),
+        });
+    }
+    Ok(allowed)
+}
+
+/// Narrow a provider's catalog to the effective allowance. Without an
+/// allowance the catalog is untouched; with one, the catalog is filtered (an
+/// allowance with no catalog to filter, because the provider never answered
+/// `/models`, is served as-is so the picker still works).
+fn apply_allowance(mut models: Vec<ModelInfo>, allowed: Option<&[String]>) -> Vec<ModelInfo> {
+    let Some(allowed) = allowed else {
+        return models;
+    };
+    if models.is_empty() {
+        return allowed
+            .iter()
+            .map(|id| ModelInfo {
+                id: id.clone(),
+                owned_by: None,
+            })
+            .collect();
+    }
+    models.retain(|model| allowed.contains(&model.id));
+    models
+}
+
+/// Choose the model for a turn: the requested/agent model, else the first model
+/// the caller is allowed to use. A requested model outside the effective
+/// allowance is rejected instead of being forwarded to the provider.
 async fn pick_model(
+    state: &AppState,
+    row: &Provider,
+    user_allowed: &[String],
     provider: &dyn LlmProvider,
     requested: Option<String>,
 ) -> Result<String, ApiError> {
+    let allowed = allowed_models(state, row, user_allowed).await?;
     if let Some(model) = requested.filter(|m| !m.trim().is_empty()) {
+        if let Some(allowed) = &allowed {
+            if !allowed.contains(&model) {
+                return Err(ChatError::BadRequest(format!(
+                    "model `{model}` is not allowed for this provider"
+                ))
+                .into());
+            }
+        }
         return Ok(model);
     }
-    let models = provider
-        .list_models()
-        .await
-        .map_err(|e| ChatError::Upstream(e.to_string()))?;
-    models
-        .into_iter()
-        .next()
-        .map(|model| model.id)
-        .ok_or(ApiError(ChatError::ProviderNotConfigured))
+    match &allowed {
+        Some(allowed) => allowed.first().cloned().ok_or_else(|| {
+            ChatError::BadRequest("no model is allowed for this provider".into()).into()
+        }),
+        None => {
+            let models = provider
+                .list_models()
+                .await
+                .map_err(|e| ChatError::Upstream(e.to_string()))?;
+            models
+                .into_iter()
+                .next()
+                .map(|model| model.id)
+                .ok_or(ApiError(ChatError::ProviderNotConfigured))
+        }
+    }
 }
 
 /// Spawn the agent loop, forwarding tool turns to the client and persisting

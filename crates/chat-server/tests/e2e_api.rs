@@ -1035,3 +1035,153 @@ async fn text_only_provider_never_receives_image_parts() {
         "a text-only provider is never sent content parts"
     );
 }
+
+#[tokio::test]
+async fn model_allowances_are_enforced() {
+    let env = TestEnvBuilder::new()
+        .env("MODEL_ALLOWLIST", "fake-model,other-model")
+        .start()
+        .await
+        .unwrap();
+
+    let admin = Session::register(&env.base_url, "a@example.com", "correct-horse-battery")
+        .await
+        .unwrap();
+    let user = Session::register(&env.base_url, "b@example.com", "correct-horse-battery")
+        .await
+        .unwrap();
+
+    // The provider is narrowed to one of the models the fake serves.
+    let provider_id: Uuid = admin
+        .post_expect(
+            "/api/providers",
+            &json!({
+                "name": "fake",
+                "base_url": env.provider_url,
+                "api_key": "fake-key",
+                "allowed_models": ["fake-model"],
+                "global": true,
+            }),
+        )
+        .await
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let id = user.create_conversation("allowances").await.unwrap();
+
+    // The catalog reflects the effective allowance.
+    let models = user
+        .get_expect(&format!("/api/providers/{provider_id}/models"))
+        .await
+        .unwrap();
+    assert_eq!(models, json!([{"id": "fake-model"}]));
+
+    // A model outside the allowance is rejected before the provider is called.
+    let resp = user
+        .chat(id, "hi", Some("other-model"), Some(provider_id))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("not allowed"), "body: {body}");
+    assert!(
+        env.provider.requests().is_empty(),
+        "a disallowed model never reaches the provider"
+    );
+
+    // An allowed model goes through.
+    user.chat_sse(id, "hi", Some("fake-model"), Some(provider_id))
+        .await
+        .unwrap();
+    assert_eq!(env.provider.requests().len(), 1);
+
+    // A per-account allowance narrows the same provider further.
+    admin
+        .patch_expect(
+            &format!("/api/admin/users/{}", user.user_id),
+            &json!({"allowed_models": ["fake-model"]}),
+        )
+        .await
+        .unwrap();
+    let models = user
+        .get_expect(&format!("/api/providers/{provider_id}/models"))
+        .await
+        .unwrap();
+    assert_eq!(models, json!([{"id": "fake-model"}]));
+    user.chat_sse(id, "again", Some("fake-model"), Some(provider_id))
+        .await
+        .unwrap();
+
+    // An account allowance that matches nothing fails closed instead of
+    // falling back to free text.
+    admin
+        .patch_expect(
+            &format!("/api/admin/users/{}", user.user_id),
+            &json!({"allowed_models": ["not-served"]}),
+        )
+        .await
+        .unwrap();
+    let models = user
+        .get_expect(&format!("/api/providers/{provider_id}/models"))
+        .await
+        .unwrap();
+    assert_eq!(models, json!([]));
+    let resp = user
+        .chat(id, "hi", Some("fake-model"), Some(provider_id))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // Clearing the allowance restores the provider's own list.
+    admin
+        .patch_expect(
+            &format!("/api/admin/users/{}", user.user_id),
+            &json!({"allowed_models": []}),
+        )
+        .await
+        .unwrap();
+    let models = user
+        .get_expect(&format!("/api/providers/{provider_id}/models"))
+        .await
+        .unwrap();
+    assert_eq!(models, json!([{"id": "fake-model"}]));
+
+    // The change is audited.
+    let audit = admin
+        .get_expect("/api/admin/audit?limit=100")
+        .await
+        .unwrap();
+    assert!(audit.as_array().unwrap().iter().any(|entry| {
+        entry["action"] == json!("admin.user.update")
+            && entry["metadata"]["allowed_models"] == json!(["not-served"])
+    }));
+}
+
+#[tokio::test]
+async fn global_model_allowlist_caps_every_provider() {
+    let env = TestEnvBuilder::new()
+        .env("MODEL_ALLOWLIST", "other-model")
+        .start()
+        .await
+        .unwrap();
+
+    let user = Session::register(&env.base_url, "a@example.com", "correct-horse-battery")
+        .await
+        .unwrap();
+    let provider_id = user
+        .create_provider("fake", &env.provider_url)
+        .await
+        .unwrap();
+    let id = user.create_conversation("global cap").await.unwrap();
+
+    let models = user.get_expect("/api/models").await.unwrap();
+    assert_eq!(models, json!([]));
+    let resp = user
+        .chat(id, "hi", Some("fake-model"), Some(provider_id))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
+    assert!(env.provider.requests().is_empty());
+}

@@ -296,6 +296,7 @@ See [`.env.example`](.env.example).
 | `COMPUTER_REAP_INTERVAL_SECONDS` | `60`                                        | Idle-reaper / warm-pool tick        |
 | `COMPUTER_WARM_POOL`      | `0`                                                  | Warm boxes per node, durably owned (`0` disables; ignored when workspaces are on) |
 | `COMPUTER_WORKSPACE`      | `true`                                               | Mount a durable per-user workspace volume |
+| `MODEL_ALLOWLIST`         | —                                                    | Comma-separated deployment-wide model allow-list |
 | `MCP_ENABLED`             | `false`                                              | Expose users' MCP server tools to the agent runtime |
 | `MCP_IDLE_TTL_SECONDS`    | `300`                                                | Shut down an MCP server idle this long |
 
@@ -420,6 +421,16 @@ A turn on a vision provider sends the conversation's attached images to the
 model as OpenAI-style `image_url` parts (up to 4 images, 4 MiB each) instead of
 reading them as text; a provider without the flag never receives an image part,
 and the image is read as text or skipped as usual.
+
+Which models a caller may use is an allow-list layered three deep: the
+deployment-wide `MODEL_ALLOWLIST`, a provider's own `allowed_models` (set from
+the provider form or `POST`/`PATCH /api/providers`), and an account's
+`allowed_models` (an admin sets it with `PATCH /api/admin/users/{id}`). Each
+layer narrows the provider's cached model catalog, and a chat turn asking for a
+model outside the result is rejected with a 400 instead of being forwarded to
+the provider. An empty allow-list means "no restriction"; a layer that excludes
+every model fails closed. `GET /api/models` and
+`GET /api/providers/{id}/models` return the narrowed catalog.
 
 `POST /api/files` takes JSON: `{ filename, content_b64, conversation_id? }`.
 Uploads are written under `FILE_STORAGE_DIR` into the caller's personal

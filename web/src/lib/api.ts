@@ -57,6 +57,8 @@ export type Provider = {
 	base_url: string;
 	/** Whether the provider serves models that accept image input. */
 	vision: boolean;
+	/** Models this provider may serve. Empty means its whole catalog. */
+	allowed_models: string[];
 	created_at: string;
 	/** Whether the caller has a usable key (own credential or shared key). */
 	has_key?: boolean;
@@ -68,6 +70,7 @@ export type CreateProviderInput = {
 	kind?: string;
 	api_key?: string;
 	vision?: boolean;
+	allowed_models?: string[];
 	global?: boolean;
 };
 
@@ -157,6 +160,8 @@ export type Account = {
 	role: string;
 	disabled: boolean;
 	locked_until?: string | null;
+	/** Models this account may use. Empty means every model the provider allows. */
+	allowed_models?: string[];
 	created_at: string;
 	last_seen_at?: string | null;
 };
@@ -168,7 +173,12 @@ export type AdminUserSummary = Account & {
 	agent_count: number;
 };
 
-export type UpdateAdminUserInput = { role?: string; disabled?: boolean; unlock?: boolean };
+export type UpdateAdminUserInput = {
+	role?: string;
+	disabled?: boolean;
+	unlock?: boolean;
+	allowed_models?: string[];
+};
 
 export type CreateAdminUserInput = {
 	email: string;
@@ -183,6 +193,7 @@ export type UpdateProviderInput = {
 	kind?: string;
 	api_key?: string;
 	vision?: boolean;
+	allowed_models?: string[];
 };
 
 /** One entry of the security audit trail (`GET /api/admin/audit`). */

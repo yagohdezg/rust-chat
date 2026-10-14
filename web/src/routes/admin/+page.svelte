@@ -19,6 +19,7 @@
 	let pBaseUrl = $state('https://api.openai.com/v1');
 	let pKey = $state('');
 	let pVision = $state(false);
+	let pModels = $state('');
 	let bulk = $state('');
 	let busy = $state(false);
 
@@ -80,6 +81,32 @@
 
 	function toggleDisabled(user: api.AdminUserSummary) {
 		void patchUser(user.id, { disabled: !user.disabled });
+	}
+
+	/** Split a comma-separated model list, dropping blanks. */
+	function splitModels(value: string): string[] {
+		return value
+			.split(',')
+			.map((model) => model.trim())
+			.filter(Boolean);
+	}
+
+	function editModels(provider: api.Provider) {
+		const answer = prompt(
+			`Models "${provider.name}" may serve (comma-separated, blank for all):`,
+			provider.allowed_models.join(', ')
+		);
+		if (answer === null) return;
+		void patchProvider(provider.id, { allowed_models: splitModels(answer) });
+	}
+
+	function editUserModels(user: api.AdminUserSummary) {
+		const answer = prompt(
+			`Models ${user.email} may use (comma-separated, blank for all):`,
+			(user.allowed_models ?? []).join(', ')
+		);
+		if (answer === null) return;
+		void patchUser(user.id, { allowed_models: splitModels(answer) });
 	}
 
 	function isLocked(user: api.AdminUserSummary) {
@@ -156,11 +183,13 @@
 				base_url: pBaseUrl.trim(),
 				api_key: pKey.trim() || undefined,
 				vision: pVision,
+				allowed_models: splitModels(pModels),
 				global: true
 			});
 			providers = [...providers, created];
 			pKey = '';
 			pVision = false;
+			pModels = '';
 			notice = `Added global provider "${created.name}".`;
 		} catch (err) {
 			error = message(err);
@@ -195,6 +224,19 @@
 			error = message(err);
 		} finally {
 			busy = false;
+		}
+	}
+
+	async function patchProvider(id: string, input: api.UpdateProviderInput) {
+		error = null;
+		notice = null;
+		try {
+			const updated = await api.updateProvider(id, input);
+			providers = providers.map((p) => (p.id === updated.id ? updated : p));
+			notice = `Updated "${updated.name}".`;
+			void refreshAudit();
+		} catch (err) {
+			error = message(err);
 		}
 	}
 
@@ -333,6 +375,11 @@
 								<span class="dot" class:on={!user.disabled}></span>
 								{user.disabled ? 'Disabled' : 'Active'}
 								{#if isLocked(user)}<span class="tag locked">locked</span>{/if}
+								{#if user.allowed_models?.length}
+									<span class="tag models" title={user.allowed_models.join(', ')}>
+										{user.allowed_models.length} models
+									</span>
+								{/if}
 							</td>
 							<td>{fmt(user.last_seen_at)}</td>
 							<td class="num">{user.conversation_count}</td>
@@ -350,6 +397,13 @@
 											title={user.disabled ? 'Enable account' : 'Disable account'}
 										>
 											{user.disabled ? 'Enable' : 'Disable'}
+										</button>
+										<button
+											class="mini"
+											onclick={() => void editUserModels(user)}
+											title="Models this account may use"
+										>
+											Models
 										</button>
 										{#if isLocked(user)}
 											<button
@@ -394,11 +448,17 @@
 									<span class="purl" title={provider.base_url}>{provider.base_url}</span>
 									<span class="tag">{provider.kind}</span>
 									{#if provider.vision}<span class="tag vision">vision</span>{/if}
+									{#if provider.allowed_models.length}
+										<span class="tag models" title={provider.allowed_models.join(', ')}>
+											{provider.allowed_models.length} models
+										</span>
+									{/if}
 								</div>
 								<div class="actions">
 									<button class="mini" onclick={() => void toggleVision(provider)}>
 										{provider.vision ? 'No vision' : 'Vision'}
 									</button>
+									<button class="mini" onclick={() => void editModels(provider)}>Models</button>
 									<button class="mini" onclick={() => void rotateKey(provider)}>Rotate key</button>
 									<button class="mini danger" onclick={() => void removeProvider(provider)}>
 										Delete
@@ -428,6 +488,10 @@
 					</label>
 					<label class="check">
 						<input type="checkbox" bind:checked={pVision} /> Serves vision models
+					</label>
+					<label>
+						Allowed models
+						<input bind:value={pModels} placeholder="gpt-4o, gpt-4o-mini (optional)" />
 					</label>
 					<button class="primary" type="submit" disabled={busy || !pName.trim() || !pBaseUrl.trim()}>
 						{busy ? 'Saving…' : 'Add provider'}
@@ -629,6 +693,9 @@
 	.tag.locked {
 		background: var(--danger-bg);
 		color: var(--danger);
+		margin-left: 0.4rem;
+	}
+	.tag.models {
 		margin-left: 0.4rem;
 	}
 	.hint {

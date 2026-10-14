@@ -3,7 +3,7 @@
 //! relational CRUD through `Store`.
 
 use chat_db::SqliteStore;
-use chat_store::{ProviderModel, Store};
+use chat_store::{ProviderDraft, ProviderModel, Store};
 use uuid::Uuid;
 
 async fn temp_store() -> (SqliteStore, std::path::PathBuf) {
@@ -149,28 +149,31 @@ async fn agent_and_provider_loading() {
     // A global provider (`user_id` null) is visible to everyone; a private one
     // only to its owner. A user's own providers list before globals.
     let global = store
-        .create_provider(
-            None,
-            "global",
-            "openai",
-            "https://api.example.com",
-            None,
-            false,
-        )
+        .create_provider(&ProviderDraft {
+            owner_id: None,
+            name: "global".into(),
+            kind: "openai".into(),
+            base_url: "https://api.example.com".into(),
+            api_key: None,
+            vision: false,
+            allowed_models: Vec::new(),
+        })
         .await
         .unwrap();
     let private = store
-        .create_provider(
-            Some(user.id),
-            "private",
-            "openai",
-            "https://api.example.com",
-            Some("sk-test"),
-            false,
-        )
+        .create_provider(&ProviderDraft {
+            owner_id: Some(user.id),
+            name: "private".into(),
+            kind: "openai".into(),
+            base_url: "https://api.example.com".into(),
+            api_key: Some("sk-test".into()),
+            vision: false,
+            allowed_models: vec!["gpt-4o".into(), "gpt-4o-mini".into()],
+        })
         .await
         .unwrap();
     assert_eq!(private.api_key.as_deref(), Some("sk-test"));
+    assert_eq!(private.allowed_models.0, ["gpt-4o", "gpt-4o-mini"]);
     assert!(store
         .get_provider(global.id, other.id)
         .await
@@ -270,14 +273,15 @@ async fn model_catalog_is_cached_per_provider() {
         .await
         .unwrap();
     let provider = store
-        .create_provider(
-            Some(user.id),
-            "openai",
-            "openai",
-            "https://api.example.com",
-            None,
-            false,
-        )
+        .create_provider(&ProviderDraft {
+            owner_id: Some(user.id),
+            name: "openai".into(),
+            kind: "openai".into(),
+            base_url: "https://api.example.com".into(),
+            api_key: None,
+            vision: false,
+            allowed_models: Vec::new(),
+        })
         .await
         .unwrap();
 
@@ -354,14 +358,15 @@ async fn admin_user_summaries_and_provider_update() {
         .await
         .unwrap();
     store
-        .create_provider(
-            Some(user.id),
-            "p",
-            "openai",
-            "https://api.example.com",
-            Some("sk-old"),
-            true,
-        )
+        .create_provider(&ProviderDraft {
+            owner_id: Some(user.id),
+            name: "p".into(),
+            kind: "openai".into(),
+            base_url: "https://api.example.com".into(),
+            api_key: Some("sk-old".into()),
+            vision: true,
+            allowed_models: Vec::new(),
+        })
         .await
         .unwrap();
 
@@ -392,11 +397,15 @@ async fn admin_user_summaries_and_provider_update() {
     let updated = store
         .update_provider(
             provider.id,
-            "p2",
-            "custom",
-            "https://new.example.com",
-            Some("sk-new"),
-            true,
+            &ProviderDraft {
+                owner_id: Some(user.id),
+                name: "p2".into(),
+                kind: "custom".into(),
+                base_url: "https://new.example.com".into(),
+                api_key: Some("sk-new".into()),
+                vision: true,
+                allowed_models: vec!["claude-3-5-sonnet".into()],
+            },
         )
         .await
         .unwrap();
@@ -405,15 +414,20 @@ async fn admin_user_summaries_and_provider_update() {
     assert_eq!(updated.base_url, "https://new.example.com");
     assert_eq!(updated.api_key.as_deref(), Some("sk-new"));
     assert!(updated.vision);
+    assert_eq!(updated.allowed_models.0, ["claude-3-5-sonnet"]);
 
     let cleared = store
         .update_provider(
             provider.id,
-            "p2",
-            "custom",
-            "https://new.example.com",
-            None,
-            false,
+            &ProviderDraft {
+                owner_id: Some(user.id),
+                name: "p2".into(),
+                kind: "custom".into(),
+                base_url: "https://new.example.com".into(),
+                api_key: None,
+                vision: false,
+                allowed_models: Vec::new(),
+            },
         )
         .await
         .unwrap();
@@ -434,14 +448,15 @@ async fn provider_credentials_round_trip() {
         .unwrap();
     // An admin-provisioned global provider with no shared key.
     let provider = store
-        .create_provider(
-            None,
-            "shared",
-            "openai",
-            "https://api.example.com",
-            None,
-            false,
-        )
+        .create_provider(&ProviderDraft {
+            owner_id: None,
+            name: "shared".into(),
+            kind: "openai".into(),
+            base_url: "https://api.example.com".into(),
+            api_key: None,
+            vision: false,
+            allowed_models: Vec::new(),
+        })
         .await
         .unwrap();
 
@@ -528,7 +543,13 @@ async fn delete_user_cascades_to_resources() {
         .unwrap();
     store.create_conversation(user.id, None, "x").await.unwrap();
     store
-        .create_provider(Some(user.id), "p", "openai", "https://x", None, false)
+        .create_provider(&ProviderDraft {
+            owner_id: Some(user.id),
+            name: "p".into(),
+            kind: "openai".into(),
+            base_url: "https://x".into(),
+            ..Default::default()
+        })
         .await
         .unwrap();
     assert_eq!(store.count_users().await.unwrap(), 2);

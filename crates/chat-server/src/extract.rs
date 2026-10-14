@@ -23,6 +23,8 @@ pub struct AuthUser {
     /// When the caller authenticated with an API key, the scopes it is limited
     /// to; `None` for a JWT session, which the role alone constrains.
     key_scopes: Option<Vec<Scope>>,
+    /// Models this account may use. Empty means every model the provider allows.
+    pub allowed_models: Vec<String>,
 }
 
 impl AuthUser {
@@ -90,6 +92,7 @@ impl AuthUser {
             id: user.id,
             role: user.role,
             key_scopes: Some(scopes),
+            allowed_models: user.allowed_models.0,
         })
     }
 }
@@ -155,6 +158,7 @@ impl FromRequestParts<Arc<AppState>> for AuthUser {
             id,
             role: user.role,
             key_scopes: None,
+            allowed_models: user.allowed_models.0,
         })
     }
 }

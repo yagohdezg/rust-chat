@@ -8,6 +8,7 @@
 	let baseUrl = $state('https://api.openai.com/v1');
 	let apiKey = $state('');
 	let vision = $state(false);
+	let models = $state('');
 	let global = $state(true);
 	let busy = $state(false);
 	let error = $state<string | null>(null);
@@ -25,6 +26,10 @@
 				base_url: baseUrl.trim(),
 				api_key: apiKey.trim() || undefined,
 				vision,
+				allowed_models: models
+					.split(',')
+					.map((model) => model.trim())
+					.filter(Boolean),
 				global: isAdmin && global
 			});
 			if (provider) {
@@ -66,6 +71,10 @@
 		<label class="check">
 			<input type="checkbox" bind:checked={vision} />
 			Serves vision models (send attached images to the model)
+		</label>
+		<label>
+			Allowed models
+			<input bind:value={models} placeholder="gpt-4o, gpt-4o-mini (optional)" />
 		</label>
 		{#if isAdmin}
 			<label class="check">

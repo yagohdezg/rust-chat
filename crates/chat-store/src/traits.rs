@@ -5,7 +5,7 @@ use uuid::Uuid;
 use crate::models::{
     AdminUserSummary, Agent, AgentDraft, ApiKey, ApiKeyDraft, AuditEntry, AuditLog, AuthToken,
     AuthTokenDraft, Computer, Conversation, FileRecord, McpServer, McpServerDraft, Message,
-    PoolBox, Provider, ProviderModel, RefreshToken, User,
+    PoolBox, Provider, ProviderDraft, ProviderModel, RefreshToken, User,
 };
 /// Relational persistence, independent of the database engine.
 ///
@@ -48,6 +48,10 @@ pub trait Store: Send + Sync {
 
     /// Record whether an account's email address has been confirmed.
     async fn set_user_email_verified(&self, id: Uuid, verified: bool) -> Result<()>;
+
+    /// Replace an account's model allow-list. Empty means every model the
+    /// provider allows.
+    async fn set_user_allowed_models(&self, id: Uuid, models: &[String]) -> Result<()>;
 
     /// Replace an account's password hash (password reset).
     async fn set_user_password(&self, id: Uuid, password_hash: &str) -> Result<()>;
@@ -199,32 +203,16 @@ pub trait Store: Send + Sync {
     /// List providers visible to `user_id` — their own first, then globals.
     async fn list_providers(&self, user_id: Uuid) -> Result<Vec<Provider>>;
 
-    /// Create a provider. `owner_id` is `None` for an admin-provided global
-    /// provider, `Some(user)` for a personal one.
-    async fn create_provider(
-        &self,
-        owner_id: Option<Uuid>,
-        name: &str,
-        kind: &str,
-        base_url: &str,
-        api_key: Option<&str>,
-        vision: bool,
-    ) -> Result<Provider>;
+    /// Create a provider. `draft.owner_id` is `None` for an admin-provided
+    /// global provider, `Some(user)` for a personal one.
+    async fn create_provider(&self, draft: &ProviderDraft) -> Result<Provider>;
 
     /// Delete a provider matching `owner_id` exactly (`None` = global).
     async fn delete_provider(&self, id: Uuid, owner_id: Option<Uuid>) -> Result<()>;
 
     /// Overwrite a provider's mutable fields (including its API key, encrypted
     /// at rest). Ownership is authorized by the caller.
-    async fn update_provider(
-        &self,
-        id: Uuid,
-        name: &str,
-        kind: &str,
-        base_url: &str,
-        api_key: Option<&str>,
-        vision: bool,
-    ) -> Result<Provider>;
+    async fn update_provider(&self, id: Uuid, draft: &ProviderDraft) -> Result<Provider>;
 
     /// Idempotently insert or update a global (admin-provided) provider declared
     /// in `rustchat.yaml`. Matches an existing global by `name`, refreshes its
