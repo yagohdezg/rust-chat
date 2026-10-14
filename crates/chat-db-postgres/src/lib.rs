@@ -301,12 +301,13 @@ impl Store for PostgresStore {
         Ok(row)
     }
 
-    async fn list_conversations(&self, user_id: Uuid) -> Result<Vec<Conversation>> {
+    async fn list_conversations(&self, user_id: Uuid, archived: bool) -> Result<Vec<Conversation>> {
         let rows = sqlx::query_as::<_, Conversation>(
-            "select * from conversations where user_id = $1
+            "select * from conversations where user_id = $1 and archived = $2
              order by pinned desc, updated_at desc limit 200",
         )
         .bind(user_id)
+        .bind(archived)
         .fetch_all(&self.pool)
         .await?;
         Ok(rows)
@@ -387,6 +388,26 @@ impl Store for PostgresStore {
         .bind(id)
         .bind(user_id)
         .bind(pinned)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(ChatError::NotFound)?;
+        Ok(row)
+    }
+
+    async fn set_conversation_archived(
+        &self,
+        id: Uuid,
+        user_id: Uuid,
+        archived: bool,
+    ) -> Result<Conversation> {
+        let row = sqlx::query_as::<_, Conversation>(
+            "update conversations set archived = $3
+             where id = $1 and user_id = $2
+             returning *",
+        )
+        .bind(id)
+        .bind(user_id)
+        .bind(archived)
         .fetch_optional(&self.pool)
         .await?
         .ok_or(ChatError::NotFound)?;
@@ -834,6 +855,11 @@ impl Store for PostgresStore {
         .bind(Utc::now())
         .fetch_one(&self.pool)
         .await?;
+        sqlx::query("update conversations set updated_at = $2 where id = $1")
+            .bind(conversation_id)
+            .bind(Utc::now())
+            .execute(&self.pool)
+            .await?;
         Ok(row)
     }
 
@@ -871,6 +897,11 @@ impl Store for PostgresStore {
         .bind(Utc::now())
         .fetch_one(&mut *tx)
         .await?;
+        sqlx::query("update conversations set updated_at = $2 where id = $1")
+            .bind(conversation_id)
+            .bind(Utc::now())
+            .execute(&mut *tx)
+            .await?;
         tx.commit().await?;
         Ok((history, placeholder))
     }

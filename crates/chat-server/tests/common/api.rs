@@ -92,6 +92,22 @@ impl Session {
         Ok(value)
     }
 
+    pub async fn patch_expect(&self, path: &str, body: &Value) -> Result<Value> {
+        let resp = self
+            .http
+            .patch(format!("{}{path}", self.base))
+            .bearer_auth(&self.token)
+            .json(body)
+            .send()
+            .await?;
+        let status = resp.status();
+        let value: Value = resp.json().await.unwrap_or(Value::Null);
+        if !status.is_success() {
+            return Err(anyhow!("PATCH {path} failed ({status}): {value}"));
+        }
+        Ok(value)
+    }
+
     pub async fn get_expect(&self, path: &str) -> Result<Value> {
         let resp = self.get(path).await?;
         let status = resp.status();

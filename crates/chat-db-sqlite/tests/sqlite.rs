@@ -89,7 +89,7 @@ async fn conversations_pin_and_duplicate() {
         .set_conversation_pinned(older.id, user.id, true)
         .await
         .expect("pin");
-    let listed = store.list_conversations(user.id).await.unwrap();
+    let listed = store.list_conversations(user.id, false).await.unwrap();
     assert_eq!(listed[0].id, older.id);
     assert!(listed[0].pinned);
     assert_eq!(listed[1].id, newer.id);
@@ -506,7 +506,11 @@ async fn delete_user_cascades_to_resources() {
 
     assert_eq!(store.count_users().await.unwrap(), 1);
     assert!(store.get_user(user.id).await.unwrap().is_none());
-    assert!(store.list_conversations(user.id).await.unwrap().is_empty());
+    assert!(store
+        .list_conversations(user.id, false)
+        .await
+        .unwrap()
+        .is_empty());
     assert!(store.list_providers(user.id).await.unwrap().is_empty());
     assert!(store.get_user(keeper.id).await.unwrap().is_some());
 

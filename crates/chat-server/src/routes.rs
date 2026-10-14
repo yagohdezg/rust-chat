@@ -580,11 +580,24 @@ fn to_model_info(models: &[ProviderModel]) -> Vec<ModelInfo> {
 
 // ---- conversations --------------------------------------------------------
 
+#[derive(Deserialize)]
+pub struct ListConversationsQuery {
+    /// `true` lists archived conversations instead of the active ones.
+    #[serde(default)]
+    pub archived: bool,
+}
+
 pub async fn list_conversations(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
+    Query(query): Query<ListConversationsQuery>,
 ) -> Result<Json<Vec<Conversation>>, ApiError> {
-    Ok(Json(state.store.list_conversations(user.id).await?))
+    Ok(Json(
+        state
+            .store
+            .list_conversations(user.id, query.archived)
+            .await?,
+    ))
 }
 
 #[derive(Deserialize)]
@@ -661,6 +674,9 @@ pub struct UpdateConversationBody {
     /// Pin/unpin; omitted leaves it unchanged.
     #[serde(default)]
     pub pinned: Option<bool>,
+    /// Archive/unarchive; omitted leaves it unchanged.
+    #[serde(default)]
+    pub archived: Option<bool>,
 }
 
 /// Deserialize a present field into `Some(_)` even when its JSON value is
@@ -716,6 +732,13 @@ pub async fn update_conversation(
         conversation = state
             .store
             .set_conversation_pinned(conversation_id, user.id, pinned)
+            .await?;
+    }
+
+    if let Some(archived) = body.archived {
+        conversation = state
+            .store
+            .set_conversation_archived(conversation_id, user.id, archived)
             .await?;
     }
 

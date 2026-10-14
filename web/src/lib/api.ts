@@ -10,6 +10,7 @@ export type Conversation = {
 	agent_id?: string | null;
 	title: string;
 	pinned: boolean;
+	archived: boolean;
 	created_at: string;
 	updated_at: string;
 };

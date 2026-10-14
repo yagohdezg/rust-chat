@@ -79,7 +79,9 @@ pub trait Store: Send + Sync {
         title: &str,
     ) -> Result<Conversation>;
 
-    async fn list_conversations(&self, user_id: Uuid) -> Result<Vec<Conversation>>;
+    /// List a user's conversations. `archived` selects the archived set; the
+    /// default (active) listing excludes archived conversations.
+    async fn list_conversations(&self, user_id: Uuid, archived: bool) -> Result<Vec<Conversation>>;
 
     async fn get_conversation(&self, id: Uuid, user_id: Uuid) -> Result<Conversation>;
 
@@ -109,6 +111,14 @@ pub trait Store: Send + Sync {
         id: Uuid,
         user_id: Uuid,
         pinned: bool,
+    ) -> Result<Conversation>;
+
+    /// Archive or unarchive a conversation.
+    async fn set_conversation_archived(
+        &self,
+        id: Uuid,
+        user_id: Uuid,
+        archived: bool,
     ) -> Result<Conversation>;
 
     /// Deep-copy a conversation — its metadata and all messages — under a new
