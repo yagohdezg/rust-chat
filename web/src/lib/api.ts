@@ -94,7 +94,28 @@ export type ExecResult = {
 	stdout: string;
 	stderr: string;
 	timed_out: boolean;
+	truncated?: boolean;
+	files?: { name: string; content_b64: string }[];
 	rejected_files?: RejectedFile[];
+};
+
+export type Computer = {
+	id: string;
+	user_id: string;
+	node: string;
+	handle?: string | null;
+	volume?: string | null;
+	state: string;
+	created_at: string;
+	updated_at: string;
+	last_active_at: string;
+};
+
+export type ComputerExecInput = {
+	language: string;
+	code: string;
+	files?: { name: string; content_b64: string }[];
+	conversation_id?: string;
 };
 
 export type SandboxRequest = {
@@ -438,6 +459,29 @@ export function listMessages(
 
 export function runSandbox(input: SandboxRequest): Promise<ExecResult> {
 	return request<ExecResult>('/api/sandbox/run', {
+		method: 'POST',
+		body: JSON.stringify(input)
+	});
+}
+
+export function getComputer(): Promise<Computer> {
+	return request<Computer>('/api/computers/me');
+}
+
+export function pauseComputer(): Promise<Computer | null> {
+	return request<Computer | null>('/api/computers/me/pause', { method: 'POST' });
+}
+
+export function resumeComputer(): Promise<Computer | null> {
+	return request<Computer | null>('/api/computers/me/resume', { method: 'POST' });
+}
+
+export function destroyComputer(): Promise<{ destroyed: boolean }> {
+	return request<{ destroyed: boolean }>('/api/computers/me', { method: 'DELETE' });
+}
+
+export function execComputer(input: ComputerExecInput): Promise<ExecResult> {
+	return request<ExecResult>('/api/computers/exec', {
 		method: 'POST',
 		body: JSON.stringify(input)
 	});
