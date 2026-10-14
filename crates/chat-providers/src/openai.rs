@@ -1,10 +1,13 @@
+use std::time::Duration;
+
 use async_stream::stream;
 use eventsource_stream::Eventsource;
 use futures::StreamExt;
 use serde_json::{json, Value};
 
 use crate::{
-    ChatChunk, ChatMessage, ChatRequest, ChatStream, LlmProvider, ModelInfo, ProviderError,
+    retry_after, ChatChunk, ChatMessage, ChatRequest, ChatStream, LlmProvider, ModelInfo,
+    ProviderError, RetryPolicy,
 };
 
 /// An OpenAI-compatible chat provider (also covers Azure-style `/chat/completions`
@@ -13,7 +16,13 @@ pub struct OpenAiProvider {
     http: reqwest::Client,
     base_url: String,
     api_key: String,
+    retry: RetryPolicy,
 }
+
+/// How long one connect attempt may take before it counts as a transport
+/// failure. Without a bound an unreachable provider hangs the turn instead of
+/// retrying or failing over.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 impl OpenAiProvider {
     pub fn new(base_url: impl Into<String>, api_key: impl Into<String>) -> Self {
@@ -28,10 +37,21 @@ impl OpenAiProvider {
             .trim()
             .to_string();
         Self {
-            http: reqwest::Client::new(),
+            http: reqwest::Client::builder()
+                .connect_timeout(CONNECT_TIMEOUT)
+                .build()
+                .unwrap_or_default(),
             base_url: base_url.into().trim_end_matches('/').to_string(),
             api_key,
+            retry: RetryPolicy::default(),
         }
+    }
+
+    /// Retry rate-limited and failed requests under `policy` instead of the
+    /// default policy.
+    pub fn with_retries(mut self, policy: RetryPolicy) -> Self {
+        self.retry = policy;
+        self
     }
 
     /// Candidate API roots to try, in order. Many gateways (LiteLLM, Ollama,
@@ -95,7 +115,7 @@ fn looks_like_html(body: &str) -> bool {
 
 /// Turn a failed HTTP response into an actionable error: web-UI HTML becomes a
 /// hint about the base URL, everything else a truncated status + body.
-fn http_error(root: &str, status: u16, body: &str) -> ProviderError {
+fn http_error(root: &str, status: u16, body: &str, retry_after: Option<Duration>) -> ProviderError {
     if looks_like_html(body) {
         return ProviderError::Other(format!(
             "HTTP {status} from {root} returned an HTML page, not the \
@@ -107,6 +127,7 @@ fn http_error(root: &str, status: u16, body: &str) -> ProviderError {
     ProviderError::Http {
         status,
         body: snippet(body),
+        retry_after,
     }
 }
 
@@ -133,28 +154,39 @@ impl LlmProvider for OpenAiProvider {
             body["tools"] = json!(tools);
         }
 
-        // Try each candidate API root until one accepts the request.
+        // Try each candidate API root until one accepts the request, retrying a
+        // rate limit or server error within a root before moving on.
         let mut last_error = None;
         let mut response = None;
         for root in self.roots() {
-            let candidate = self
-                .http
-                .post(format!("{root}/chat/completions"))
-                .bearer_auth(&self.api_key)
-                .json(&body)
-                .send()
-                .await;
-            match candidate {
-                Ok(resp) if resp.status().is_success() => {
+            let send = || {
+                let root = root.clone();
+                let http = self.http.clone();
+                let key = self.api_key.clone();
+                let body = body.clone();
+                async move {
+                    let response = http
+                        .post(format!("{root}/chat/completions"))
+                        .bearer_auth(&key)
+                        .json(&body)
+                        .send()
+                        .await
+                        .map_err(ProviderError::Transport)?;
+                    let status = response.status();
+                    if status.is_success() {
+                        return Ok(response);
+                    }
+                    let asked = retry_after(&response);
+                    let body = response.text().await.unwrap_or_default();
+                    Err(http_error(&root, status.as_u16(), &body, asked))
+                }
+            };
+            match self.retry.run(send).await {
+                Ok(resp) => {
                     response = Some(resp);
                     break;
                 }
-                Ok(resp) => {
-                    let status = resp.status().as_u16();
-                    let body = resp.text().await.unwrap_or_default();
-                    last_error = Some(http_error(&root, status, &body));
-                }
-                Err(err) => last_error = Some(ProviderError::Transport(err)),
+                Err(err) => last_error = Some(err),
             }
         }
         let response = response.ok_or_else(|| {
@@ -214,21 +246,34 @@ impl LlmProvider for OpenAiProvider {
     async fn list_models(&self) -> std::result::Result<Vec<ModelInfo>, ProviderError> {
         let mut last_error = None;
         for root in self.roots() {
-            let response = match self
-                .http
-                .get(format!("{root}/models"))
-                .bearer_auth(&self.api_key)
-                .send()
-                .await
-            {
+            let send = || {
+                let root = root.clone();
+                let http = self.http.clone();
+                let key = self.api_key.clone();
+                async move {
+                    let response = http
+                        .get(format!("{root}/models"))
+                        .bearer_auth(&key)
+                        .send()
+                        .await
+                        .map_err(ProviderError::Transport)?;
+                    let status = response.status();
+                    if status.is_success() {
+                        return Ok(response);
+                    }
+                    let asked = retry_after(&response);
+                    let body = response.text().await.unwrap_or_default();
+                    Err(http_error(&root, status.as_u16(), &body, asked))
+                }
+            };
+            let response = match self.retry.run(send).await {
                 Ok(response) => response,
                 Err(err) => {
-                    last_error = Some(ProviderError::Transport(err));
+                    last_error = Some(err);
                     continue;
                 }
             };
 
-            let status = response.status();
             // Read as text first so a non-JSON error page produces a useful
             // message instead of reqwest's opaque "error decoding response".
             let body = match response.text().await {
@@ -238,10 +283,6 @@ impl LlmProvider for OpenAiProvider {
                     continue;
                 }
             };
-            if !status.is_success() {
-                last_error = Some(http_error(&root, status.as_u16(), &body));
-                continue;
-            }
 
             let json: Value = match serde_json::from_str(&body) {
                 Ok(json) => json,

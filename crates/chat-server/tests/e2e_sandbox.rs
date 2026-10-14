@@ -23,6 +23,7 @@ fn script_with_tool(tool_args: &str, answer: &str) -> Script {
             vec![Turn::Text(answer.to_string()), Turn::Finish],
         ],
         delay_ms: 0,
+        failures: Vec::new(),
     }
 }
 

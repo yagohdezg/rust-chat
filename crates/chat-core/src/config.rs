@@ -236,6 +236,20 @@ pub struct Config {
     /// no global cap; a provider's and a user's own allow-lists still apply.
     pub model_allowlist: Vec<String>,
 
+    /// Attempts after the first one when a provider call hits a rate limit, a
+    /// server error or a transport failure. `0` disables retrying.
+    pub provider_max_retries: u32,
+    /// Delay before the first provider retry, in milliseconds; it doubles per
+    /// attempt up to `provider_retry_max_ms`.
+    pub provider_retry_base_ms: u64,
+    /// Upper bound for a single provider retry delay, in milliseconds.
+    pub provider_retry_max_ms: u64,
+    /// Name of a global provider to replay a refused request against.
+    pub provider_failover_provider: Option<String>,
+    /// Model the failover provider is asked for; `None` keeps the requested
+    /// model.
+    pub provider_failover_model: Option<String>,
+
     /// UI copy and links declared in `rustchat.yaml` (no consumer yet).
     pub interface: InterfaceSection,
     /// Speech feature toggle declared in `rustchat.yaml` (no consumer yet).
@@ -482,6 +496,18 @@ impl Config {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(300),
             model_allowlist: var_list("MODEL_ALLOWLIST"),
+
+            provider_max_retries: var("PROVIDER_MAX_RETRIES")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(2),
+            provider_retry_base_ms: var("PROVIDER_RETRY_BASE_MS")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(250),
+            provider_retry_max_ms: var("PROVIDER_RETRY_MAX_MS")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(8_000),
+            provider_failover_provider: var("PROVIDER_FAILOVER_PROVIDER"),
+            provider_failover_model: var("PROVIDER_FAILOVER_MODEL"),
 
             interface: file.interface.clone(),
             speech: file.speech.clone(),

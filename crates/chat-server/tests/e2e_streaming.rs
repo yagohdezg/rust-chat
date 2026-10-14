@@ -18,6 +18,7 @@ fn multi_chunk_script() -> Script {
             Turn::Finish,
         ]],
         delay_ms: 0,
+        failures: Vec::new(),
     }
 }
 
@@ -128,6 +129,7 @@ async fn stream_emits_error_then_done_when_provider_breaks() {
         model: "fake-model".into(),
         responses: vec![vec![Turn::Raw("not-json".into()), Turn::Finish]],
         delay_ms: 0,
+        failures: Vec::new(),
     };
     let env = env_with(script).await;
     let (_session, _conversation, _message_id, events) = one_turn(&env, "hi").await;
@@ -165,6 +167,7 @@ fn tool_script() -> Script {
             vec![Turn::Text(FINAL.into()), Turn::Finish],
         ],
         delay_ms: 0,
+        failures: Vec::new(),
     }
 }
 
@@ -317,6 +320,7 @@ fn reasoning_script() -> Script {
             Turn::Finish,
         ]],
         delay_ms: 0,
+        failures: Vec::new(),
     }
 }
 

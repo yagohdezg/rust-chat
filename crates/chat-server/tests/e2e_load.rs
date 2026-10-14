@@ -45,6 +45,7 @@ fn script(delay_ms: u64) -> Script {
         model: "fake-model".into(),
         responses: vec![turns],
         delay_ms,
+        failures: Vec::new(),
     }
 }
 

@@ -1,7 +1,7 @@
 mod common;
 
 use base64::Engine as _;
-use common::{Backend, Session, TestEnvBuilder};
+use common::{Backend, FakeProvider, Script, Session, TestEnvBuilder};
 use serde_json::json;
 use uuid::Uuid;
 
@@ -1184,4 +1184,115 @@ async fn global_model_allowlist_caps_every_provider() {
         .unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
     assert!(env.provider.requests().is_empty());
+}
+
+#[tokio::test]
+async fn provider_retries_rate_limits_with_backoff() {
+    let env = TestEnvBuilder::new()
+        .env("PROVIDER_MAX_RETRIES", "2")
+        .env("PROVIDER_RETRY_BASE_MS", "10")
+        .script(Script::text("recovered").failures(vec![(429, Some(1)), (503, None)]))
+        .start()
+        .await
+        .unwrap();
+
+    let session = Session::register(&env.base_url, "a@example.com", "correct-horse-battery")
+        .await
+        .unwrap();
+    let provider_id = session
+        .create_provider("fake", &env.provider_url)
+        .await
+        .unwrap();
+    let id = session.create_conversation("retries").await.unwrap();
+
+    let started = std::time::Instant::now();
+    let events = session
+        .chat_sse(id, "hi", None, Some(provider_id))
+        .await
+        .unwrap();
+    let elapsed = started.elapsed();
+
+    assert!(events.iter().any(|event| event.event == "done"));
+    assert!(
+        events.iter().any(|event| event.data.contains("recovered")),
+        "the retried turn answers: {events:?}"
+    );
+    assert_eq!(
+        env.provider.requests().len(),
+        3,
+        "two failures then a success"
+    );
+    assert!(
+        elapsed >= std::time::Duration::from_secs(1),
+        "the server's Retry-After is honored over the 10ms backoff: {elapsed:?}"
+    );
+}
+
+#[tokio::test]
+async fn provider_fails_over_to_a_secondary() {
+    let env = TestEnvBuilder::new()
+        .env("PROVIDER_MAX_RETRIES", "0")
+        .env("PROVIDER_FAILOVER_PROVIDER", "fallback")
+        .env("PROVIDER_FAILOVER_MODEL", "fake-model")
+        .script(Script::text("from the primary").failures(vec![(500, None)]))
+        .start()
+        .await
+        .unwrap();
+    let (fallback, fallback_url) = FakeProvider::start(Script::text("from the fallback")).await;
+
+    let admin = Session::register(&env.base_url, "a@example.com", "correct-horse-battery")
+        .await
+        .unwrap();
+    let primary_id: Uuid = admin
+        .post_expect(
+            "/api/providers",
+            &json!({
+                "name": "primary",
+                "base_url": env.provider_url,
+                "api_key": "primary-key",
+                "global": true,
+            }),
+        )
+        .await
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    admin
+        .post_expect(
+            "/api/providers",
+            &json!({
+                "name": "fallback",
+                "base_url": fallback_url,
+                "api_key": "fallback-key",
+                "global": true,
+            }),
+        )
+        .await
+        .unwrap();
+    let id = admin.create_conversation("failover").await.unwrap();
+
+    let events = admin
+        .chat_sse(id, "hi", Some("primary-model"), Some(primary_id))
+        .await
+        .unwrap();
+
+    assert!(events.iter().any(|event| event.event == "done"));
+    assert!(
+        events
+            .iter()
+            .any(|event| event.data.contains("from the fallback")),
+        "the fallback provider answers: {events:?}"
+    );
+    let attempts = env.provider.requests();
+    assert_eq!(attempts.len(), 1, "the primary is tried once");
+    assert_eq!(attempts[0]["model"], json!("primary-model"));
+    let replayed = fallback.requests();
+    assert_eq!(replayed.len(), 1, "the request is replayed once");
+    assert_eq!(
+        replayed[0]["model"],
+        json!("fake-model"),
+        "the replayed request asks the failover model"
+    );
 }

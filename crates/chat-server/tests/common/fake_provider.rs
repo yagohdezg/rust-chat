@@ -25,6 +25,7 @@ pub struct Script {
     pub model: String,
     pub responses: Vec<Vec<Turn>>,
     pub delay_ms: u64,
+    pub failures: Vec<(u16, Option<u64>)>,
 }
 
 impl Script {
@@ -33,7 +34,13 @@ impl Script {
             model: "fake-model".into(),
             responses: vec![vec![Turn::Text(text.into()), Turn::Finish]],
             delay_ms: 0,
+            failures: Vec::new(),
         }
+    }
+
+    pub fn failures(mut self, failures: Vec<(u16, Option<u64>)>) -> Self {
+        self.failures = failures;
+        self
     }
 
     pub fn model(mut self, model: impl Into<String>) -> Self {
@@ -90,6 +97,20 @@ async fn models(State(p): State<FakeProvider>) -> Json<Value> {
 async fn chat_completions(State(p): State<FakeProvider>, Json(body): Json<Value>) -> Response {
     p.requests.lock().unwrap().push(body);
     let idx = p.calls.fetch_add(1, Ordering::SeqCst);
+    if let Some((status, retry_after)) = p.script.failures.get(idx) {
+        let mut response = (
+            axum::http::StatusCode::from_u16(*status).unwrap(),
+            json!({"error": {"message": "scripted failure"}}).to_string(),
+        )
+            .into_response();
+        if let Some(seconds) = retry_after {
+            response.headers_mut().insert(
+                axum::http::header::RETRY_AFTER,
+                seconds.to_string().parse().unwrap(),
+            );
+        }
+        return response;
+    }
     let turns = p
         .script
         .responses

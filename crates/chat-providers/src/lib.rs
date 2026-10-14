@@ -4,14 +4,17 @@
 //! [`ChatChunk`]s. Tool-call deltas are carried verbatim in each chunk so the
 //! agent runtime can assemble them.
 
+pub mod failover;
 pub mod openai;
 
 use std::pin::Pin;
+use std::time::Duration;
 
 use futures::Stream;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub use failover::FailoverProvider;
 pub use openai::OpenAiProvider;
 
 /// An image attached to a message, forwarded to a vision-capable model.
@@ -114,13 +117,121 @@ pub struct ChatChunk {
 #[derive(Debug, thiserror::Error)]
 pub enum ProviderError {
     #[error("http error {status}: {body}")]
-    Http { status: u16, body: String },
+    Http {
+        status: u16,
+        body: String,
+        /// Delay the server asked for via `Retry-After`, when it sent one.
+        retry_after: Option<Duration>,
+    },
     #[error("transport error: {0}")]
     Transport(#[from] reqwest::Error),
     #[error("stream decode error: {0}")]
     Decode(String),
     #[error("provider error: {0}")]
     Other(String),
+}
+
+impl ProviderError {
+    /// Whether another attempt could succeed: a rate limit, a server-side
+    /// error, or a transport failure. A rejected request (4xx other than 429)
+    /// is not retried.
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            ProviderError::Http { status, .. } => is_retryable_status(*status),
+            ProviderError::Transport(_) => true,
+            ProviderError::Decode(_) | ProviderError::Other(_) => false,
+        }
+    }
+}
+
+/// Whether a status code is worth retrying: rate limits and server errors.
+pub fn is_retryable_status(status: u16) -> bool {
+    status == 429 || status >= 500
+}
+
+/// The delay a response asks for via `Retry-After`, in whole seconds. HTTP-date
+/// values are ignored; the exponential backoff applies instead.
+pub fn retry_after(response: &reqwest::Response) -> Option<Duration> {
+    response
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse::<u64>()
+        .ok()
+        .map(Duration::from_secs)
+}
+
+/// Bounded retry policy for provider calls that fail with a rate limit, a
+/// server error or a transport failure. Attempts double the delay each time,
+/// starting at `base_delay_ms` and capped at `max_delay_ms`; a server-supplied
+/// `Retry-After` replaces the computed delay when it is longer.
+#[derive(Debug, Clone, Copy)]
+pub struct RetryPolicy {
+    /// Attempts after the first one. `0` disables retrying.
+    pub max_retries: u32,
+    /// Delay before the first retry, in milliseconds.
+    pub base_delay_ms: u64,
+    /// Upper bound for a single delay, in milliseconds.
+    pub max_delay_ms: u64,
+}
+
+impl Default for RetryPolicy {
+    fn default() -> Self {
+        Self {
+            max_retries: 2,
+            base_delay_ms: 250,
+            max_delay_ms: 8_000,
+        }
+    }
+}
+
+impl RetryPolicy {
+    /// Run `send` until it returns a response or the retry budget is spent.
+    /// `send` is called once per attempt, so it must rebuild the request; the
+    /// last error is returned when no attempt succeeds.
+    pub async fn run<F, Fut>(
+        &self,
+        mut send: F,
+    ) -> std::result::Result<reqwest::Response, ProviderError>
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = std::result::Result<reqwest::Response, ProviderError>>,
+    {
+        let mut attempt = 0;
+        loop {
+            match send().await {
+                Ok(response) => return Ok(response),
+                Err(err) => {
+                    if attempt >= self.max_retries || !err.is_retryable() {
+                        return Err(err);
+                    }
+                    let asked = match &err {
+                        ProviderError::Http { retry_after, .. } => *retry_after,
+                        _ => None,
+                    };
+                    tokio::time::sleep(self.delay(attempt, asked)).await;
+                }
+            }
+            attempt += 1;
+        }
+    }
+
+    /// Delay before retry `attempt` (0-based): `base_delay_ms * 2^attempt`,
+    /// capped at `max_delay_ms`. A server-supplied `Retry-After` is honored as
+    /// sent when it asks for a longer wait.
+    fn delay(&self, attempt: u32, retry_after: Option<Duration>) -> Duration {
+        let backoff = Duration::from_millis(
+            self.base_delay_ms
+                .saturating_mul(1u64 << attempt.min(16))
+                .min(self.max_delay_ms),
+        );
+        match retry_after {
+            Some(asked) if asked > backoff => asked,
+            _ => backoff,
+        }
+    }
 }
 
 pub type ChatStream =

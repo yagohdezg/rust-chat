@@ -24,7 +24,9 @@ use chat_auth::{
 };
 use chat_computers::ComputerOrchestrator;
 use chat_core::ChatError;
-use chat_providers::{ChatMessage, ChatRequest, LlmProvider, ModelInfo, OpenAiProvider};
+use chat_providers::{
+    ChatMessage, ChatRequest, FailoverProvider, LlmProvider, ModelInfo, OpenAiProvider, RetryPolicy,
+};
 use chat_sandbox::{ExecRequest, ExecResult, SandboxFile};
 use chat_store::types::message_status;
 use chat_store::{
@@ -1460,26 +1462,72 @@ async fn effective_api_key(
     Ok(row.api_key.clone())
 }
 
-/// Build a runtime client from a stored provider row, resolving the caller's
-/// effective key.
+/// Build a runtime client for one provider row and its resolved key, applying
+/// the deployment's retry policy.
 ///
 /// Only OpenAI-compatible endpoints are supported today; an Anthropic-native
 /// provider is a future addition (PLAN §3).
+fn runtime_provider(
+    row: &Provider,
+    key: Option<String>,
+    policy: RetryPolicy,
+) -> Result<Arc<dyn LlmProvider>, ChatError> {
+    match row.kind.as_str() {
+        "openai" | "custom" => Ok(Arc::new(
+            OpenAiProvider::new(&row.base_url, key.unwrap_or_default()).with_retries(policy),
+        )),
+        other => Err(ChatError::Config(format!(
+            "provider kind `{other}` is not supported yet"
+        ))),
+    }
+}
+
+/// Build a runtime client from a stored provider row, resolving the caller's
+/// effective key. When `PROVIDER_FAILOVER_PROVIDER` names a global provider,
+/// the client replays a refused request against it.
 async fn build_provider(
     state: &AppState,
     row: &Provider,
     user_id: Uuid,
 ) -> Result<Arc<dyn LlmProvider>, ApiError> {
+    let policy = RetryPolicy {
+        max_retries: state.cfg.provider_max_retries,
+        base_delay_ms: state.cfg.provider_retry_base_ms,
+        max_delay_ms: state.cfg.provider_retry_max_ms,
+    };
     let key = effective_api_key(state, row, user_id).await?;
-    match row.kind.as_str() {
-        "openai" | "custom" => Ok(Arc::new(OpenAiProvider::new(
-            &row.base_url,
-            key.unwrap_or_default(),
-        ))),
-        other => {
-            Err(ChatError::Config(format!("provider kind `{other}` is not supported yet")).into())
+    let primary = runtime_provider(row, key, policy)?;
+    let Some(name) = state.cfg.provider_failover_provider.as_deref() else {
+        return Ok(primary);
+    };
+    let fallback = state
+        .store
+        .list_providers(user_id)
+        .await?
+        .into_iter()
+        .find(|candidate| {
+            candidate.user_id.is_none() && candidate.name == name && candidate.id != row.id
+        });
+    let Some(fallback) = fallback else {
+        tracing::warn!(
+            provider = name,
+            "failover provider not found; running without failover"
+        );
+        return Ok(primary);
+    };
+    let key = effective_api_key(state, &fallback, user_id).await?;
+    let secondary = match runtime_provider(&fallback, key, policy) {
+        Ok(secondary) => secondary,
+        Err(err) => {
+            tracing::warn!(provider = name, %err, "failover provider is unusable; running without failover");
+            return Ok(primary);
         }
-    }
+    };
+    Ok(Arc::new(FailoverProvider::new(
+        primary,
+        secondary,
+        state.cfg.provider_failover_model.clone(),
+    )))
 }
 
 /// Map a database unique-constraint violation (e.g. a duplicate provider name

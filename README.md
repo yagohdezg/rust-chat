@@ -299,6 +299,11 @@ declarative base layer for these settings; see
 | `COMPUTER_WARM_POOL`      | `0`                                                  | Warm boxes per node, durably owned (`0` disables; ignored when workspaces are on) |
 | `COMPUTER_WORKSPACE`      | `true`                                               | Mount a durable per-user workspace volume |
 | `MODEL_ALLOWLIST`         | —                                                    | Comma-separated deployment-wide model allow-list |
+| `PROVIDER_MAX_RETRIES`    | `2`                                                  | Retries after a rate limit, server error or transport failure (`0` disables) |
+| `PROVIDER_RETRY_BASE_MS`  | `250`                                                | First retry delay; doubles per attempt up to `PROVIDER_RETRY_MAX_MS` |
+| `PROVIDER_RETRY_MAX_MS`   | `8000`                                               | Upper bound for one retry delay     |
+| `PROVIDER_FAILOVER_PROVIDER` | —                                                 | Global provider a refused request is replayed against |
+| `PROVIDER_FAILOVER_MODEL` | —                                                    | Model the failover replay asks for  |
 | `MCP_ENABLED`             | `false`                                              | Expose users' MCP server tools to the agent runtime |
 | `MCP_IDLE_TTL_SECONDS`    | `300`                                                | Shut down an MCP server idle this long |
 
@@ -423,6 +428,16 @@ A turn on a vision provider sends the conversation's attached images to the
 model as OpenAI-style `image_url` parts (up to 4 images, 4 MiB each) instead of
 reading them as text; a provider without the flag never receives an image part,
 and the image is read as text or skipped as usual.
+
+Provider calls are retried when they fail with a rate limit, a server error or
+a transport failure: `PROVIDER_MAX_RETRIES` attempts (2 by default) with an
+exponential backoff from `PROVIDER_RETRY_BASE_MS` (250ms) doubling per attempt
+up to `PROVIDER_RETRY_MAX_MS` (8s), and a provider's own `Retry-After` is
+honored when it asks for a longer wait. A rejected request (4xx other than 429)
+is not retried. When `PROVIDER_FAILOVER_PROVIDER` names a global provider, a
+request the selected provider refuses outright is replayed against it with
+`PROVIDER_FAILOVER_MODEL` (or the requested model when unset); failover covers
+only a request that never started streaming.
 
 Which models a caller may use is an allow-list layered three deep: the
 deployment-wide `MODEL_ALLOWLIST`, a provider's own `allowed_models` (set from
