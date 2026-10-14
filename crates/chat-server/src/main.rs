@@ -328,7 +328,7 @@ async fn main() -> anyhow::Result<()> {
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
-    tracing::info!(addr = %bind_addr, "chat-server listening");
+    tracing::info!(addr = %listener.local_addr()?, "chat-server listening");
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),

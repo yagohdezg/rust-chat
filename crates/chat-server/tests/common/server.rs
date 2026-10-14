@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
@@ -226,10 +227,9 @@ impl TestEnvBuilder {
             }
         };
 
-        let port = free_port()?;
-        let bind_addr = format!("127.0.0.1:{port}");
-        let base_url = format!("http://{bind_addr}");
-
+        // Port 0 lets the kernel pick a free port, so parallel tests can never
+        // collide; the server reports which one it bound.
+        let bind_addr = "127.0.0.1:0".to_string();
         let log = data_dir.path().join("server.log");
         let mut command = Command::new(env!("CARGO_BIN_EXE_chat-server"));
         command
@@ -248,7 +248,7 @@ impl TestEnvBuilder {
                 "SANDBOX_TOOL_ENABLED",
                 if self.sandbox_tool { "true" } else { "false" },
             )
-            .env("RUST_LOG", "warn")
+            .env("RUST_LOG", "warn,chat_server=info")
             .env("OPENAI_API_KEY", "fake-provider-key");
         for (key, value) in &self.extra_env {
             command.env(key, value);
@@ -256,12 +256,14 @@ impl TestEnvBuilder {
 
         let log_file = std::fs::File::create(&log).unwrap();
         let child = command
-            .stdout(Stdio::null())
+            .stdout(Stdio::from(log_file.try_clone().unwrap()))
             .stderr(Stdio::from(log_file))
             .spawn()
             .map_err(|err| anyhow!("spawning chat-server: {err}"))?;
 
         let mut server = ServerGuard { child, log };
+        let addr = wait_for_addr(&mut server).await?;
+        let base_url = format!("http://{addr}");
         wait_health(&base_url, &mut server).await?;
 
         Ok(TestEnv {
@@ -284,9 +286,62 @@ impl Default for TestEnvBuilder {
     }
 }
 
-fn free_port() -> Result<u16> {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
-    Ok(listener.local_addr()?.port())
+/// Read the address the server bound from its log, waiting for it to report
+/// one. The harness asks for port 0, so the log is the only place it appears.
+async fn wait_for_addr(server: &mut ServerGuard) -> Result<SocketAddr> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        if let Ok(Some(status)) = server.child.try_wait() {
+            return Err(anyhow!(
+                "chat-server exited with {status}:\n{}",
+                log_of(server)
+            ));
+        }
+        if let Ok(text) = std::fs::read_to_string(&server.log) {
+            if let Some(addr) = text.lines().rev().find_map(listening_addr) {
+                return Ok(addr);
+            }
+        }
+        if tokio::time::Instant::now() > deadline {
+            return Err(anyhow!(
+                "chat-server never reported a listening address:\n{}",
+                log_of(server)
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+/// The `addr=127.0.0.1:<port>` field of the server's "listening" log line.
+fn listening_addr(line: &str) -> Option<SocketAddr> {
+    let line = strip_ansi(line);
+    if !line.contains("chat-server listening") {
+        return None;
+    }
+    line.rsplit("addr=").next()?.trim().parse().ok()
+}
+
+/// Drop ANSI colour escapes, which the log carries when its output is a file
+/// rather than a terminal.
+fn strip_ansi(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut chars = line.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\u{1b}' {
+            for next in chars.by_ref() {
+                if next.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+fn log_of(server: &ServerGuard) -> String {
+    std::fs::read_to_string(&server.log).unwrap_or_default()
 }
 
 async fn wait_health(base_url: &str, server: &mut ServerGuard) -> Result<()> {
