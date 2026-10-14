@@ -445,7 +445,7 @@ impl Store for SqliteStore {
         .ok_or(ChatError::NotFound)?;
 
         let messages = sqlx::query_as::<_, Message>(
-            "select * from messages where conversation_id = ? order by created_at asc",
+            "select * from messages where conversation_id = ? order by created_at asc, id asc",
         )
         .bind(id)
         .fetch_all(&mut *tx)
@@ -472,7 +472,7 @@ impl Store for SqliteStore {
                 "insert into messages (id, conversation_id, role, content, reasoning, tool_calls, tool_call_id, status, created_at)
                  values (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
-            .bind(Uuid::new_v4())
+            .bind(Uuid::now_v7())
             .bind(new_id)
             .bind(&message.role)
             .bind(&message.content)
@@ -882,7 +882,7 @@ impl Store for SqliteStore {
              values (?, ?, ?, ?, ?, ?, ?, ?)
              returning *",
         )
-        .bind(Uuid::new_v4())
+        .bind(Uuid::now_v7())
         .bind(conversation_id)
         .bind(role)
         .bind(content)
@@ -910,7 +910,7 @@ impl Store for SqliteStore {
             "insert into messages (id, conversation_id, role, content, status, created_at)
              values (?, ?, 'user', ?, ?, ?)",
         )
-        .bind(Uuid::new_v4())
+        .bind(Uuid::now_v7())
         .bind(conversation_id)
         .bind(user_content)
         .bind(chat_store::types::message_status::COMPLETE)
@@ -932,7 +932,7 @@ impl Store for SqliteStore {
              values (?, ?, 'assistant', '', ?, ?)
              returning *",
         )
-        .bind(Uuid::new_v4())
+        .bind(Uuid::now_v7())
         .bind(conversation_id)
         .bind(chat_store::types::message_status::STREAMING)
         .bind(Utc::now())
