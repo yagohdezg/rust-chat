@@ -238,11 +238,11 @@
 		scroller?.scrollTo({ top: scroller.scrollHeight });
 	}
 
-	async function onFile(event: Event) {
+	function onFile(event: Event) {
 		const target = event.target as HTMLInputElement;
-		const file = target.files?.[0];
+		const files = Array.from(target.files ?? []);
 		target.value = '';
-		if (file) await chat.upload(file);
+		for (const file of files) void chat.upload(file);
 	}
 
 	function setProviderKey(provider: Provider) {
@@ -387,6 +387,32 @@
 	{/if}
 
 	<div class="composer">
+		{#if chat.uploads.length > 0}
+			<div class="uploads">
+				{#each chat.uploads as up (up.id)}
+					<div class="upload-row" class:error={up.status === 'error'} class:done={up.status === 'done'}>
+						<span class="upload-name" title={up.name}>{up.name}</span>
+						<span class="upload-bar" role="progressbar" aria-valuenow={Math.round(up.progress * 100)} aria-valuemin="0" aria-valuemax="100">
+							<span class="upload-fill" style="width: {Math.round(up.progress * 100)}%"></span>
+						</span>
+						<span class="upload-status">
+							{#if up.status === 'encoding'}
+								Encoding…
+							{:else if up.status === 'uploading'}
+								{Math.round(up.progress * 100)}%
+							{:else if up.status === 'done'}
+								Done
+							{:else}
+								{up.error ?? 'Upload failed'}
+							{/if}
+						</span>
+						{#if up.status === 'done' || up.status === 'error'}
+							<button class="chip-x" onclick={() => chat.clearUpload(up.id)} title="Dismiss" aria-label="Dismiss {up.name}">×</button>
+						{/if}
+					</div>
+				{/each}
+			</div>
+		{/if}
 		{#if chat.files.length > 0}
 			<div class="attachments">
 				{#each chat.files as file (file.id)}
@@ -412,15 +438,15 @@
 		></textarea>
 		<div class="controls">
 			<div class="controls-left">
-				<input bind:this={fileInput} type="file" hidden onchange={onFile} />
+				<input bind:this={fileInput} type="file" multiple hidden onchange={onFile} />
 				<div class="file-menu" bind:this={fileMenuEl}>
 					<button
 						type="button"
 						class="icon-ghost"
 						class:open={showFiles}
+						class:busy={uploading}
 						onclick={toggleFilePanel}
-						disabled={uploading}
-						title={uploading ? 'Uploading…' : 'Files & attachments'}
+						title="Files & attachments"
 						aria-label="Files and attachments"
 					>
 						<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -437,13 +463,8 @@
 								<span>File library</span>
 								<button class="panel-x" onclick={() => (showFiles = false)} aria-label="Close">×</button>
 							</div>
-							<button
-								type="button"
-								class="upload-btn"
-								onclick={() => fileInput?.click()}
-								disabled={uploading}
-							>
-								{uploading ? 'Uploading…' : '+ Upload new file'}
+							<button type="button" class="upload-btn" onclick={() => fileInput?.click()}>
+								+ Upload new file
 							</button>
 							<input class="file-search" bind:value={fileQuery} placeholder="Search library…" />
 							{#if chat.libraryLoading && !chat.libraryLoaded}
@@ -1004,6 +1025,9 @@
 		border-color: var(--primary);
 		color: var(--text);
 	}
+	.icon-ghost.busy {
+		color: var(--primary);
+	}
 	.badge {
 		position: absolute;
 		top: -5px;
@@ -1018,6 +1042,60 @@
 		font-weight: 700;
 		line-height: 16px;
 		text-align: center;
+	}
+	.uploads {
+		display: flex;
+		flex-direction: column;
+		gap: 0.3rem;
+	}
+	.upload-row {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+		padding: 0.3rem 0.45rem;
+		border: 1px solid var(--border);
+		border-radius: var(--radius-sm);
+		background: var(--surface-active);
+		font-size: 0.8rem;
+	}
+	.upload-row.error {
+		border-color: color-mix(in srgb, var(--danger) 45%, var(--border));
+	}
+	.upload-name {
+		flex: 0 1 200px;
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+	.upload-bar {
+		flex: 1 1 auto;
+		height: 6px;
+		min-width: 60px;
+		border-radius: var(--radius-full);
+		background: var(--bg);
+		overflow: hidden;
+	}
+	.upload-fill {
+		display: block;
+		height: 100%;
+		border-radius: var(--radius-full);
+		background: linear-gradient(135deg, var(--primary-hover), var(--primary-active));
+		transition: width 120ms linear;
+	}
+	.upload-row.error .upload-fill {
+		background: var(--danger);
+	}
+	.upload-row.done .upload-fill {
+		background: var(--accent);
+	}
+	.upload-status {
+		flex: 0 0 auto;
+		color: var(--text-muted);
+		font-size: 0.74rem;
+	}
+	.upload-row.error .upload-status {
+		color: var(--danger);
 	}
 	/* attached-file chips shown above the message box */
 	.attachments {

@@ -440,6 +440,56 @@ export function uploadFile(input: UploadInput): Promise<UploadResponse> {
 	});
 }
 
+export function uploadFileWithProgress(
+	input: UploadInput,
+	onProgress: (fraction: number) => void,
+	signal?: AbortSignal
+): Promise<UploadResponse> {
+	const send = (): Promise<UploadResponse> =>
+		new Promise((resolve, reject) => {
+			const xhr = new XMLHttpRequest();
+			xhr.open('POST', `${API_BASE}/api/files`);
+			xhr.setRequestHeader('content-type', 'application/json');
+			const token = auth.token;
+			if (token) xhr.setRequestHeader('authorization', `Bearer ${token}`);
+			xhr.upload.onprogress = (event) => {
+				if (event.lengthComputable && event.total > 0) onProgress(event.loaded / event.total);
+			};
+			xhr.onload = () => {
+				if (xhr.status >= 200 && xhr.status < 300) {
+					try {
+						resolve(JSON.parse(xhr.responseText) as UploadResponse);
+					} catch (err) {
+						reject(err);
+					}
+					return;
+				}
+				let message = xhr.statusText || `request failed (${xhr.status})`;
+				try {
+					const data = JSON.parse(xhr.responseText) as { error?: string };
+					if (data?.error) message = data.error;
+				} catch {
+				}
+				reject(new ApiError(xhr.status, message));
+			};
+			xhr.onerror = () => reject(new Error('network error during upload'));
+			xhr.onabort = () => reject(new DOMException('Aborted', 'AbortError'));
+			if (signal) signal.addEventListener('abort', () => xhr.abort(), { once: true });
+			xhr.send(JSON.stringify(input));
+		});
+	return send().catch(async (err) => {
+		if (
+			err instanceof ApiError &&
+			err.status === 401 &&
+			auth.refreshToken &&
+			(await refreshOnce())
+		) {
+			return send();
+		}
+		throw err;
+	});
+}
+
 export function listFiles(conversationId: string): Promise<FileRecord[]> {
 	return request<FileRecord[]>(`/api/conversations/${conversationId}/files`);
 }

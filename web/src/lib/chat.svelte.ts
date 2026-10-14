@@ -6,6 +6,15 @@ export type ToolStep =
 	| { kind: 'call'; id: string; name: string; args: string }
 	| { kind: 'result'; id: string; name: string; content: string };
 
+export type UploadItem = {
+	id: string;
+	name: string;
+	size: number;
+	progress: number;
+	status: 'encoding' | 'uploading' | 'done' | 'error';
+	error?: string;
+};
+
 /** How many messages to load per page. */
 const MESSAGE_PAGE = 50;
 
@@ -96,7 +105,7 @@ class ChatStore {
 	loading = $state(false);
 	initialized = $state(false);
 	streaming = $state(false);
-	uploading = $state(false);
+	uploads = $state<UploadItem[]>([]);
 	error = $state<string | null>(null);
 	notice = $state<string | null>(null);
 	model = $state('');
@@ -111,6 +120,10 @@ class ChatStore {
 	/** True when at least one provider has a key usable by this user. */
 	get hasUsableProvider(): boolean {
 		return this.providers.some((p) => p.has_key !== false);
+	}
+
+	get uploading(): boolean {
+		return this.uploads.some((u) => u.status === 'encoding' || u.status === 'uploading');
 	}
 
 	/** Providers the user must still supply a key for. */
@@ -256,6 +269,7 @@ class ChatStore {
 		this.files = [];
 		this.library = [];
 		this.libraryLoaded = false;
+		this.uploads = [];
 		this.error = null;
 		this.notice = null;
 		this.touch();
@@ -491,36 +505,64 @@ class ChatStore {
 	}
 
 	/** Return the active conversation id, creating one when none is selected. */
-	private async ensureConversation(): Promise<string | null> {
-		if (this.selectedId) return this.selectedId;
-		try {
-			return (await this.create()).id;
-		} catch (err) {
-			this.error = message(err);
-			return null;
-		}
+	private creating: Promise<string | null> | null = null;
+
+	private ensureConversation(): Promise<string | null> {
+		if (this.selectedId) return Promise.resolve(this.selectedId);
+		this.creating ??= this.create()
+			.then((conversation) => conversation.id)
+			.catch((err) => {
+				this.error = message(err);
+				return null;
+			})
+			.finally(() => {
+				this.creating = null;
+			});
+		return this.creating;
+	}
+
+	private updateUpload(id: string, patch: Partial<UploadItem>) {
+		this.uploads = this.uploads.map((u) => (u.id === id ? { ...u, ...patch } : u));
+	}
+
+	clearUpload(id: string) {
+		this.uploads = this.uploads.filter((u) => u.id !== id);
 	}
 
 	async upload(file: File) {
-		const conversationId = await this.ensureConversation();
-		if (!conversationId) return;
-		this.uploading = true;
+		const id = crypto.randomUUID();
+		this.uploads = [
+			...this.uploads,
+			{ id, name: file.name, size: file.size, progress: 0, status: 'encoding' }
+		];
 		this.error = null;
 		this.notice = null;
+		const conversationId = await this.ensureConversation();
+		if (!conversationId) {
+			this.updateUpload(id, { status: 'error', error: 'Could not start a conversation.' });
+			return;
+		}
 		try {
-			const response = await api.uploadFile({
-				filename: file.name,
-				mime: file.type || undefined,
-				content_b64: await fileToBase64(file),
-				conversation_id: conversationId
-			});
+			const content_b64 = await fileToBase64(file, (fraction) =>
+				this.updateUpload(id, { progress: fraction * 0.25 })
+			);
+			this.updateUpload(id, { status: 'uploading', progress: 0.25 });
+			const response = await api.uploadFileWithProgress(
+				{
+					filename: file.name,
+					mime: file.type || undefined,
+					content_b64,
+					conversation_id: conversationId
+				},
+				(fraction) => this.updateUpload(id, { progress: 0.25 + fraction * 0.75 })
+			);
 			this.files = [...this.files, response.file];
 			if (this.libraryLoaded) this.library = [...this.library, response.file];
+			this.updateUpload(id, { status: 'done', progress: 1 });
 			this.notice = `Attached ${file.name}.`;
+			setTimeout(() => this.clearUpload(id), 2000);
 		} catch (err) {
-			this.error = message(err);
-		} finally {
-			this.uploading = false;
+			this.updateUpload(id, { status: 'error', error: message(err) });
 		}
 	}
 
@@ -666,12 +708,16 @@ class ChatStore {
 	}
 }
 
-async function fileToBase64(file: File): Promise<string> {
+async function fileToBase64(
+	file: File,
+	onProgress?: (fraction: number) => void
+): Promise<string> {
 	const bytes = new Uint8Array(await file.arrayBuffer());
 	let binary = '';
 	const chunk = 0x8000;
 	for (let i = 0; i < bytes.length; i += chunk) {
 		binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+		onProgress?.(Math.min(1, (i + chunk) / bytes.length));
 	}
 	return btoa(binary);
 }
