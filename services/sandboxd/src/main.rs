@@ -10,18 +10,23 @@
 
 use std::sync::Arc;
 
+use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Request, State};
 use axum::http::{header, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::Response;
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
+use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::EnvFilter;
 
-use chat_sandbox::{BoxliteBackend, ExecRequest, ExecResult, SandboxBackend, SandboxSpec};
+use chat_sandbox::{
+    BoxliteBackend, CommandSpec, ExecRequest, ExecResult, OutputChannel, SandboxBackend,
+    SandboxSession, SandboxSpec,
+};
 
 #[derive(Clone)]
 struct AppState {
@@ -153,6 +158,7 @@ async fn main() -> anyhow::Result<()> {
 fn build_app(state: AppState) -> Router {
     let protected = Router::new()
         .route("/v1/exec", post(exec))
+        .route("/v1/exec/stream", get(exec_stream))
         .route("/v1/computers", post(create_computer).get(list_computers))
         .route("/v1/computers/{handle}/exec", post(exec_computer))
         .route("/v1/computers/{handle}/pause", post(pause_computer))
@@ -207,6 +213,80 @@ async fn exec(
         .await
         .map(Json)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
+/// Bridge a bidirectional WebSocket to a long-lived command in a fresh box.
+///
+/// The client's first frame is a JSON [`CommandSpec`]. Binary frames then flow
+/// to the command's stdin, and the command's output flows back as
+/// `[channel][payload]` binary frames. The box is torn down when either side
+/// closes.
+async fn exec_stream(ws: WebSocketUpgrade, State(state): State<AppState>) -> Response {
+    ws.on_upgrade(move |socket| proxy_session(socket, state))
+}
+
+async fn proxy_session(mut socket: WebSocket, state: AppState) {
+    let command = match socket.recv().await {
+        Some(Ok(Message::Text(text))) => match serde_json::from_str::<CommandSpec>(&text) {
+            Ok(command) => command,
+            Err(e) => {
+                tracing::warn!(error = %e, "invalid exec stream command spec");
+                let _ = socket.send(Message::Close(None)).await;
+                return;
+            }
+        },
+        _ => return,
+    };
+
+    let session: Arc<dyn SandboxSession> = match state.backend.open_session(&command).await {
+        Ok(session) => Arc::from(session),
+        Err(e) => {
+            tracing::warn!(error = %e, command = %command.command, "failed to open sandbox session");
+            let _ = socket.send(Message::Close(None)).await;
+            return;
+        }
+    };
+
+    let (mut tx, mut rx) = socket.split();
+
+    let stdin_session = session.clone();
+    let mut stdin_task = tokio::spawn(async move {
+        while let Some(Ok(message)) = rx.next().await {
+            match message {
+                Message::Binary(bytes) => {
+                    if stdin_session.write_stdin(&bytes).await.is_err() {
+                        break;
+                    }
+                }
+                Message::Close(_) => break,
+                _ => {}
+            }
+        }
+    });
+
+    loop {
+        tokio::select! {
+            chunk = session.read_output() => match chunk {
+                Some(chunk) => {
+                    let mut frame = Vec::with_capacity(chunk.data.len() + 1);
+                    frame.push(match chunk.channel {
+                        OutputChannel::Stderr => 0x02,
+                        OutputChannel::Stdout => 0x01,
+                    });
+                    frame.extend_from_slice(&chunk.data);
+                    if tx.send(Message::Binary(frame.into())).await.is_err() {
+                        break;
+                    }
+                }
+                None => break,
+            },
+            _ = &mut stdin_task => break,
+        }
+    }
+
+    stdin_task.abort();
+    let _ = tx.send(Message::Close(None)).await;
+    session.close().await;
 }
 
 /// Provision a persistent box for a per-user "computer", optionally mounting a
@@ -374,5 +454,142 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[derive(Clone)]
+    struct MockBoxlite {
+        deletes: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    async fn create_box() -> (StatusCode, Json<serde_json::Value>) {
+        (
+            StatusCode::CREATED,
+            Json(serde_json::json!({ "box_id": "box-1" })),
+        )
+    }
+
+    async fn start_exec(Path(_box_id): Path<String>) -> (StatusCode, Json<serde_json::Value>) {
+        (
+            StatusCode::CREATED,
+            Json(serde_json::json!({ "execution_id": "exec-1" })),
+        )
+    }
+
+    async fn attach(ws: WebSocketUpgrade) -> Response {
+        ws.on_upgrade(|socket| async move {
+            let (mut tx, mut rx) = socket.split();
+            while let Some(Ok(message)) = rx.next().await {
+                match message {
+                    Message::Binary(bytes) => {
+                        let mut frame = vec![0x01u8];
+                        frame.extend_from_slice(&bytes);
+                        if tx.send(Message::Binary(frame.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Message::Close(_) => break,
+                    _ => {}
+                }
+            }
+            let _ = tx
+                .send(Message::Text(r#"{"type":"exit","exit_code":0}"#.into()))
+                .await;
+            let _ = tx.send(Message::Close(None)).await;
+        })
+    }
+
+    async fn delete_box(
+        State(mock): State<MockBoxlite>,
+        Path(_box_id): Path<String>,
+    ) -> StatusCode {
+        mock.deletes
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        StatusCode::NO_CONTENT
+    }
+
+    async fn spawn_mock_boxlite() -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+        let mock = MockBoxlite {
+            deletes: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        };
+        let app = Router::new()
+            .route("/v1/boxes", post(create_box))
+            .route("/v1/boxes/{box_id}/exec", post(start_exec))
+            .route(
+                "/v1/boxes/{box_id}/executions/{exec_id}/attach",
+                get(attach),
+            )
+            .route("/v1/boxes/{box_id}", delete(delete_box))
+            .with_state(mock.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        (format!("http://{addr}"), mock.deletes)
+    }
+
+    #[tokio::test]
+    async fn exec_stream_bridges_stdin_and_stdout() {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        use tokio_tungstenite::tungstenite::Message as TMessage;
+
+        let (boxlite_url, deletes) = spawn_mock_boxlite().await;
+        let state = AppState {
+            backend: Arc::new(BoxliteBackend::new(
+                boxlite_url,
+                None,
+                SandboxSpec::default(),
+            )),
+            token: Arc::new("right-token".into()),
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, build_app(state)).await;
+        });
+
+        let url = format!("ws://{addr}/v1/exec/stream");
+        let mut request = url.into_client_request().unwrap();
+        request.headers_mut().insert(
+            axum::http::header::AUTHORIZATION,
+            "Bearer right-token".parse().unwrap(),
+        );
+        let (ws, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+        let (mut tx, mut rx) = ws.split();
+
+        let spec = serde_json::to_string(&CommandSpec {
+            command: "echo-mcp".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        tx.send(TMessage::Text(spec)).await.unwrap();
+        tx.send(TMessage::Binary(b"hello\n".to_vec()))
+            .await
+            .unwrap();
+
+        let mut got = Vec::new();
+        while let Some(message) = rx.next().await {
+            if let TMessage::Binary(bytes) = message.unwrap() {
+                assert_eq!(bytes[0], 0x01, "expected a stdout frame");
+                got.extend_from_slice(&bytes[1..]);
+                if got.ends_with(b"\n") {
+                    break;
+                }
+            }
+        }
+        assert_eq!(got, b"hello\n");
+
+        tx.send(TMessage::Close(None)).await.unwrap();
+        for _ in 0..100 {
+            if deletes.load(std::sync::atomic::Ordering::SeqCst) > 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert_eq!(
+            deletes.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the box was not torn down after the stream closed"
+        );
     }
 }

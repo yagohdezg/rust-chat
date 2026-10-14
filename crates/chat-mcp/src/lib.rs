@@ -4,11 +4,15 @@
 //! - `stdio`: spawns a server process and exchanges newline-delimited messages.
 //! - `http`: Streamable HTTP — POSTs JSON-RPC and reads a JSON or SSE response.
 //!
-//! Both clients accept concurrent requests: each is correlated to its response
+//! A stdio server can also run inside a sandbox: [`SandboxMcpClient`] speaks the
+//! same JSON-RPC over a caller-provided [`LineChannel`], letting the server's
+//! stdio be bridged across a sandbox boundary without the host spawning it.
+//!
+//! All clients accept concurrent requests: each is correlated to its response
 //! by JSON-RPC id, so one slow call never blocks the others.
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use eventsource_stream::Eventsource;
@@ -16,7 +20,7 @@ use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStdin, Command};
+use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::{oneshot, Mutex};
 
 pub const PROTOCOL_VERSION: &str = "2025-06-18";
@@ -74,6 +78,9 @@ pub struct McpServerConfig {
 pub enum McpClient {
     Stdio(Box<StdioMcpClient>),
     Http(HttpMcpClient),
+    /// A stdio server running inside a sandbox, reached through a
+    /// caller-supplied [`LineChannel`].
+    Sandbox(Box<SandboxMcpClient>),
 }
 
 impl McpClient {
@@ -102,6 +109,7 @@ impl McpClient {
         match self {
             Self::Stdio(client) => client.is_running(),
             Self::Http(client) => client.is_running(),
+            Self::Sandbox(client) => client.is_running(),
         }
     }
 
@@ -109,6 +117,7 @@ impl McpClient {
         match self {
             Self::Stdio(client) => client.initialize().await,
             Self::Http(client) => client.initialize().await,
+            Self::Sandbox(client) => client.initialize().await,
         }
     }
 
@@ -116,6 +125,7 @@ impl McpClient {
         match self {
             Self::Stdio(client) => client.list_tools().await,
             Self::Http(client) => client.list_tools().await,
+            Self::Sandbox(client) => client.list_tools().await,
         }
     }
 
@@ -123,7 +133,119 @@ impl McpClient {
         match self {
             Self::Stdio(client) => client.call_tool(name, arguments).await,
             Self::Http(client) => client.call_tool(name, arguments).await,
+            Self::Sandbox(client) => client.call_tool(name, arguments).await,
         }
+    }
+}
+
+/// A bidirectional, newline-delimited channel to an MCP server process, whether
+/// spawned on the host or bridged across a sandbox boundary.
+#[async_trait::async_trait]
+pub trait LineChannel: Send + Sync {
+    /// Send one line (without a trailing newline; it is added by the channel).
+    async fn send_line(&self, line: &str) -> Result<(), McpError>;
+
+    /// Receive the next line, or `None` once the peer closes the channel.
+    async fn recv_line(&self) -> Option<String>;
+}
+
+/// JSON-RPC request/response plumbing shared by the stdio and sandbox clients.
+///
+/// A background task reads lines from the channel and routes each response to
+/// the caller waiting on its id, so many requests can be in flight at once.
+struct JsonRpcClient {
+    channel: Arc<dyn LineChannel>,
+    pending: Pending,
+    next_id: AtomicI64,
+    reader: tokio::task::JoinHandle<()>,
+    alive: Arc<AtomicBool>,
+}
+
+impl JsonRpcClient {
+    fn start(channel: Arc<dyn LineChannel>, alive: Arc<AtomicBool>) -> Self {
+        let pending: Pending = Arc::new(StdMutex::new(HashMap::new()));
+        let reader_pending = pending.clone();
+        let reader_channel = channel.clone();
+        let reader_alive = alive.clone();
+        let reader = tokio::spawn(async move {
+            while let Some(line) = reader_channel.recv_line().await {
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                let Ok(value) = serde_json::from_str::<Value>(trimmed) else {
+                    continue;
+                };
+                let Some(id) = value.get("id").and_then(Value::as_i64) else {
+                    continue;
+                };
+                let result = parse_message(value, id).map(|result| result.unwrap_or(Value::Null));
+                if let Some(sender) = reader_pending.lock().unwrap().remove(&id) {
+                    let _ = sender.send(result);
+                }
+            }
+            // The peer closed the channel: wake every waiter with a closed error.
+            reader_alive.store(false, Ordering::SeqCst);
+            reader_pending.lock().unwrap().clear();
+        });
+
+        Self {
+            channel,
+            pending,
+            next_id: AtomicI64::new(1),
+            reader,
+            alive,
+        }
+    }
+
+    fn is_running(&self) -> bool {
+        self.alive.load(Ordering::SeqCst)
+    }
+
+    async fn request(&self, method: &str, params: Value) -> Result<Value, McpError> {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let (sender, receiver) = oneshot::channel();
+        self.pending.lock().unwrap().insert(id, sender);
+        let _guard = PendingGuard {
+            pending: self.pending.clone(),
+            id,
+        };
+
+        let message = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
+        let line = serde_json::to_string(&message).unwrap();
+        self.channel.send_line(&line).await?;
+
+        receiver
+            .await
+            .map_err(|_| McpError::Protocol("server closed the connection".into()))?
+    }
+
+    async fn notify(&self, method: &str, params: Value) -> Result<(), McpError> {
+        let message = json!({ "jsonrpc": "2.0", "method": method, "params": params });
+        let line = serde_json::to_string(&message).unwrap();
+        self.channel.send_line(&line).await
+    }
+
+    pub async fn initialize(&self) -> Result<Value, McpError> {
+        let result = self.request("initialize", initialize_params()).await?;
+        self.notify("notifications/initialized", json!({})).await?;
+        Ok(result)
+    }
+
+    pub async fn list_tools(&self) -> Result<Vec<McpTool>, McpError> {
+        let result = self.request("tools/list", json!({})).await?;
+        tools_from(result)
+    }
+
+    pub async fn call_tool(&self, name: &str, args: Value) -> Result<Value, McpError> {
+        self.request("tools/call", json!({ "name": name, "arguments": args }))
+            .await
+    }
+}
+
+impl Drop for JsonRpcClient {
+    fn drop(&mut self) {
+        self.reader.abort();
     }
 }
 
@@ -187,10 +309,7 @@ impl Drop for PendingGuard {
 /// and one slow call never blocks the others.
 pub struct StdioMcpClient {
     child: StdMutex<Child>,
-    stdin: Mutex<ChildStdin>,
-    pending: Pending,
-    next_id: AtomicI64,
-    reader: tokio::task::JoinHandle<()>,
+    rpc: JsonRpcClient,
 }
 
 impl StdioMcpClient {
@@ -217,98 +336,94 @@ impl StdioMcpClient {
             .take()
             .ok_or_else(|| McpError::Protocol("no stdout".into()))?;
 
-        let pending: Pending = Arc::new(StdMutex::new(HashMap::new()));
-        let reader_pending = pending.clone();
-        let reader = tokio::spawn(async move {
-            let mut lines = BufReader::new(stdout).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                let trimmed = line.trim();
-                if trimmed.is_empty() {
-                    continue;
-                }
-                let Ok(value) = serde_json::from_str::<Value>(trimmed) else {
-                    continue;
-                };
-                let Some(id) = value.get("id").and_then(Value::as_i64) else {
-                    continue;
-                };
-                let result = parse_message(value, id).map(|result| result.unwrap_or(Value::Null));
-                if let Some(sender) = reader_pending.lock().unwrap().remove(&id) {
-                    let _ = sender.send(result);
-                }
-            }
-            // The server closed stdout: wake every waiter with a closed error.
-            reader_pending.lock().unwrap().clear();
+        let channel = Arc::new(ProcessChannel {
+            stdin: Mutex::new(stdin),
+            stdout: Mutex::new(BufReader::new(stdout).lines()),
         });
+        let alive = Arc::new(AtomicBool::new(true));
+        let rpc = JsonRpcClient::start(channel, alive);
 
         Ok(Self {
             child: StdMutex::new(child),
-            stdin: Mutex::new(stdin),
-            pending,
-            next_id: AtomicI64::new(1),
-            reader,
+            rpc,
         })
     }
 
     /// Whether the server process is still running. A child that has exited (or
     /// was killed) reports `false`, so the caller can reconnect.
     pub fn is_running(&self) -> bool {
-        matches!(self.child.lock().unwrap().try_wait(), Ok(None))
+        self.rpc.is_running() && matches!(self.child.lock().unwrap().try_wait(), Ok(None))
     }
 
-    async fn request(&self, method: &str, params: Value) -> Result<Value, McpError> {
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let (sender, receiver) = oneshot::channel();
-        self.pending.lock().unwrap().insert(id, sender);
-        let _guard = PendingGuard {
-            pending: self.pending.clone(),
-            id,
-        };
-
-        let message = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
-        let mut line = serde_json::to_string(&message).unwrap();
-        line.push('\n');
-        {
-            let mut stdin = self.stdin.lock().await;
-            stdin.write_all(line.as_bytes()).await?;
-            stdin.flush().await?;
-        }
-
-        receiver
-            .await
-            .map_err(|_| McpError::Protocol("server closed the connection".into()))?
+    pub async fn initialize(&self) -> Result<Value, McpError> {
+        self.rpc.initialize().await
     }
 
-    async fn notify(&self, method: &str, params: Value) -> Result<(), McpError> {
-        let message = json!({ "jsonrpc": "2.0", "method": method, "params": params });
-        let mut line = serde_json::to_string(&message).unwrap();
-        line.push('\n');
+    pub async fn list_tools(&self) -> Result<Vec<McpTool>, McpError> {
+        self.rpc.list_tools().await
+    }
+
+    pub async fn call_tool(&self, name: &str, args: Value) -> Result<Value, McpError> {
+        self.rpc.call_tool(name, args).await
+    }
+}
+
+/// The [`LineChannel`] over a host-spawned child process.
+struct ProcessChannel {
+    stdin: Mutex<ChildStdin>,
+    stdout: Mutex<tokio::io::Lines<BufReader<ChildStdout>>>,
+}
+
+#[async_trait::async_trait]
+impl LineChannel for ProcessChannel {
+    async fn send_line(&self, line: &str) -> Result<(), McpError> {
         let mut stdin = self.stdin.lock().await;
         stdin.write_all(line.as_bytes()).await?;
+        stdin.write_all(b"\n").await?;
         stdin.flush().await?;
         Ok(())
     }
 
-    pub async fn initialize(&self) -> Result<Value, McpError> {
-        let result = self.request("initialize", initialize_params()).await?;
-        self.notify("notifications/initialized", json!({})).await?;
-        Ok(result)
-    }
-
-    pub async fn list_tools(&self) -> Result<Vec<McpTool>, McpError> {
-        let result = self.request("tools/list", json!({})).await?;
-        tools_from(result)
-    }
-
-    pub async fn call_tool(&self, name: &str, args: Value) -> Result<Value, McpError> {
-        self.request("tools/call", json!({ "name": name, "arguments": args }))
-            .await
+    async fn recv_line(&self) -> Option<String> {
+        let mut stdout = self.stdout.lock().await;
+        match stdout.next_line().await {
+            Ok(Some(line)) => Some(line),
+            _ => None,
+        }
     }
 }
 
-impl Drop for StdioMcpClient {
-    fn drop(&mut self) {
-        self.reader.abort();
+/// An MCP client whose stdio is bridged across a sandbox boundary by the
+/// caller (see [`LineChannel`]).
+pub struct SandboxMcpClient {
+    rpc: JsonRpcClient,
+    _channel: Arc<dyn LineChannel>,
+}
+
+impl SandboxMcpClient {
+    pub fn new(channel: Arc<dyn LineChannel>) -> Self {
+        let alive = Arc::new(AtomicBool::new(true));
+        let rpc = JsonRpcClient::start(channel.clone(), alive);
+        Self {
+            rpc,
+            _channel: channel,
+        }
+    }
+
+    pub fn is_running(&self) -> bool {
+        self.rpc.is_running()
+    }
+
+    pub async fn initialize(&self) -> Result<Value, McpError> {
+        self.rpc.initialize().await
+    }
+
+    pub async fn list_tools(&self) -> Result<Vec<McpTool>, McpError> {
+        self.rpc.list_tools().await
+    }
+
+    pub async fn call_tool(&self, name: &str, args: Value) -> Result<Value, McpError> {
+        self.rpc.call_tool(name, args).await
     }
 }
 

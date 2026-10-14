@@ -488,8 +488,8 @@ impl Store for PostgresStore {
     async fn create_mcp_server(&self, user_id: Uuid, draft: McpServerDraft) -> Result<McpServer> {
         let row = sqlx::query_as::<_, McpServer>(
             "insert into mcp_servers
-             (id, user_id, name, transport, command, url, args, env, enabled, created_at)
-             values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+             (id, user_id, name, transport, command, url, args, env, sandbox, sandbox_image, enabled, created_at)
+             values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
              returning *",
         )
         .bind(Uuid::new_v4())
@@ -500,6 +500,8 @@ impl Store for PostgresStore {
         .bind(draft.url)
         .bind(Json(draft.args))
         .bind(Json(draft.env))
+        .bind(draft.sandbox)
+        .bind(draft.sandbox_image)
         .bind(draft.enabled)
         .bind(Utc::now())
         .fetch_one(&self.pool)

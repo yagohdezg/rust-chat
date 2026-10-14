@@ -10,6 +10,8 @@ pub mod boxlite;
 pub mod egress;
 pub mod http;
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 pub use boxlite::BoxliteBackend;
@@ -134,6 +136,48 @@ pub struct ExecResult {
     pub files: Vec<SandboxFile>,
 }
 
+/// A raw command to run interactively inside a sandbox (argv + environment).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CommandSpec {
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    /// Optional image override; `None` uses the backend's configured image.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
+}
+
+/// Which output stream an [`OutputChunk`] came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutputChannel {
+    Stdout,
+    Stderr,
+}
+
+/// One chunk of a session's output.
+#[derive(Debug, Clone)]
+pub struct OutputChunk {
+    pub channel: OutputChannel,
+    pub data: Vec<u8>,
+}
+
+/// A live, bidirectional command running inside a sandbox: stdin in,
+/// stdout/stderr out. Dropping the session tears down its sandbox.
+#[async_trait::async_trait]
+pub trait SandboxSession: Send + Sync {
+    /// Append raw bytes to the command's stdin.
+    async fn write_stdin(&self, data: &[u8]) -> Result<(), SandboxError>;
+
+    /// Read the next output chunk. `None` once the command has exited or the
+    /// stream closed.
+    async fn read_output(&self) -> Option<OutputChunk>;
+
+    /// Terminate the session and release its sandbox. Idempotent.
+    async fn close(&self);
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum SandboxError {
     #[error("unsupported language: {0}")]
@@ -161,6 +205,13 @@ pub trait SandboxBackend: Send + Sync {
     /// The backend holds its own [`SandboxSpec`] (image, limits, timeout), so
     /// callers only supply the request.
     async fn run(&self, request: &ExecRequest) -> Result<ExecResult, SandboxError>;
+
+    /// Open a long-lived interactive command in a fresh sandbox, bridging
+    /// stdin/stdout/stderr until the returned session is closed.
+    async fn open_session(
+        &self,
+        command: &CommandSpec,
+    ) -> Result<Box<dyn SandboxSession>, SandboxError>;
 }
 
 /// Map a language identifier to (interpreter argv, source file extension).

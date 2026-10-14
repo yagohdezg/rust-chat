@@ -435,4 +435,11 @@ namespaced `mcp__<server>__<tool>`. Both transports are supported: `stdio`
 spawns a local command, while `http` speaks Streamable HTTP (JSON or SSE
 responses) to a URL. Connections are opened on demand, cached across turns,
 reconnected if they drop, and shut down after `MCP_IDLE_TTL_SECONDS` idle.
-Running untrusted servers inside the sandbox is still a follow-up.
+
+A `stdio` server can instead run **inside the sandbox** by setting `sandbox:
+true` (optionally `sandbox_image`), so an untrusted server never touches the
+host: `chat-server` opens a bidirectional exec over `sandboxd` (which proxies
+BoxLite's attach WebSocket) and bridges the server's newline-delimited JSON-RPC
+across the boundary. The box is a fresh microVM with no host filesystem, and
+its egress follows the deployment's sandbox policy; it is destroyed when the
+connection closes or the server goes idle.

@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -11,8 +12,9 @@ use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::{
-    box_names, program, BoxSummary, ExecRequest, ExecResult, IsolationLevel, SandboxBackend,
-    SandboxError, SandboxFile, SandboxSpec, OUTPUT_DIR,
+    box_names, program, BoxSummary, CommandSpec, ExecRequest, ExecResult, IsolationLevel,
+    OutputChannel, OutputChunk, SandboxBackend, SandboxError, SandboxFile, SandboxSession,
+    SandboxSpec, OUTPUT_DIR,
 };
 
 /// Maximum bytes captured per stream (stdout / stderr) before clipping.
@@ -30,6 +32,14 @@ const WORK_DIR: &str = "/app";
 /// Stable name of the snapshot captured when a computer is paused. Reusing one
 /// name keeps a single, current snapshot per box.
 const PAUSE_SNAPSHOT: &str = "pause";
+
+/// Per-execution overrides for [`BoxliteBackend::start_exec`].
+struct ExecOptions<'a> {
+    env: &'a BTreeMap<String, String>,
+    working_dir: Option<&'a str>,
+    /// `None` leaves the command unbounded (used for long-lived sessions).
+    timeout_seconds: Option<f64>,
+}
 
 /// BoxLite backend — one hardware-isolated microVM per run.
 ///
@@ -71,11 +81,7 @@ impl BoxliteBackend {
     }
 
     fn endpoint(&self, prefix: &str, path: &str) -> String {
-        if prefix.is_empty() {
-            format!("{}/v1/{}", self.base_url, path)
-        } else {
-            format!("{}/v1/{}/{}", self.base_url, prefix, path)
-        }
+        endpoint_url(&self.base_url, prefix, path)
     }
 
     fn auth(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
@@ -120,6 +126,16 @@ impl BoxliteBackend {
         workspace: Option<&str>,
         name: Option<&str>,
     ) -> Result<String, SandboxError> {
+        self.create_box_with(prefix, workspace, name, None).await
+    }
+
+    async fn create_box_with(
+        &self,
+        prefix: &str,
+        workspace: Option<&str>,
+        name: Option<&str>,
+        image: Option<&str>,
+    ) -> Result<String, SandboxError> {
         let url = self.endpoint(prefix, "boxes");
         let outbound = if self.spec.network {
             let mut outbound = serde_json::json!({ "mode": "enabled" });
@@ -130,8 +146,12 @@ impl BoxliteBackend {
         } else {
             serde_json::json!({ "mode": "disabled" })
         };
+        let image = image
+            .map(str::trim)
+            .filter(|image| !image.is_empty())
+            .unwrap_or(self.spec.image.as_str());
         let mut body = serde_json::json!({
-            "image": self.spec.image.clone(),
+            "image": image,
             "cpus": self.spec.cpus.round().max(1.0) as u32,
             "memory_mib": self.spec.memory_mb.max(128),
             "detach": false,
@@ -351,8 +371,14 @@ impl BoxliteBackend {
     async fn clear_output_dir(&self, prefix: &str, box_id: &str) {
         let command = format!("rm -rf {OUTPUT_DIR}");
         let args = vec!["-c".to_string(), command];
+        let env = BTreeMap::new();
+        let options = ExecOptions {
+            env: &env,
+            working_dir: Some(WORK_DIR),
+            timeout_seconds: Some(self.spec.timeout_seconds.max(1) as f64),
+        };
         match self
-            .start_exec(prefix, box_id, "sh".to_string(), args)
+            .start_exec(prefix, box_id, "sh".to_string(), args, options)
             .await
         {
             Ok(exec_id) => {
@@ -368,14 +394,22 @@ impl BoxliteBackend {
         box_id: &str,
         command: String,
         args: Vec<String>,
+        options: ExecOptions<'_>,
     ) -> Result<String, SandboxError> {
         let url = self.endpoint(prefix, &format!("boxes/{box_id}/exec"));
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "command": command,
             "args": args,
-            "timeout_seconds": self.spec.timeout_seconds.max(1) as f64,
-            "working_dir": WORK_DIR,
         });
+        if !options.env.is_empty() {
+            body["env"] = serde_json::json!(options.env);
+        }
+        if let Some(working_dir) = options.working_dir {
+            body["working_dir"] = serde_json::json!(working_dir);
+        }
+        if let Some(timeout_seconds) = options.timeout_seconds {
+            body["timeout_seconds"] = serde_json::json!(timeout_seconds);
+        }
         let resp = self
             .auth(self.http.post(url))
             .json(&body)
@@ -415,35 +449,11 @@ impl BoxliteBackend {
 
     async fn delete_box(&self, prefix: &str, box_id: &str) -> Result<(), SandboxError> {
         let url = self.endpoint(prefix, &format!("boxes/{box_id}"));
-        let resp = self
-            .auth(self.http.delete(url))
-            .query(&[("force", "true")])
-            .send()
-            .await
-            .map_err(|e| transport("delete box", e))?;
-        if resp.status().is_success() || resp.status() == reqwest::StatusCode::NOT_FOUND {
-            Ok(())
-        } else {
-            Err(SandboxError::Unavailable(format!(
-                "delete box failed: {}",
-                resp.status()
-            )))
-        }
+        delete_box_url(&self.http, url, self.token.as_deref()).await
     }
 
     fn ws_url(&self, prefix: &str, box_id: &str, exec_id: &str) -> String {
-        let base = if let Some(rest) = self.base_url.strip_prefix("https://") {
-            format!("wss://{rest}")
-        } else if let Some(rest) = self.base_url.strip_prefix("http://") {
-            format!("ws://{rest}")
-        } else {
-            self.base_url.clone()
-        };
-        if prefix.is_empty() {
-            format!("{base}/v1/boxes/{box_id}/executions/{exec_id}/attach")
-        } else {
-            format!("{base}/v1/{prefix}/boxes/{box_id}/executions/{exec_id}/attach")
-        }
+        ws_url(&self.base_url, prefix, box_id, exec_id)
     }
 
     async fn stream_exec(
@@ -524,7 +534,15 @@ impl BoxliteBackend {
     ) -> Result<ExecResult, SandboxError> {
         let (command, args, ext) = program;
         self.upload_files(prefix, box_id, ext, request).await?;
-        let exec_id = self.start_exec(prefix, box_id, command, args).await?;
+        let env = BTreeMap::new();
+        let options = ExecOptions {
+            env: &env,
+            working_dir: Some(WORK_DIR),
+            timeout_seconds: Some(self.spec.timeout_seconds.max(1) as f64),
+        };
+        let exec_id = self
+            .start_exec(prefix, box_id, command, args, options)
+            .await?;
         *exec_id_cell.lock().unwrap() = Some(exec_id.clone());
         let mut result = self.stream_exec(prefix, box_id, &exec_id).await?;
         result.files = self.collect_outputs(prefix, box_id, request).await;
@@ -710,7 +728,187 @@ impl SandboxBackend for BoxliteBackend {
 
         result
     }
+
+    async fn open_session(
+        &self,
+        command: &CommandSpec,
+    ) -> Result<Box<dyn SandboxSession>, SandboxError> {
+        let prefix = self.prefix().await?.to_owned();
+        let box_id = self
+            .create_box_with(
+                &prefix,
+                None,
+                Some(&box_names::ephemeral()),
+                command.image.as_deref(),
+            )
+            .await?;
+
+        let options = ExecOptions {
+            env: &command.env,
+            working_dir: None,
+            timeout_seconds: None,
+        };
+        let exec_id = match self
+            .start_exec(
+                &prefix,
+                &box_id,
+                command.command.clone(),
+                command.args.clone(),
+                options,
+            )
+            .await
+        {
+            Ok(exec_id) => exec_id,
+            Err(e) => {
+                let _ = self.delete_box(&prefix, &box_id).await;
+                return Err(e);
+            }
+        };
+
+        let session = BoxliteSession {
+            prefix: prefix.clone(),
+            box_id: box_id.clone(),
+            base_url: self.base_url.clone(),
+            token: self.token.clone(),
+            http: self.http.clone(),
+            sink: tokio::sync::Mutex::new(None),
+            stream: tokio::sync::Mutex::new(None),
+            closed: std::sync::atomic::AtomicBool::new(false),
+        };
+
+        match session.attach(&prefix, &box_id, &exec_id).await {
+            Ok(()) => Ok(Box::new(session)),
+            Err(e) => {
+                let _ = self.delete_box(&prefix, &box_id).await;
+                Err(e)
+            }
+        }
+    }
 }
+
+/// A live interactive execution over BoxLite's bidirectional attach WebSocket.
+///
+/// Client -> server binary frames are appended to the command's stdin;
+/// server -> client binary frames are `[channel][payload]` with channel `0x01`
+/// for stdout and `0x02` for stderr. A JSON `{"type":"exit"}` text frame ends
+/// the stream. The box is force-deleted when the session closes or drops.
+struct BoxliteSession {
+    prefix: String,
+    box_id: String,
+    base_url: String,
+    token: Option<String>,
+    http: reqwest::Client,
+    sink: tokio::sync::Mutex<Option<WsSink>>,
+    stream: tokio::sync::Mutex<Option<WsStream>>,
+    closed: std::sync::atomic::AtomicBool,
+}
+
+impl BoxliteSession {
+    async fn attach(&self, prefix: &str, box_id: &str, exec_id: &str) -> Result<(), SandboxError> {
+        let ws_url = ws_url(&self.base_url, prefix, box_id, exec_id);
+        let mut request = ws_url
+            .clone()
+            .into_client_request()
+            .map_err(|e| SandboxError::Transport(format!("invalid attach URL {ws_url}: {e}")))?;
+        if let Some(token) = &self.token {
+            let value = HeaderValue::from_str(&format!("Bearer {token}"))
+                .map_err(|e| SandboxError::Transport(format!("invalid token: {e}")))?;
+            request.headers_mut().insert(AUTHORIZATION, value);
+        }
+        let (ws, _resp) = tokio_tungstenite::connect_async(request)
+            .await
+            .map_err(|e| SandboxError::Transport(format!("attach failed: {e}")))?;
+        let (sink, stream) = ws.split();
+        *self.sink.lock().await = Some(sink);
+        *self.stream.lock().await = Some(stream);
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl SandboxSession for BoxliteSession {
+    async fn write_stdin(&self, data: &[u8]) -> Result<(), SandboxError> {
+        let mut guard = self.sink.lock().await;
+        let sink = guard
+            .as_mut()
+            .ok_or_else(|| SandboxError::Other("session is closed".into()))?;
+        sink.send(Message::Binary(data.to_vec()))
+            .await
+            .map_err(|e| SandboxError::Transport(format!("stdin write failed: {e}")))
+    }
+
+    async fn read_output(&self) -> Option<OutputChunk> {
+        let mut guard = self.stream.lock().await;
+        let stream = guard.as_mut()?;
+        loop {
+            match stream.next().await {
+                Some(Ok(Message::Binary(bytes))) if !bytes.is_empty() => {
+                    let (channel, payload) = bytes.split_at(1);
+                    let channel = if channel[0] == 0x02 {
+                        OutputChannel::Stderr
+                    } else {
+                        OutputChannel::Stdout
+                    };
+                    return Some(OutputChunk {
+                        channel,
+                        data: payload.to_vec(),
+                    });
+                }
+                Some(Ok(Message::Text(text))) => {
+                    if let Ok(control) = serde_json::from_str::<ControlFrame>(&text) {
+                        if control.kind == "exit" {
+                            return None;
+                        }
+                    }
+                }
+                Some(Ok(Message::Close(_))) | None | Some(Err(_)) => return None,
+                Some(Ok(_)) => continue,
+            }
+        }
+    }
+
+    async fn close(&self) {
+        self.closed.store(true, std::sync::atomic::Ordering::SeqCst);
+        if let Some(sink) = self.sink.lock().await.as_mut() {
+            let _ = sink.send(Message::Close(None)).await;
+            let _ = sink.close().await;
+        }
+        let url = endpoint_url(
+            &self.base_url,
+            &self.prefix,
+            &format!("boxes/{}", self.box_id),
+        );
+        let _ = delete_box_url(&self.http, url, self.token.as_deref()).await;
+    }
+}
+
+impl Drop for BoxliteSession {
+    fn drop(&mut self) {
+        if self.closed.load(std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        let http = self.http.clone();
+        let url = endpoint_url(
+            &self.base_url,
+            &self.prefix,
+            &format!("boxes/{}", self.box_id),
+        );
+        let token = self.token.clone();
+        tokio::spawn(async move {
+            let _ = delete_box_url(&http, url, token.as_deref()).await;
+        });
+    }
+}
+
+/// The attached WebSocket sink (client -> server frames).
+type WsSink = futures::stream::SplitSink<
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+    Message,
+>;
+/// The attached WebSocket stream (server -> client frames).
+type WsStream = futures::stream::SplitStream<
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+>;
 
 #[derive(Debug, Deserialize)]
 struct Principal {
@@ -867,6 +1065,56 @@ fn normalize_entry_name(raw: &str) -> Option<String> {
 
 fn transport(action: &str, error: reqwest::Error) -> SandboxError {
     SandboxError::Transport(format!("{action}: {error}"))
+}
+
+/// Build a `/v1[/{prefix}]/{path}` endpoint URL.
+fn endpoint_url(base_url: &str, prefix: &str, path: &str) -> String {
+    if prefix.is_empty() {
+        format!("{base_url}/v1/{path}")
+    } else {
+        format!("{base_url}/v1/{prefix}/{path}")
+    }
+}
+
+/// Build the WebSocket attach URL for an execution, deriving `ws`/`wss` from
+/// the HTTP base URL.
+fn ws_url(base_url: &str, prefix: &str, box_id: &str, exec_id: &str) -> String {
+    let base = if let Some(rest) = base_url.strip_prefix("https://") {
+        format!("wss://{rest}")
+    } else if let Some(rest) = base_url.strip_prefix("http://") {
+        format!("ws://{rest}")
+    } else {
+        base_url.to_string()
+    };
+    if prefix.is_empty() {
+        format!("{base}/v1/boxes/{box_id}/executions/{exec_id}/attach")
+    } else {
+        format!("{base}/v1/{prefix}/boxes/{box_id}/executions/{exec_id}/attach")
+    }
+}
+
+/// Force-delete a box at `url`. A missing box is treated as success.
+async fn delete_box_url(
+    http: &reqwest::Client,
+    url: String,
+    token: Option<&str>,
+) -> Result<(), SandboxError> {
+    let mut request = http.delete(url).query(&[("force", "true")]);
+    if let Some(token) = token {
+        request = request.bearer_auth(token);
+    }
+    let resp = request
+        .send()
+        .await
+        .map_err(|e| transport("delete box", e))?;
+    if resp.status().is_success() || resp.status() == reqwest::StatusCode::NOT_FOUND {
+        Ok(())
+    } else {
+        Err(SandboxError::Unavailable(format!(
+            "delete box failed: {}",
+            resp.status()
+        )))
+    }
 }
 
 async fn ensure_success(
