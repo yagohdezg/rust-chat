@@ -18,8 +18,9 @@ use uuid::Uuid;
 
 use chat_agents::{run_agent_stream, AgentConfig, AgentEvent, ToolRegistry};
 use chat_auth::{
-    generate_api_key, generate_refresh_token, hash_api_key, hash_password, hash_refresh_token,
-    issue_token, permissions_for_role, verify_password, Action, Scope, API_KEY_PREFIX,
+    generate_api_key, generate_auth_token, generate_refresh_token, hash_api_key, hash_auth_token,
+    hash_password, hash_refresh_token, issue_token, permissions_for_role, validate_password,
+    verify_password, Action, Scope, API_KEY_PREFIX,
 };
 use chat_computers::ComputerOrchestrator;
 use chat_core::ChatError;
@@ -27,8 +28,8 @@ use chat_providers::{ChatMessage, ChatRequest, LlmProvider, ModelInfo, OpenAiPro
 use chat_sandbox::{ExecRequest, ExecResult, SandboxFile};
 use chat_store::types::message_status;
 use chat_store::{
-    AdminUserSummary, ApiKey, ApiKeyDraft, AuditEntry, AuditLog, Computer, Conversation,
-    FileRecord, McpServer, McpServerDraft, Message, Provider, ProviderModel, Store,
+    AdminUserSummary, ApiKey, ApiKeyDraft, AuditEntry, AuditLog, AuthTokenDraft, Computer,
+    Conversation, FileRecord, McpServer, McpServerDraft, Message, Provider, ProviderModel, Store,
 };
 
 use crate::error::ApiError;
@@ -91,7 +92,12 @@ pub async fn register(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Json(body): Json<RegisterBody>,
 ) -> Result<Json<Value>, ApiError> {
-    if state.store.find_user_by_email(&body.email).await?.is_some() {
+    let email = body.email.trim();
+    if email.is_empty() {
+        return Err(ChatError::BadRequest("email is required".into()).into());
+    }
+    validate_password(&body.password)?;
+    if state.store.find_user_by_email(email).await?.is_some() {
         return Err(ChatError::Conflict("email already registered".into()).into());
     }
     let hash = hash_password(&body.password)?;
@@ -103,9 +109,10 @@ pub async fn register(
     };
     let user = state
         .store
-        .create_user(&body.email, body.name.as_deref(), &hash, role)
+        .create_user(email, body.name.as_deref(), &hash, role)
         .await
         .map_err(|err| conflict_on_unique(err, "email already registered"))?;
+    send_email_verification(&state, &user).await;
     let token = issue_token(
         &state.cfg.jwt_secret,
         user.id,
@@ -168,6 +175,9 @@ pub async fn login(
     let user = candidate.expect("valid credentials imply a user row");
     if user.disabled {
         return Err(ChatError::Forbidden.into());
+    }
+    if state.cfg.require_email_verification && !user.email_verified {
+        return Err(ChatError::EmailNotVerified.into());
     }
 
     let token = issue_token(
@@ -232,6 +242,9 @@ pub async fn refresh(
     if user.disabled {
         return Err(ChatError::Forbidden.into());
     }
+    if state.cfg.require_email_verification && !user.email_verified {
+        return Err(ChatError::EmailNotVerified.into());
+    }
 
     state.store.revoke_refresh_token(&hash).await?;
     let refresh_token = issue_refresh(&state, user.id).await?;
@@ -293,8 +306,202 @@ fn session_json(user: &chat_store::User, token: &str, refresh_token: &str) -> Va
     json!({
         "token": token,
         "refresh_token": refresh_token,
-        "user": { "id": user.id, "email": user.email, "name": user.name, "role": user.role }
+        "user": {
+            "id": user.id,
+            "email": user.email,
+            "name": user.name,
+            "role": user.role,
+            "email_verified": user.email_verified,
+        }
     })
+}
+
+// ---- email flows ----------------------------------------------------------
+
+/// Token kinds stored in `auth_tokens.kind`.
+const EMAIL_VERIFY: &str = "email_verify";
+const PASSWORD_RESET: &str = "password_reset";
+
+#[derive(Deserialize)]
+pub struct TokenBody {
+    pub token: String,
+}
+
+#[derive(Deserialize)]
+pub struct EmailBody {
+    pub email: String,
+}
+
+#[derive(Deserialize)]
+pub struct PasswordResetBody {
+    pub token: String,
+    pub password: String,
+}
+
+/// `POST /api/auth/verify-email` — consume an address-verification token.
+pub async fn verify_email(
+    State(state): State<Arc<AppState>>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    Json(body): Json<TokenBody>,
+) -> Result<StatusCode, ApiError> {
+    let token = state
+        .store
+        .consume_auth_token(EMAIL_VERIFY, &hash_auth_token(&body.token))
+        .await?
+        .ok_or_else(|| ChatError::BadRequest("invalid or expired token".into()))?;
+    state
+        .store
+        .set_user_email_verified(token.user_id, true)
+        .await?;
+
+    audit(
+        &state,
+        AuditEntry {
+            actor_id: Some(token.user_id),
+            action: "auth.email_verified".into(),
+            target_type: Some("user".into()),
+            target_id: Some(token.user_id.to_string()),
+            metadata: None,
+            ip: Some(addr.ip().to_string()),
+        },
+    )
+    .await;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `POST /api/auth/resend-verification` — send a fresh verification link.
+/// Always 204, so the endpoint cannot be used to probe registered addresses.
+pub async fn resend_verification(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<EmailBody>,
+) -> Result<StatusCode, ApiError> {
+    if let Some(user) = state.store.find_user_by_email(body.email.trim()).await? {
+        if !user.email_verified && !user.disabled {
+            send_email_verification(&state, &user).await;
+        }
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `POST /api/auth/password-reset` — email a reset link. Always 204, so the
+/// endpoint cannot be used to probe registered addresses.
+pub async fn request_password_reset(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<EmailBody>,
+) -> Result<StatusCode, ApiError> {
+    if let Some(user) = state.store.find_user_by_email(body.email.trim()).await? {
+        if !user.disabled {
+            let token = issue_auth_token(
+                &state,
+                user.id,
+                PASSWORD_RESET,
+                state.cfg.password_reset_ttl_seconds,
+            )
+            .await?;
+            let link = state.mail.link("/reset-password", &token);
+            let body = format!(
+                "Someone asked to reset the password of this rust-chat account. \
+                 If that was you, open this link within {} hour(s):\n\n{link}\n\n\
+                 Otherwise ignore this message; the password stays unchanged.\n",
+                hours(state.cfg.password_reset_ttl_seconds)
+            );
+            send_mail(&state, &user.email, "Reset your password", &body).await;
+        }
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `POST /api/auth/password-reset/confirm` — set a new password with a reset
+/// token. The token is single-use and every existing session is revoked.
+pub async fn confirm_password_reset(
+    State(state): State<Arc<AppState>>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    Json(body): Json<PasswordResetBody>,
+) -> Result<StatusCode, ApiError> {
+    validate_password(&body.password)?;
+    let token = state
+        .store
+        .consume_auth_token(PASSWORD_RESET, &hash_auth_token(&body.token))
+        .await?
+        .ok_or_else(|| ChatError::BadRequest("invalid or expired token".into()))?;
+
+    let hash = hash_password(&body.password)?;
+    state.store.set_user_password(token.user_id, &hash).await?;
+    state
+        .store
+        .revoke_user_refresh_tokens(token.user_id)
+        .await?;
+
+    audit(
+        &state,
+        AuditEntry {
+            actor_id: Some(token.user_id),
+            action: "auth.password_reset".into(),
+            target_type: Some("user".into()),
+            target_id: Some(token.user_id.to_string()),
+            metadata: None,
+            ip: Some(addr.ip().to_string()),
+        },
+    )
+    .await;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+fn hours(seconds: i64) -> i64 {
+    (seconds.max(1) + 3599) / 3600
+}
+
+/// Mint a single-use token of `kind` for `user_id`, replacing any outstanding
+/// token of the same kind.
+async fn issue_auth_token(
+    state: &AppState,
+    user_id: Uuid,
+    kind: &str,
+    ttl_seconds: i64,
+) -> Result<String, ApiError> {
+    let token = generate_auth_token()?;
+    state
+        .store
+        .create_auth_token(
+            user_id,
+            &AuthTokenDraft {
+                kind: kind.to_string(),
+                token_hash: hash_auth_token(&token),
+                expires_at: Utc::now() + Duration::seconds(ttl_seconds),
+            },
+        )
+        .await?;
+    Ok(token)
+}
+
+/// Send an address-verification link, if the account still needs one.
+async fn send_email_verification(state: &AppState, user: &chat_store::User) {
+    let ttl = state.cfg.email_verification_ttl_seconds;
+    let token = match issue_auth_token(state, user.id, EMAIL_VERIFY, ttl).await {
+        Ok(token) => token,
+        Err(err) => {
+            tracing::warn!(error = %err, user = %user.id, "failed to mint verification token");
+            return;
+        }
+    };
+    let link = state.mail.link("/verify-email", &token);
+    let body = format!(
+        "Confirm this address to finish setting up your rust-chat account. \
+         Open the link within {} hour(s):\n\n{link}\n\n\
+         If you did not sign up, ignore this message.\n",
+        hours(ttl)
+    );
+    send_mail(state, &user.email, "Verify your email address", &body).await;
+}
+
+/// Deliver one account email. Delivery is best-effort: a broken MTA must never
+/// fail the account flow that triggered it.
+async fn send_mail(state: &AppState, to: &str, subject: &str, body: &str) {
+    if let Err(err) = state.mail.send(to, subject, body).await {
+        tracing::warn!(error = %err, to, subject, "failed to send account email");
+    }
 }
 
 // ---- api keys -------------------------------------------------------------
@@ -544,6 +751,7 @@ pub async fn admin_create_user(
     if email.is_empty() || body.password.is_empty() {
         return Err(ChatError::BadRequest("email and password are required".into()).into());
     }
+    validate_password(&body.password)?;
     let role = body.role.as_deref().unwrap_or("user");
     if role != "user" && role != "admin" {
         return Err(ChatError::BadRequest("role must be `user` or `admin`".into()).into());
@@ -552,11 +760,14 @@ pub async fn admin_create_user(
         return Err(ChatError::Conflict("email already registered".into()).into());
     }
     let hash = hash_password(&body.password)?;
-    let user = state
+    let mut user = state
         .store
         .create_user(email, body.name.as_deref(), &hash, role)
         .await
         .map_err(|err| conflict_on_unique(err, "email already registered"))?;
+    // An admin-provisioned account is trusted, so it starts out verified.
+    state.store.set_user_email_verified(user.id, true).await?;
+    user.email_verified = true;
 
     audit(
         &state,

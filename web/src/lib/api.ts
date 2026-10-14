@@ -289,6 +289,38 @@ export function login(email: string, password: string): Promise<Session> {
 	});
 }
 
+/** Confirm an address with the token from a verification link. */
+export function verifyEmail(token: string): Promise<void> {
+	return request<void>('/api/auth/verify-email', {
+		method: 'POST',
+		body: JSON.stringify({ token })
+	});
+}
+
+/** Send a fresh verification link; always succeeds, to avoid enumeration. */
+export function resendVerification(email: string): Promise<void> {
+	return request<void>('/api/auth/resend-verification', {
+		method: 'POST',
+		body: JSON.stringify({ email })
+	});
+}
+
+/** Send a password reset link; always succeeds, to avoid enumeration. */
+export function requestPasswordReset(email: string): Promise<void> {
+	return request<void>('/api/auth/password-reset', {
+		method: 'POST',
+		body: JSON.stringify({ email })
+	});
+}
+
+/** Set a new password with the token from a reset link. */
+export function confirmPasswordReset(token: string, password: string): Promise<void> {
+	return request<void>('/api/auth/password-reset/confirm', {
+		method: 'POST',
+		body: JSON.stringify({ token, password })
+	});
+}
+
 export function listConversations(archived = false): Promise<Conversation[]> {
 	return request<Conversation[]>(`/api/conversations${archived ? '?archived=true' : ''}`);
 }

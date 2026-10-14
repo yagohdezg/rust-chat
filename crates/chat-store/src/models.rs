@@ -21,6 +21,9 @@ pub struct User {
     pub role: String,
     /// Account lock-out flag set by an admin; enforced on every request.
     pub disabled: bool,
+    /// Whether the account's email address has been confirmed. Only enforced
+    /// when `REQUIRE_EMAIL_VERIFICATION` is on.
+    pub email_verified: bool,
     /// Best-effort activity timestamp, refreshed in the background.
     pub last_seen_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
@@ -166,6 +169,29 @@ pub struct RefreshToken {
     pub expires_at: DateTime<Utc>,
     pub created_at: DateTime<Utc>,
     pub revoked_at: Option<DateTime<Utc>>,
+}
+
+/// A single-use, time-limited token behind the email verification and password
+/// reset flows. Only the SHA-256 `token_hash` is stored; `kind` separates the
+/// two flows and `used_at` records consumption.
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+pub struct AuthToken {
+    pub id: Uuid,
+    pub user_id: Uuid,
+    pub kind: String,
+    #[serde(skip_serializing)]
+    pub token_hash: String,
+    pub expires_at: DateTime<Utc>,
+    pub used_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+}
+
+/// The fields needed to mint an auth token; id and timestamps are server-side.
+#[derive(Debug, Clone)]
+pub struct AuthTokenDraft {
+    pub kind: String,
+    pub token_hash: String,
+    pub expires_at: DateTime<Utc>,
 }
 
 /// A hashed, scoped API key for programmatic clients. The plaintext is shown

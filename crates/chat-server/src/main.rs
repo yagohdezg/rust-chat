@@ -2,6 +2,7 @@ mod doctext;
 mod error;
 mod extract;
 mod file_policy;
+mod mail;
 mod mcp;
 mod rate_limit;
 mod routes;
@@ -32,6 +33,7 @@ use chat_files_s3::S3FileStore;
 use chat_sandbox::{HttpSandboxBackend, SandboxBackend};
 use chat_store::{FileStore, LocalFileStore, Store};
 
+use crate::mail::Mailer;
 use crate::scan::UploadScanner;
 use crate::state::AppState;
 use crate::stream::StreamHub;
@@ -156,6 +158,16 @@ async fn main() -> anyhow::Result<()> {
     if scanner.enabled() {
         tracing::info!("upload malware scanning enabled");
     }
+    let mail = Arc::new(Mailer::new(
+        cfg.mail_send_command.clone(),
+        cfg.mail_from.clone(),
+        cfg.public_url.clone(),
+    ));
+    if !mail.enabled() {
+        tracing::warn!(
+            "MAIL_SEND_COMMAND is not set; email verification and password reset links are not              delivered"
+        );
+    }
     let mcp_sandbox = sandbox.clone();
     let state = Arc::new(AppState {
         cfg: Arc::new(cfg),
@@ -171,6 +183,7 @@ async fn main() -> anyhow::Result<()> {
         hub: Arc::new(StreamHub::new()),
         rate_limit: Arc::new(rate_limit::RateLimiter::new()),
         scanner,
+        mail,
     });
     tracing::debug!(
         servers = state.mcp.server_count().await,
@@ -185,6 +198,19 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/auth/login", post(routes::login))
         .route("/api/auth/refresh", post(routes::refresh))
         .route("/api/auth/logout", post(routes::logout))
+        .route("/api/auth/verify-email", post(routes::verify_email))
+        .route(
+            "/api/auth/resend-verification",
+            post(routes::resend_verification),
+        )
+        .route(
+            "/api/auth/password-reset",
+            post(routes::request_password_reset),
+        )
+        .route(
+            "/api/auth/password-reset/confirm",
+            post(routes::confirm_password_reset),
+        )
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             rate_limit::limit_auth,

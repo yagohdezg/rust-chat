@@ -19,6 +19,10 @@ pub enum ChatError {
     #[error("bad request: {0}")]
     BadRequest(String),
 
+    /// The account exists but its email address has not been confirmed.
+    #[error("email not verified")]
+    EmailNotVerified,
+
     #[error("conflict: {0}")]
     Conflict(String),
 
@@ -45,6 +49,7 @@ impl ChatError {
             ChatError::Unauthorized => 401,
             ChatError::Forbidden => 403,
             ChatError::BadRequest(_) => 400,
+            ChatError::EmailNotVerified => 403,
             ChatError::Conflict(_) => 409,
             ChatError::ProviderNotConfigured => 428,
             ChatError::Upstream(_) => 502,

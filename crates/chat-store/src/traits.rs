@@ -3,9 +3,9 @@ use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use crate::models::{
-    AdminUserSummary, Agent, AgentDraft, ApiKey, ApiKeyDraft, AuditEntry, AuditLog, Computer,
-    Conversation, FileRecord, McpServer, McpServerDraft, Message, PoolBox, Provider, ProviderModel,
-    RefreshToken, User,
+    AdminUserSummary, Agent, AgentDraft, ApiKey, ApiKeyDraft, AuditEntry, AuditLog, AuthToken,
+    AuthTokenDraft, Computer, Conversation, FileRecord, McpServer, McpServerDraft, Message,
+    PoolBox, Provider, ProviderModel, RefreshToken, User,
 };
 /// Relational persistence, independent of the database engine.
 ///
@@ -46,6 +46,12 @@ pub trait Store: Send + Sync {
     /// Record best-effort activity for an account.
     async fn touch_user_last_seen(&self, id: Uuid) -> Result<()>;
 
+    /// Record whether an account's email address has been confirmed.
+    async fn set_user_email_verified(&self, id: Uuid, verified: bool) -> Result<()>;
+
+    /// Replace an account's password hash (password reset).
+    async fn set_user_password(&self, id: Uuid, password_hash: &str) -> Result<()>;
+
     // ---- refresh tokens / audit ----------------------------------------
     /// Persist a refresh token by its hash (the plaintext never reaches the DB).
     async fn create_refresh_token(
@@ -82,6 +88,16 @@ pub trait Store: Send + Sync {
 
     /// Record that an API key authenticated a request.
     async fn touch_api_key_last_used(&self, id: Uuid) -> Result<()>;
+
+    // ---- auth tokens ---------------------------------------------------
+    /// Mint a single-use token for an email flow, invalidating any outstanding
+    /// token of the same kind for that user.
+    async fn create_auth_token(&self, user_id: Uuid, draft: &AuthTokenDraft) -> Result<AuthToken>;
+
+    /// Consume a token: it is returned only when it matches `kind`, has not
+    /// expired and has not been used, and is marked used in the same step so
+    /// two callers can never both succeed.
+    async fn consume_auth_token(&self, kind: &str, token_hash: &str) -> Result<Option<AuthToken>>;
 
     /// Append an entry to the security audit trail.
     async fn record_audit(&self, entry: &AuditEntry) -> Result<()>;

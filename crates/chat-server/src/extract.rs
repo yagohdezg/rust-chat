@@ -57,6 +57,9 @@ impl AuthUser {
         if user.disabled {
             return Err(ApiError(ChatError::Forbidden));
         }
+        if state.cfg.require_email_verification && !user.email_verified {
+            return Err(ApiError(ChatError::EmailNotVerified));
+        }
 
         // Best-effort usage tracking, throttled like `last_seen_at` so most
         // requests cost no write.
@@ -142,6 +145,9 @@ impl FromRequestParts<Arc<AppState>> for AuthUser {
             .ok_or(ApiError(ChatError::Unauthorized))?;
         if user.disabled {
             return Err(ApiError(ChatError::Forbidden));
+        }
+        if state.cfg.require_email_verification && !user.email_verified {
+            return Err(ApiError(ChatError::EmailNotVerified));
         }
         touch_last_seen(state, &user);
 

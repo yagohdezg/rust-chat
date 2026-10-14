@@ -3,34 +3,66 @@
 	import * as api from '#lib/api';
 	import { auth } from '#lib/auth.svelte';
 
-	let mode = $state<'login' | 'register'>('login');
+	type Mode = 'login' | 'register' | 'forgot';
+	let mode = $state<Mode>('login');
 	let email = $state('');
 	let password = $state('');
 	let name = $state('');
 	let error = $state<string | null>(null);
+	let notice = $state<string | null>(null);
 	let busy = $state(false);
+	let unverified = $state(false);
 
 	async function submit(event: SubmitEvent) {
 		event.preventDefault();
 		busy = true;
 		error = null;
+		notice = null;
+		unverified = false;
 		try {
+			if (mode === 'forgot') {
+				await api.requestPasswordReset(email);
+				notice = 'If that address has an account, a reset link is on its way.';
+				return;
+			}
 			const session =
 				mode === 'login'
 					? await api.login(email, password)
 					: await api.register(email, password, name || undefined);
+			if (session.user.email_verified === false) {
+				mode = 'login';
+				notice = 'Account created. Open the link we emailed you to confirm your address.';
+				return;
+			}
 			auth.set(session);
 			goto('/chat');
 		} catch (err) {
 			error = err instanceof Error ? err.message : String(err);
+			unverified = err instanceof api.ApiError && err.status === 403 && mode === 'login';
 		} finally {
 			busy = false;
 		}
 	}
+
+	async function resend() {
+		error = null;
+		unverified = false;
+		await api.resendVerification(email);
+		notice = 'A new verification link is on its way.';
+	}
+
+	function switchTo(next: Mode) {
+		mode = next;
+		error = null;
+		notice = null;
+		unverified = false;
+	}
 </script>
 
 <div class="card">
-	<h1>{mode === 'login' ? 'Sign in' : 'Create account'}</h1>
+	<h1>
+		{mode === 'login' ? 'Sign in' : mode === 'register' ? 'Create account' : 'Reset password'}
+	</h1>
 	<form onsubmit={submit}>
 		{#if mode === 'register'}
 			<label>
@@ -42,33 +74,46 @@
 			Email
 			<input type="email" bind:value={email} autocomplete="email" required />
 		</label>
-		<label>
-			Password
-			<input
-				type="password"
-				bind:value={password}
-				autocomplete={mode === 'login' ? 'current-password' : 'new-password'}
-				required
-			/>
-		</label>
+		{#if mode !== 'forgot'}
+			<label>
+				Password
+				<input
+					type="password"
+					bind:value={password}
+					autocomplete={mode === 'login' ? 'current-password' : 'new-password'}
+					minlength="8"
+					required
+				/>
+			</label>
+		{/if}
 
 		{#if error}<p class="error">{error}</p>{/if}
+		{#if notice}<p class="notice">{notice}</p>{/if}
+		{#if unverified}
+			<button class="link" type="button" onclick={resend}>Send a new verification link</button>
+		{/if}
 
 		<button class="primary" type="submit" disabled={busy}>
-			{busy ? 'Please wait…' : mode === 'login' ? 'Sign in' : 'Register'}
+			{busy
+				? 'Please wait…'
+				: mode === 'login'
+					? 'Sign in'
+					: mode === 'register'
+						? 'Register'
+						: 'Send reset link'}
 		</button>
 	</form>
 
+	{#if mode === 'login'}
+		<p class="switch">
+			Forgot your password?
+			<button class="link" onclick={() => switchTo('forgot')}>Reset it</button>
+		</p>
+	{/if}
 	<p class="switch">
-		{mode === 'login' ? 'No account yet?' : 'Already registered?'}
-		<button
-			class="link"
-			onclick={() => {
-				mode = mode === 'login' ? 'register' : 'login';
-				error = null;
-			}}
-		>
-			{mode === 'login' ? 'Create one' : 'Sign in'}
+		{mode === 'register' ? 'Already registered?' : 'No account yet?'}
+		<button class="link" onclick={() => switchTo(mode === 'register' ? 'login' : 'register')}>
+			{mode === 'register' ? 'Sign in' : 'Create one'}
 		</button>
 	</p>
 </div>
@@ -142,6 +187,15 @@
 	.error {
 		color: var(--danger);
 		background: var(--danger-bg);
+		border-radius: var(--radius-sm);
+		margin: 0;
+		padding: 0.45rem 0.7rem;
+		font-size: 0.85rem;
+	}
+	.notice {
+		color: var(--text-muted);
+		background: var(--bg);
+		border: 1px solid var(--border);
 		border-radius: var(--radius-sm);
 		margin: 0;
 		padding: 0.45rem 0.7rem;

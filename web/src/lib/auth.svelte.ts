@@ -1,6 +1,12 @@
 import { browser } from '$app/env';
 
-export type User = { id: string; email?: string; name?: string; role: string };
+export type User = {
+	id: string;
+	email?: string;
+	name?: string;
+	role: string;
+	email_verified?: boolean;
+};
 export type Session = { token: string; refresh_token?: string; user: User };
 
 const STORAGE_KEY = 'rust-chat.session';

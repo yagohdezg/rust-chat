@@ -265,6 +265,12 @@ See [`.env.example`](.env.example).
 | `RATE_LIMIT_AUTH_PER_MINUTE` | `30`                                              | `/api/auth/*` requests per IP/min  |
 | `RATE_LIMIT_CHAT_PER_MINUTE` | `60`                                              | `/api/chat` requests per IP/min    |
 | `LOG_LEVEL`               | `info`                                               | `tracing` filter                   |
+| `PUBLIC_URL`              | `http://localhost:5173`                              | Base URL of the web app, used to build verification/reset links |
+| `MAIL_SEND_COMMAND`       | —                                                    | Sendmail-compatible command reading an RFC 822 message on stdin; unset skips delivery |
+| `MAIL_FROM`               | `rust-chat <no-reply@localhost>`                     | `From:` address of account emails  |
+| `REQUIRE_EMAIL_VERIFICATION` | `false`                                           | Require a confirmed address before the API is usable |
+| `EMAIL_VERIFICATION_TTL_SECONDS` | `86400`                                       | Verification-token lifetime (24h)  |
+| `PASSWORD_RESET_TTL_SECONDS` | `3600`                                            | Password-reset-token lifetime (1h) |
 | `FILE_STORAGE_KIND`       | `local`                                              | `local` \| `s3`; use `s3` with >1 replica |
 | `FILE_STORAGE_DIR`        | `./.data/files`                                      | Where uploads are written (`local`) |
 | `S3_BUCKET`               | —                                                    | Required when `FILE_STORAGE_KIND=s3` |
@@ -330,6 +336,10 @@ size per node is exposed to admins at `GET /api/admin/computers`.
 | `POST` | `/api/auth/login`                   | —    | Exchange credentials for tokens      |
 | `POST` | `/api/auth/refresh`                 | —    | Rotate a refresh token for a new pair |
 | `POST` | `/api/auth/logout`                  | —    | Revoke a refresh token               |
+| `POST` | `/api/auth/verify-email`            | —    | Confirm an address with a mailed token |
+| `POST` | `/api/auth/resend-verification`     | —    | Send a fresh verification link       |
+| `POST` | `/api/auth/password-reset`          | —    | Send a password reset link           |
+| `POST` | `/api/auth/password-reset/confirm`  | —    | Set a new password with a reset token |
 | `GET`  | `/api/me`                           | JWT  | Current user                         |
 | `GET`  | `/api/api-keys`                     | JWT  | List the caller's API keys           |
 | `POST` | `/api/api-keys`                     | JWT  | Mint a scoped API key (plaintext shown once) |
@@ -404,6 +414,18 @@ conversation. The response returns the created `file` record. The filename is
 sanitized and the MIME type is sniffed from the bytes rather than taken from the
 client; uploads larger than `UPLOAD_MAX_BYTES` are rejected, and when
 `UPLOAD_SCAN_COMMAND` is set an external scanner runs over every upload.
+
+Registration mails a confirmation link and, with `REQUIRE_EMAIL_VERIFICATION`
+on, an account cannot use the API until the address is confirmed; `POST
+/api/auth/resend-verification` sends a fresh link. `POST /api/auth/password-reset`
+mails a reset link, and `POST /api/auth/password-reset/confirm` sets the new
+password and signs every existing session out. Both tokens are single-use,
+expire (24h verification, 1h reset), are stored only as a SHA-256 hash, and the
+request endpoints always answer 204 so they cannot be used to probe which
+addresses exist. `MAIL_SEND_COMMAND` names the sendmail-compatible command that
+delivers them (see `.env.example`); with no command set, links are not sent and a
+warning is logged. The `/verify-email` and `/reset-password` pages consume the
+links, and both flows are recorded in the audit trail.
 
 Authenticated routes expect `Authorization: Bearer <jwt>`. Registering and
 logging in return a short-lived access token plus a rotating `refresh_token`;

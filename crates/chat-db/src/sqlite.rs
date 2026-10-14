@@ -8,9 +8,9 @@ use std::sync::Arc;
 
 use chat_core::{ChatError, Result, SecretCipher};
 use chat_store::{
-    AdminUserSummary, Agent, AgentDraft, ApiKey, ApiKeyDraft, AuditEntry, AuditLog, Computer,
-    Conversation, FileRecord, McpServer, McpServerDraft, Message, PoolBox, Provider, ProviderModel,
-    RefreshToken, Store, User,
+    AdminUserSummary, Agent, AgentDraft, ApiKey, ApiKeyDraft, AuditEntry, AuditLog, AuthToken,
+    AuthTokenDraft, Computer, Conversation, FileRecord, McpServer, McpServerDraft, Message,
+    PoolBox, Provider, ProviderModel, RefreshToken, Store, User,
 };
 use chrono::{DateTime, Utc};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
@@ -334,6 +334,87 @@ impl Store for SqliteStore {
             .execute(&self.pool)
             .await?;
         Ok(())
+    }
+
+    async fn set_user_email_verified(&self, id: Uuid, verified: bool) -> Result<()> {
+        sqlx::query("update users set email_verified = ?, updated_at = ? where id = ?")
+            .bind(verified)
+            .bind(Utc::now())
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn set_user_password(&self, id: Uuid, password_hash: &str) -> Result<()> {
+        sqlx::query("update users set password_hash = ?, updated_at = ? where id = ?")
+            .bind(password_hash)
+            .bind(Utc::now())
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn create_auth_token(&self, user_id: Uuid, draft: &AuthTokenDraft) -> Result<AuthToken> {
+        let now = Utc::now();
+        sqlx::query(
+            "update auth_tokens set used_at = ? where user_id = ? and kind = ? and used_at is null",
+        )
+        .bind(now)
+        .bind(user_id)
+        .bind(&draft.kind)
+        .execute(&self.pool)
+        .await?;
+        let token = AuthToken {
+            id: Uuid::new_v4(),
+            user_id,
+            kind: draft.kind.clone(),
+            token_hash: draft.token_hash.clone(),
+            expires_at: draft.expires_at,
+            used_at: None,
+            created_at: now,
+        };
+        sqlx::query(
+            "insert into auth_tokens (id, user_id, kind, token_hash, expires_at, used_at, created_at)
+             values (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(token.id)
+        .bind(token.user_id)
+        .bind(&token.kind)
+        .bind(&token.token_hash)
+        .bind(token.expires_at)
+        .bind(token.used_at)
+        .bind(token.created_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(token)
+    }
+
+    async fn consume_auth_token(&self, kind: &str, token_hash: &str) -> Result<Option<AuthToken>> {
+        let now = Utc::now();
+        let row = sqlx::query_as::<_, AuthToken>(
+            "select * from auth_tokens
+             where token_hash = ? and kind = ? and used_at is null and expires_at > ?",
+        )
+        .bind(token_hash)
+        .bind(kind)
+        .bind(now)
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(token) = row else {
+            return Ok(None);
+        };
+        let claimed =
+            sqlx::query("update auth_tokens set used_at = ? where id = ? and used_at is null")
+                .bind(now)
+                .bind(token.id)
+                .execute(&self.pool)
+                .await?;
+        if claimed.rows_affected() == 0 {
+            return Ok(None);
+        }
+        Ok(Some(token))
     }
 
     async fn record_audit(&self, entry: &AuditEntry) -> Result<()> {

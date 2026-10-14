@@ -124,6 +124,21 @@ pub struct Config {
     /// Max `/api/chat` requests per IP per minute.
     pub rate_limit_chat_per_minute: u32,
 
+    /// Public base URL of the web app, used to build the links sent in email.
+    pub public_url: String,
+    /// Sendmail-compatible command that delivers mail read from stdin (e.g.
+    /// `msmtp -t` or `sendmail -t`). When unset, mail is not delivered and a
+    /// warning is logged instead, so the flows stay usable without an MTA.
+    pub mail_send_command: Option<String>,
+    /// `From:` address on outbound mail.
+    pub mail_from: String,
+    /// Lifetime of an email verification link.
+    pub email_verification_ttl_seconds: i64,
+    /// Lifetime of a password reset link.
+    pub password_reset_ttl_seconds: i64,
+    /// Require a confirmed email address before an account can log in.
+    pub require_email_verification: bool,
+
     /// Base64-encoded 256-bit key used to encrypt provider API keys at rest.
     /// When unset, a key is derived from `jwt_secret` (with a warning); set this
     /// explicitly in production so rotating `JWT_SECRET` does not strand data.
@@ -338,6 +353,20 @@ impl Config {
             rate_limit_chat_per_minute: var("RATE_LIMIT_CHAT_PER_MINUTE")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(60),
+
+            public_url: var("PUBLIC_URL")
+                .unwrap_or_else(|| "http://localhost:5173".into())
+                .trim_end_matches('/')
+                .to_string(),
+            mail_send_command: var("MAIL_SEND_COMMAND"),
+            mail_from: var("MAIL_FROM").unwrap_or_else(|| "rust-chat <no-reply@localhost>".into()),
+            email_verification_ttl_seconds: var("EMAIL_VERIFICATION_TTL_SECONDS")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(86_400),
+            password_reset_ttl_seconds: var("PASSWORD_RESET_TTL_SECONDS")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(3_600),
+            require_email_verification: var_bool("REQUIRE_EMAIL_VERIFICATION", false),
 
             secret_encryption_key: var("SECRET_ENCRYPTION_KEY"),
 

@@ -6,6 +6,7 @@ use chat_core::Config;
 use chat_sandbox::SandboxBackend;
 use chat_store::{FileStore, Store};
 
+use crate::mail::Mailer;
 use crate::mcp::McpRegistry;
 use crate::rate_limit::RateLimiter;
 use crate::scan::UploadScanner;
@@ -34,4 +35,6 @@ pub struct AppState {
     pub rate_limit: Arc<RateLimiter>,
     /// Optional external malware scanner run on uploads.
     pub scanner: Arc<UploadScanner>,
+    /// Delivers the account emails (email verification, password reset).
+    pub mail: Arc<Mailer>,
 }

@@ -548,3 +548,155 @@ async fn api_keys_are_scoped() {
         .unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
 }
+
+/// Pull the `token=` value out of the most recent link in a captured mailbox.
+fn last_token(path: &std::path::Path) -> String {
+    let text = std::fs::read_to_string(path).unwrap_or_default();
+    let start = text.rfind("token=").expect("mailbox has no link") + "token=".len();
+    text[start..]
+        .split(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_')
+        .next()
+        .unwrap()
+        .to_string()
+}
+
+#[tokio::test]
+async fn email_verification_and_password_reset() {
+    let dir = std::env::temp_dir().join(format!("rustchat-mail-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let mailbox = dir.join("mail.txt");
+
+    let env = TestEnvBuilder::new()
+        .env("MAIL_SEND_COMMAND", format!("cat >> {}", mailbox.display()))
+        .env("REQUIRE_EMAIL_VERIFICATION", "true")
+        .start()
+        .await
+        .unwrap();
+
+    let session = Session::register(&env.base_url, "a@example.com", "password123")
+        .await
+        .unwrap();
+
+    // Registration mails a link, and the account starts out unverified.
+    let verify_token = last_token(&mailbox);
+    let resp = session.get("/api/conversations").await.unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::FORBIDDEN);
+
+    let resp = session
+        .post("/api/auth/verify-email", &json!({"token": verify_token}))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::NO_CONTENT);
+
+    let resp = session.get("/api/conversations").await.unwrap();
+    assert!(resp.status().is_success());
+
+    // The token is single-use.
+    let resp = session
+        .post("/api/auth/verify-email", &json!({"token": verify_token}))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // A reset link goes out for a known address and never for an unknown one.
+    let resp = session
+        .post(
+            "/api/auth/password-reset",
+            &json!({"email": "nobody@example.com"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::NO_CONTENT);
+    let before = std::fs::read_to_string(&mailbox).unwrap().len();
+
+    let resp = session
+        .post(
+            "/api/auth/password-reset",
+            &json!({"email": "a@example.com"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::NO_CONTENT);
+    let first_reset = last_token(&mailbox);
+    assert!(std::fs::read_to_string(&mailbox).unwrap().len() > before);
+
+    // Requesting a second link invalidates the first.
+    session
+        .post(
+            "/api/auth/password-reset",
+            &json!({"email": "a@example.com"}),
+        )
+        .await
+        .unwrap();
+    let second_reset = last_token(&mailbox);
+    assert_ne!(first_reset, second_reset);
+
+    let resp = session
+        .post(
+            "/api/auth/password-reset/confirm",
+            &json!({"token": first_reset, "password": "newpassword123"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // A short password is refused before the token is consumed.
+    let resp = session
+        .post(
+            "/api/auth/password-reset/confirm",
+            &json!({"token": second_reset, "password": "short"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    let resp = session
+        .post(
+            "/api/auth/password-reset/confirm",
+            &json!({"token": second_reset, "password": "newpassword123"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::NO_CONTENT);
+
+    // The reset token is spent and the password has changed.
+    let resp = session
+        .post(
+            "/api/auth/password-reset/confirm",
+            &json!({"token": second_reset, "password": "newpassword123"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
+    assert!(
+        Session::login(&env.base_url, "a@example.com", "password123")
+            .await
+            .is_err()
+    );
+    Session::login(&env.base_url, "a@example.com", "newpassword123")
+        .await
+        .unwrap();
+
+    let audit = Session::login(&env.base_url, "a@example.com", "newpassword123")
+        .await
+        .unwrap()
+        .get_expect("/api/admin/audit?limit=50")
+        .await
+        .unwrap();
+    let actions: Vec<&str> = audit
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|entry| entry["action"].as_str())
+        .collect();
+    assert!(
+        actions.contains(&"auth.email_verified"),
+        "audit: {actions:?}"
+    );
+    assert!(
+        actions.contains(&"auth.password_reset"),
+        "audit: {actions:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

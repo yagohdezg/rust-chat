@@ -67,14 +67,43 @@ pub fn verify_token(secret: &str, token: &str) -> Result<Claims> {
     .map_err(|_| ChatError::Unauthorized)
 }
 
-/// Generate an opaque 256-bit refresh token, URL-safe base64 without padding.
-/// The plaintext is returned to the client once and stored (hashed) server-side.
-pub fn generate_refresh_token() -> Result<String> {
+/// 256 bits of CSPRNG output, URL-safe base64 without padding.
+fn random_token() -> Result<String> {
     let mut bytes = [0u8; 32];
     SystemRandom::new()
         .fill(&mut bytes)
-        .map_err(|_| ChatError::Internal(anyhow::anyhow!("failed to generate refresh token")))?;
+        .map_err(|_| ChatError::Internal(anyhow::anyhow!("failed to generate token")))?;
     Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes))
+}
+
+/// Generate an opaque 256-bit refresh token. The plaintext is returned to the
+/// client once and stored (hashed) server-side.
+pub fn generate_refresh_token() -> Result<String> {
+    random_token()
+}
+
+/// Generate an opaque single-use token for an email flow (address verification
+/// or password reset). Stored hashed, like every other credential.
+pub fn generate_auth_token() -> Result<String> {
+    random_token()
+}
+
+/// Hash an auth token for storage, using the same SHA-256 scheme as refresh
+/// tokens and API keys.
+pub fn hash_auth_token(token: &str) -> String {
+    sha256_hex(token)
+}
+
+/// Reject passwords too short to resist guessing. Applied wherever a password is
+/// set: registration, admin creation and reset.
+pub fn validate_password(password: &str) -> Result<()> {
+    const MIN_LEN: usize = 8;
+    if password.chars().count() < MIN_LEN {
+        return Err(ChatError::BadRequest(format!(
+            "password must be at least {MIN_LEN} characters"
+        )));
+    }
+    Ok(())
 }
 
 /// Prefix on every API key, so a bearer token can be told from a JWT.
@@ -98,14 +127,7 @@ pub fn hash_refresh_token(token: &str) -> String {
 /// Generate an opaque API key. The plaintext is returned to the client once and
 /// stored (hashed) server-side.
 pub fn generate_api_key() -> Result<String> {
-    let mut bytes = [0u8; 32];
-    SystemRandom::new()
-        .fill(&mut bytes)
-        .map_err(|_| ChatError::Internal(anyhow::anyhow!("failed to generate API key")))?;
-    Ok(format!(
-        "{API_KEY_PREFIX}{}",
-        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
-    ))
+    Ok(format!("{API_KEY_PREFIX}{}", random_token()?))
 }
 
 /// Hash an API key for storage, using the same SHA-256 scheme as refresh tokens.
