@@ -2,8 +2,9 @@
 //!
 //! Keeps the chat API process lean: the API calls this over HTTP instead of
 //! holding sandbox state, and sandboxes can be scheduled on dedicated hosts.
-//! Execution always runs through BoxLite; the sandbox spec (image, limits,
-//! timeout) is owned here, from the environment.
+//! Execution runs through the backend selected by `SANDBOX_BACKEND`: BoxLite
+//! (default) or gVisor. The sandbox spec (image, limits, timeout) is owned
+//! here, from the environment.
 //!
 //! `SANDBOXD_TOKEN` is mandatory: `/v1/exec` requires `Authorization: Bearer`
 //! and `/health` is open.
@@ -24,16 +25,53 @@ use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::EnvFilter;
 
 use chat_sandbox::{
-    BoxliteBackend, CommandSpec, ExecRequest, ExecResult, OutputChannel, SandboxBackend,
-    SandboxSession, SandboxSpec,
+    BoxliteBackend, CommandSpec, ExecRequest, ExecResult, GvisorBackend, OutputChannel,
+    SandboxBackend, SandboxSession, SandboxSpec,
 };
 
 #[derive(Clone)]
 struct AppState {
-    /// Concrete backend: computer endpoints need the persistent-box lifecycle,
-    /// which is not part of the object-safe [`SandboxBackend`] surface.
-    backend: Arc<BoxliteBackend>,
+    engine: Engine,
     token: Arc<String>,
+}
+
+/// The selected execution engine.
+///
+/// Computer endpoints need the persistent-box lifecycle, which is not part of
+/// the object-safe [`SandboxBackend`] surface, so the concrete BoxLite backend
+/// is kept reachable next to the trait object.
+#[derive(Clone)]
+enum Engine {
+    Boxlite(Arc<BoxliteBackend>),
+    Gvisor(Arc<GvisorBackend>),
+}
+
+impl Engine {
+    fn backend(&self) -> &dyn SandboxBackend {
+        match self {
+            Engine::Boxlite(backend) => backend.as_ref(),
+            Engine::Gvisor(backend) => backend.as_ref(),
+        }
+    }
+
+    fn spec(&self) -> &SandboxSpec {
+        match self {
+            Engine::Boxlite(backend) => backend.spec(),
+            Engine::Gvisor(backend) => backend.spec(),
+        }
+    }
+
+    /// The BoxLite backend, or `501 NOT_IMPLEMENTED` when another engine is
+    /// selected and the endpoint is BoxLite-only.
+    fn boxlite(&self) -> Result<&BoxliteBackend, (StatusCode, String)> {
+        match self {
+            Engine::Boxlite(backend) => Ok(backend.as_ref()),
+            Engine::Gvisor(_) => Err((
+                StatusCode::NOT_IMPLEMENTED,
+                "persistent computers require the boxlite backend".into(),
+            )),
+        }
+    }
 }
 
 /// Response wrapping a persistent box id.
@@ -124,27 +162,48 @@ async fn main() -> anyhow::Result<()> {
         egress_allow,
     };
 
-    let backend = Arc::new(BoxliteBackend::new(boxlite_url, boxlite_token, spec));
+    let engine = match std::env::var("SANDBOX_BACKEND")
+        .unwrap_or_else(|_| "boxlite".into())
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "" | "boxlite" => Engine::Boxlite(Arc::new(BoxliteBackend::new(
+            boxlite_url,
+            boxlite_token,
+            spec,
+        ))),
+        "gvisor" => {
+            let image_root = std::env::var("GVISOR_IMAGE_ROOT")
+                .unwrap_or_else(|_| "/var/lib/rustchat/gvisor/images".into());
+            Engine::Gvisor(Arc::new(GvisorBackend::new(spec, image_root)))
+        }
+        other => {
+            return Err(anyhow::anyhow!(
+                "unknown SANDBOX_BACKEND: {other} (expected boxlite or gvisor)"
+            ))
+        }
+    };
 
     let bind_addr = std::env::var("SANDBOXD_BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:3081".into());
 
     let egress = if !network {
         "denied"
-    } else if backend.spec().egress_allow.is_empty() {
+    } else if engine.spec().egress_allow.is_empty() {
         "unrestricted"
     } else {
         "allow-list"
     };
     tracing::info!(
-        backend = backend.name(),
-        isolation = ?backend.isolation(),
+        backend = engine.backend().name(),
+        isolation = ?engine.backend().isolation(),
         egress,
-        allow_net = ?backend.spec().egress_allow,
+        allow_net = ?engine.spec().egress_allow,
         "sandboxd ready"
     );
 
     let state = AppState {
-        backend,
+        engine,
         token: Arc::new(token),
     };
     let app = build_app(state);
@@ -208,7 +267,8 @@ async fn exec(
     Json(request): Json<ExecRequest>,
 ) -> Result<Json<ExecResult>, (StatusCode, String)> {
     state
-        .backend
+        .engine
+        .backend()
         .run(&request)
         .await
         .map(Json)
@@ -238,7 +298,8 @@ async fn proxy_session(mut socket: WebSocket, state: AppState) {
         _ => return,
     };
 
-    let session: Arc<dyn SandboxSession> = match state.backend.open_session(&command).await {
+    let session: Arc<dyn SandboxSession> = match state.engine.backend().open_session(&command).await
+    {
         Ok(session) => Arc::from(session),
         Err(e) => {
             tracing::warn!(error = %e, command = %command.command, "failed to open sandbox session");
@@ -297,7 +358,8 @@ async fn create_computer(
 ) -> Result<Json<ComputerRef>, (StatusCode, String)> {
     let body = body.map(|Json(body)| body).unwrap_or_default();
     state
-        .backend
+        .engine
+        .boxlite()?
         .create_computer(body.workspace.as_deref(), body.name.as_deref())
         .await
         .map(|handle| Json(ComputerRef { handle }))
@@ -309,7 +371,8 @@ async fn list_computers(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<ComputerSummary>>, (StatusCode, String)> {
     state
-        .backend
+        .engine
+        .boxlite()?
         .list_computers()
         .await
         .map(|boxes| {
@@ -334,7 +397,8 @@ async fn exec_computer(
     Json(request): Json<ExecRequest>,
 ) -> Result<Json<ExecResult>, (StatusCode, String)> {
     state
-        .backend
+        .engine
+        .boxlite()?
         .exec_computer(&handle, &request)
         .await
         .map(Json)
@@ -347,7 +411,8 @@ async fn pause_computer(
     Path(handle): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     state
-        .backend
+        .engine
+        .boxlite()?
         .pause_computer(&handle)
         .await
         .map(|_| StatusCode::NO_CONTENT)
@@ -360,7 +425,8 @@ async fn resume_computer(
     Path(handle): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     state
-        .backend
+        .engine
+        .boxlite()?
         .resume_computer(&handle)
         .await
         .map(|_| StatusCode::NO_CONTENT)
@@ -373,7 +439,8 @@ async fn destroy_computer(
     Path(handle): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     state
-        .backend
+        .engine
+        .boxlite()?
         .destroy_computer(&handle)
         .await
         .map(|_| StatusCode::NO_CONTENT)
@@ -386,7 +453,8 @@ async fn destroy_workspace(
     Path(name): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     state
-        .backend
+        .engine
+        .boxlite()?
         .destroy_workspace(&name)
         .await
         .map(|_| StatusCode::NO_CONTENT)
@@ -407,7 +475,7 @@ mod tests {
             SandboxSpec::default(),
         ));
         AppState {
-            backend,
+            engine: Engine::Boxlite(backend),
             token: Arc::new(token.into()),
         }
     }
@@ -535,11 +603,11 @@ mod tests {
 
         let (boxlite_url, deletes) = spawn_mock_boxlite().await;
         let state = AppState {
-            backend: Arc::new(BoxliteBackend::new(
+            engine: Engine::Boxlite(Arc::new(BoxliteBackend::new(
                 boxlite_url,
                 None,
                 SandboxSpec::default(),
-            )),
+            ))),
             token: Arc::new("right-token".into()),
         };
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

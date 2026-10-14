@@ -263,3 +263,33 @@ async fn sandbox_exec_runs_against_real_sandboxd_when_available() {
     assert!(content.contains("ok"), "{content}");
     assert_turn_completed(&events);
 }
+
+#[tokio::test]
+async fn sandbox_exec_runs_against_real_gvisor_sandboxd_when_available() {
+    let Ok(sandboxd_url) = std::env::var("RUSTCHAT_E2E_GVISOR_SANDBOXD_URL") else {
+        eprintln!("skipping: RUSTCHAT_E2E_GVISOR_SANDBOXD_URL is not set");
+        return;
+    };
+    if sandboxd_url.trim().is_empty() {
+        eprintln!("skipping: RUSTCHAT_E2E_GVISOR_SANDBOXD_URL is empty");
+        return;
+    }
+
+    let env = TestEnvBuilder::new()
+        .sandbox_tool(true)
+        .script(script_with_tool(
+            r#"{"language":"python","code":"print('ok')"}"#,
+            ANSWER,
+        ))
+        .env("SANDBOXD_URL", &sandboxd_url)
+        .start()
+        .await
+        .unwrap();
+
+    let (_session, _conversation, events) = run_chat(&env).await;
+
+    let content = tool_result_content(&events);
+    assert!(content.contains("exit_code=0"), "{content}");
+    assert!(content.contains("ok"), "{content}");
+    assert_turn_completed(&events);
+}

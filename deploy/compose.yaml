@@ -171,6 +171,8 @@ services:
       # Mandatory: sandboxd refuses to start without it. Must match
       # chat-server's SANDBOXD_TOKEN.
       SANDBOXD_TOKEN: ${SANDBOXD_TOKEN:-}
+      SANDBOX_BACKEND: ${SANDBOX_BACKEND:-boxlite}
+      GVISOR_IMAGE_ROOT: ${GVISOR_IMAGE_ROOT:-/var/lib/rustchat/gvisor/images}
       BOXLITE_URL: ${BOXLITE_URL:-http://boxlite:8100}
       BOXLITE_TOKEN: ${BOXLITE_TOKEN:-}
       SANDBOX_IMAGE: ${SANDBOX_IMAGE:-python:3.12-slim}

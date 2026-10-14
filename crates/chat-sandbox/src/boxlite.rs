@@ -18,13 +18,13 @@ use crate::{
 };
 
 /// Maximum bytes captured per stream (stdout / stderr) before clipping.
-const MAX_OUTPUT_BYTES: usize = 1024 * 1024;
+pub(crate) const MAX_OUTPUT_BYTES: usize = 1024 * 1024;
 
 /// Maximum number of output files collected from a run.
-const MAX_OUTPUT_FILES: usize = 64;
+pub(crate) const MAX_OUTPUT_FILES: usize = 64;
 
 /// Maximum size of a single collected output file.
-const MAX_OUTPUT_FILE_BYTES: u64 = 8 * 1024 * 1024;
+pub(crate) const MAX_OUTPUT_FILE_BYTES: u64 = 8 * 1024 * 1024;
 
 /// Destination directory inside the box where the source and inputs land.
 const WORK_DIR: &str = "/app";
@@ -980,7 +980,7 @@ struct ControlFrame {
     exit_code: Option<i32>,
 }
 
-fn push_capped(buffer: &mut Vec<u8>, incoming: &[u8], truncated: &mut bool) {
+pub(crate) fn push_capped(buffer: &mut Vec<u8>, incoming: &[u8], truncated: &mut bool) {
     if buffer.len() >= MAX_OUTPUT_BYTES {
         *truncated = true;
         return;
@@ -1078,7 +1078,7 @@ fn decode_tar(bytes: &[u8]) -> Result<(Vec<SandboxFile>, Vec<RejectedFile>), San
 }
 
 /// Normalize a tar entry name into a safe workspace-relative path.
-fn normalize_entry_name(raw: &str) -> Option<String> {
+pub(crate) fn normalize_entry_name(raw: &str) -> Option<String> {
     let trimmed = raw.trim_start_matches("./").trim_start_matches('/');
     let without_root = trimmed.strip_prefix("app/").unwrap_or(trimmed);
     let without_dir = without_root.strip_prefix("output/").unwrap_or(without_root);

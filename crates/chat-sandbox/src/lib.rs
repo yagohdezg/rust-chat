@@ -1,13 +1,14 @@
 //! Pluggable sandbox for executing untrusted, model-generated code.
 //!
-//! BoxLite is the only execution backend: [`BoxliteBackend`] talks to a BoxLite
-//! server (`boxlite serve`) and runs each request in a hardware-isolated
-//! microVM. [`HttpSandboxBackend`] is a client for a remote `sandboxd` service,
-//! which in turn owns a [`BoxliteBackend`]. Callers depend only on
-//! [`SandboxBackend`].
+//! [`BoxliteBackend`] talks to a BoxLite server (`boxlite serve`) and runs each
+//! request in a hardware-isolated microVM; [`GvisorBackend`] runs a
+//! user-space-kernel sandbox locally with gVisor's `runsc`.
+//! [`HttpSandboxBackend`] is a client for a remote `sandboxd` service, which in
+//! turn owns one of those backends. Callers depend only on [`SandboxBackend`].
 
 pub mod boxlite;
 pub mod egress;
+pub mod gvisor;
 pub mod http;
 
 use std::collections::BTreeMap;
@@ -16,6 +17,7 @@ use serde::{Deserialize, Serialize};
 
 pub use boxlite::BoxliteBackend;
 pub use egress::{parse_egress_allow, validate_egress_allow};
+pub use gvisor::GvisorBackend;
 pub use http::HttpSandboxBackend;
 
 /// Name prefixes marking a BoxLite box as owned by this deployment.
